@@ -5,6 +5,7 @@ import os
 import hashlib
 import hmac
 import secrets
+import tempfile
 
 def get_secret(key, default=None):
     try:
@@ -129,6 +130,36 @@ def ensure_upgrade_schema():
         c.execute("INSERT OR IGNORE INTO team_history (team_id, season_id, group_name) VALUES (?, 23, ?)", (tid, grp))
     conn.commit()
     conn.close()
+
+def import_sqlite_db(upload_bytes):
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+    tmp.write(upload_bytes)
+    tmp.flush()
+    src = sqlite3.connect(tmp.name)
+    tgt = get_conn()
+    tables = [
+        "teams","players","matches","match_maps","match_stats_map","match_stats","agents","seasons","team_history"
+    ]
+    summary = {}
+    for t in tables:
+        try:
+            df = pd.read_sql(f"SELECT * FROM {t}", src)
+        except Exception:
+            continue
+        if df.empty:
+            continue
+        cols = [r[1] for r in tgt.execute(f"PRAGMA table_info({t})").fetchall()]
+        use = [c for c in df.columns if c in cols]
+        if not use:
+            continue
+        q = f"INSERT OR REPLACE INTO {t} (" + ",".join(use) + ") VALUES (" + ",".join(["?"]*len(use)) + ")"
+        vals = df[use].values.tolist()
+        tgt.executemany(q, vals)
+        summary[t] = len(vals)
+    tgt.commit()
+    src.close()
+    tgt.close()
+    return summary
 
 def hash_password(password, salt=None):
     if salt is None:
@@ -598,6 +629,14 @@ elif page == "Admin Panel":
     if not st.session_state.get('is_admin'):
         st.warning("Admin only")
     else:
+        st.subheader("Data Import")
+        up = st.file_uploader("Upload SQLite .db", type=["db","sqlite"])
+        if up and st.button("Import DB"):
+            res = import_sqlite_db(up.read())
+            st.success("Imported")
+            if res:
+                st.write(res)
+            st.rerun()
         st.subheader("Match Editor")
         conn = get_conn()
         weeks_df = pd.read_sql_query("SELECT DISTINCT week FROM matches ORDER BY week", conn)
