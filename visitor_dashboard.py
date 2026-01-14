@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import secrets
 import tempfile
+import os
 
 def get_secret(key, default=None):
     try:
@@ -179,6 +180,16 @@ def import_sqlite_db(upload_bytes):
     src.close()
     tgt.close()
     return summary
+
+def export_db_bytes():
+    p = os.path.abspath(DB_PATH)
+    try:
+        if os.path.exists(p):
+            with open(p, 'rb') as f:
+                return f.read()
+    except Exception:
+        return None
+    return None
 
 def reset_db():
     conn = get_conn()
@@ -688,6 +699,12 @@ elif page == "Admin Panel":
             if res:
                 st.write(res)
             st.rerun()
+        st.subheader("Data Export")
+        dbb = export_db_bytes()
+        if dbb:
+            st.download_button("Download DB", data=dbb, file_name=os.path.basename(DB_PATH) or "valorant_s23.db", mime="application/octet-stream")
+        else:
+            st.info("Database file not found")
         st.subheader("Match Editor")
         conn = get_conn()
         weeks_df = pd.read_sql_query("SELECT DISTINCT week FROM matches ORDER BY week", conn)
