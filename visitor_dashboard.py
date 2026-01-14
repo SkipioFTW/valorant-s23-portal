@@ -136,6 +136,7 @@ def ensure_upgrade_schema():
     ensure_column("matches", "format", "format TEXT")
     ensure_column("matches", "maps_played", "maps_played INTEGER DEFAULT 0")
     ensure_column("seasons", "is_active", "is_active BOOLEAN DEFAULT 0")
+    ensure_column("admins", "role", "role TEXT DEFAULT 'admin'")
     conn2 = get_conn()
     c2 = conn2.cursor()
     try:
@@ -310,6 +311,26 @@ def get_player_profile(player_id):
     lg_k = float(league['kills'].mean()) if not league.empty else 0.0
     lg_d = float(league['deaths'].mean()) if not league.empty else 0.0
     lg_a = float(league['assists'].mean()) if not league.empty else 0.0
+    trend = pd.DataFrame()
+    if not stats.empty:
+        conn2 = get_conn()
+        mmeta = pd.read_sql("SELECT id, week FROM matches", conn2)
+        conn2.close()
+        agg = stats.groupby('match_id').agg({'acs':'mean','kills':'sum','deaths':'sum'}).reset_index()
+        agg = agg.merge(mmeta, left_on='match_id', right_on='id', how='left')
+        agg['kda'] = agg['kills'] / agg['deaths'].replace(0, 1)
+        agg['label'] = agg.apply(lambda r: f"W{int(r['week'] or 0)}-M{int(r['match_id'])}", axis=1)
+        trend = agg[['label','avg_acs','kda']].rename(columns={'acs':'avg_acs'})
+    sub_impact = None
+    if not stats.empty:
+        s_sub = stats[stats['is_sub'] == 1]
+        s_sta = stats[stats['is_sub'] == 0]
+        sub_impact = {
+            'sub_acs': float(s_sub['acs'].mean()) if not s_sub.empty else 0.0,
+            'starter_acs': float(s_sta['acs'].mean()) if not s_sta.empty else 0.0,
+            'sub_kda': float((s_sub['kills'].sum() / max(s_sub['deaths'].sum(), 1))) if not s_sub.empty else 0.0,
+            'starter_kda': float((s_sta['kills'].sum() / max(s_sta['deaths'].sum(), 1))) if not s_sta.empty else 0.0,
+        }
     return {
         'info': info.iloc[0].to_dict(),
         'games': int(games),
@@ -327,6 +348,8 @@ def get_player_profile(player_id):
         'lg_d': round(lg_d, 1),
         'lg_a': round(lg_a, 1),
         'maps': stats,
+        'trend': trend,
+        'sub_impact': sub_impact,
     }
 def reset_db():
     conn = get_conn()
@@ -365,7 +388,8 @@ def admin_exists():
 def create_admin(username, password):
     salt, ph = hash_password(password)
     conn = get_conn()
-    conn.execute("INSERT INTO admins (username, password_hash, salt, is_active) VALUES (?, ?, ?, 1)", (username, ph, salt))
+    role = get_secret("ADMIN_SEED_ROLE", "admin") if not admin_exists() else "admin"
+    conn.execute("INSERT INTO admins (username, password_hash, salt, is_active, role) VALUES (?, ?, ?, 1, ?)", (username, ph, salt, role))
     conn.commit()
     conn.close()
 
@@ -567,6 +591,13 @@ with auth_box:
                     if authenticate(u, p) and hmac.compare_digest(tok or "", env_tok):
                         st.session_state['is_admin'] = True
                         st.session_state['username'] = u
+                        try:
+                            conn_r = get_conn()
+                            rrow = conn_r.execute("SELECT role FROM admins WHERE username=?", (u,)).fetchone()
+                            conn_r.close()
+                            st.session_state['role'] = (rrow[0] if rrow else 'admin')
+                        except Exception:
+                            st.session_state['role'] = 'admin'
                         st.success("Logged in")
                         st.rerun()
                     else:
@@ -743,6 +774,20 @@ elif page == "Player Leaderboard":
                         'League Avg': [prof['lg_avg_acs'], prof['lg_k'], prof['lg_d'], prof['lg_a']],
                     })
                     st.dataframe(cmp_df, hide_index=True, use_container_width=True)
+                    if 'trend' in prof and not prof['trend'].empty:
+                        st.caption("ACS trend")
+                        st.line_chart(prof['trend'].set_index('label')[['avg_acs']])
+                        st.caption("KDA trend")
+                        st.line_chart(prof['trend'].set_index('label')[['kda']])
+                    if 'sub_impact' in prof:
+                        sid = prof['sub_impact']
+                        sidf = pd.DataFrame({
+                            'Role': ['Starter','Sub'],
+                            'ACS': [sid['starter_acs'], sid['sub_acs']],
+                            'KDA': [sid['starter_kda'], sid['sub_kda']],
+                        })
+                        st.caption("Substitution impact")
+                        st.bar_chart(sidf.set_index('Role'))
                     if not prof['maps'].empty:
                         st.caption("Maps played")
                         st.dataframe(prof['maps'][['match_id','map_index','agent','acs','kills','deaths','assists','is_sub']], hide_index=True, use_container_width=True)
@@ -849,43 +894,44 @@ elif page == "Admin Panel":
     if not st.session_state.get('is_admin'):
         st.warning("Admin only")
     else:
-        st.subheader("Database Reset")
-        do_reset = st.checkbox("Confirm reset all tables")
-        if do_reset and st.button("Reset DB"):
-            reset_db()
-            st.success("Database reset")
-            st.rerun()
-        st.subheader("Data Import")
-        up = st.file_uploader("Upload SQLite .db", type=["db","sqlite"])
-        if up and st.button("Import DB"):
-            res = import_sqlite_db(up.read())
-            st.success("Imported")
-            if res:
-                st.write(res)
-            st.rerun()
-        st.subheader("Data Export")
-        dbb = export_db_bytes()
-        if dbb:
-            st.download_button("Download DB", data=dbb, file_name=os.path.basename(DB_PATH) or "valorant_s23.db", mime="application/octet-stream")
-        else:
-            st.info("Database file not found")
-        st.subheader("Cloud Backup")
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("Backup DB to GitHub"):
-                ok, msg = backup_db_to_github()
-                if ok:
-                    st.success("Backup complete")
-                else:
-                    st.error(msg)
-        with c2:
-            if st.button("Restore DB from GitHub"):
-                ok = restore_db_from_github()
-                if ok:
-                    st.success("Restore complete")
-                    st.rerun()
-                else:
-                    st.error("Restore failed")
+        if st.session_state.get('role', 'admin') == 'dev':
+            st.subheader("Database Reset")
+            do_reset = st.checkbox("Confirm reset all tables")
+            if do_reset and st.button("Reset DB"):
+                reset_db()
+                st.success("Database reset")
+                st.rerun()
+            st.subheader("Data Import")
+            up = st.file_uploader("Upload SQLite .db", type=["db","sqlite"])
+            if up and st.button("Import DB"):
+                res = import_sqlite_db(up.read())
+                st.success("Imported")
+                if res:
+                    st.write(res)
+                st.rerun()
+            st.subheader("Data Export")
+            dbb = export_db_bytes()
+            if dbb:
+                st.download_button("Download DB", data=dbb, file_name=os.path.basename(DB_PATH) or "valorant_s23.db", mime="application/octet-stream")
+            else:
+                st.info("Database file not found")
+            st.subheader("Cloud Backup")
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("Backup DB to GitHub"):
+                    ok, msg = backup_db_to_github()
+                    if ok:
+                        st.success("Backup complete")
+                    else:
+                        st.error(msg)
+            with c2:
+                if st.button("Restore DB from GitHub"):
+                    ok = restore_db_from_github()
+                    if ok:
+                        st.success("Restore complete")
+                        st.rerun()
+                    else:
+                        st.error("Restore failed")
         st.subheader("Match Editor")
         conn = get_conn()
         weeks_df = pd.read_sql_query("SELECT DISTINCT week FROM matches ORDER BY week", conn)
@@ -1063,21 +1109,22 @@ elif page == "Admin Panel":
         team_map = dict(zip(teams_list['name'], teams_list['id']))
         rvals = ["Unranked","Iron","Bronze","Silver","Gold","Platinum","Diamond","Ascendant","Immortal","Radiant"]
         rvals_all = sorted(list(set(rvals + players_df['rank'].dropna().unique().tolist())))
-        st.subheader("Add Player")
-        with st.form("add_player_admin"):
-            nm_new = st.text_input("Name")
-            rid_new = st.text_input("Riot ID")
-            rk_new = st.selectbox("Rank", rvals, index=0)
-            tmn_new = st.selectbox("Team", [""] + team_names, index=0)
-            add_ok = st.form_submit_button("Create Player")
-            if add_ok and nm_new:
-                conn_add = get_conn()
-                dtid_new = team_map.get(tmn_new) if tmn_new else None
-                conn_add.execute("INSERT INTO players (name, riot_id, rank, default_team_id) VALUES (?, ?, ?, ?)", (nm_new, rid_new, rk_new, dtid_new))
-                conn_add.commit()
-                conn_add.close()
-                st.success("Player added")
-                st.rerun()
+        if st.session_state.get('role', 'admin') == 'dev':
+            st.subheader("Add Player")
+            with st.form("add_player_admin"):
+                nm_new = st.text_input("Name")
+                rid_new = st.text_input("Riot ID")
+                rk_new = st.selectbox("Rank", rvals, index=0)
+                tmn_new = st.selectbox("Team", [""] + team_names, index=0)
+                add_ok = st.form_submit_button("Create Player")
+                if add_ok and nm_new:
+                    conn_add = get_conn()
+                    dtid_new = team_map.get(tmn_new) if tmn_new else None
+                    conn_add.execute("INSERT INTO players (name, riot_id, rank, default_team_id) VALUES (?, ?, ?, ?)", (nm_new, rid_new, rk_new, dtid_new))
+                    conn_add.commit()
+                    conn_add.close()
+                    st.success("Player added")
+                    st.rerun()
         cfa, cfb, cfc = st.columns([2,2,2])
         with cfa:
             tf = st.multiselect("Team", [""] + team_names, default=[""] + team_names)
@@ -1093,7 +1140,7 @@ elif page == "Admin Panel":
             fdf = fdf[fdf.apply(lambda r: s in str(r['name']).lower() or s in str(r['riot_id']).lower(), axis=1)]
         edited = st.data_editor(
             fdf,
-            num_rows="dynamic",
+            num_rows=("dynamic" if st.session_state.get('role', 'admin') == 'dev' else "fixed"),
             use_container_width=True,
             column_config={
                 "team": st.column_config.SelectboxColumn(options=[""] + team_names, required=False)
@@ -1104,11 +1151,12 @@ elif page == "Admin Panel":
             for _, row in edited.iterrows():
                 pid = row.get('id')
                 if pd.isna(pid):
-                    nm = row.get('name')
-                    rk = row.get('rank') or "Unranked"
-                    tmn = row.get('team') or None
-                    dtid = team_map.get(tmn) if tmn else None
-                    conn_up.execute("INSERT INTO players (name, riot_id, rank, default_team_id) VALUES (?, ?, ?, ?)", (nm, row.get('riot_id'), rk, dtid))
+                    if st.session_state.get('role', 'admin') == 'dev':
+                        nm = row.get('name')
+                        rk = row.get('rank') or "Unranked"
+                        tmn = row.get('team') or None
+                        dtid = team_map.get(tmn) if tmn else None
+                        conn_up.execute("INSERT INTO players (name, riot_id, rank, default_team_id) VALUES (?, ?, ?, ?)", (nm, row.get('riot_id'), rk, dtid))
                 else:
                     nm = row.get('name')
                     rk = row.get('rank') or "Unranked"
@@ -1149,6 +1197,14 @@ elif page == "Substitutions Log":
         st.info("No substitutions recorded.")
     else:
         st.dataframe(df, use_container_width=True, hide_index=True)
+        tcount = df.groupby('team').size().reset_index(name='subs')
+        tcount = tcount.sort_values('subs', ascending=False)
+        st.caption("Substitutions by team")
+        st.bar_chart(tcount.set_index('team'))
+        if 'week' in df.columns:
+            wcount = df.groupby('week').size().reset_index(name='subs')
+            st.caption("Substitutions per week")
+            st.line_chart(wcount.set_index('week'))
 
 elif page == "Player Profile":
     conn_pl = get_conn()
