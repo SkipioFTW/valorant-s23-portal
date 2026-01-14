@@ -7,6 +7,8 @@ import hmac
 import secrets
 import tempfile
 import os
+import base64
+import requests
 
 def get_secret(key, default=None):
     try:
@@ -190,6 +192,60 @@ def export_db_bytes():
     except Exception:
         return None
     return None
+
+def restore_db_from_github():
+    owner = get_secret("GH_OWNER")
+    repo = get_secret("GH_REPO")
+    path = get_secret("GH_DB_PATH")
+    branch = get_secret("GH_BRANCH", "main")
+    if not owner or not repo or not path:
+        return False
+    url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}"
+    try:
+        r = requests.get(url, timeout=15)
+        if r.status_code == 200 and r.content:
+            with open(DB_PATH, "wb") as f:
+                f.write(r.content)
+            return True
+    except Exception:
+        return False
+    return False
+
+def backup_db_to_github():
+    owner = get_secret("GH_OWNER")
+    repo = get_secret("GH_REPO")
+    path = get_secret("GH_DB_PATH")
+    branch = get_secret("GH_BRANCH", "main")
+    token = get_secret("GH_TOKEN")
+    if not owner or not repo or not path or not token:
+        return False, "Missing secrets"
+    url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+    sha = None
+    try:
+        gr = requests.get(url, headers=headers, params={"ref": branch}, timeout=15)
+        if gr.status_code == 200:
+            data = gr.json()
+            sha = data.get("sha")
+    except Exception:
+        pass
+    data_bytes = export_db_bytes()
+    if not data_bytes:
+        return False, "No DB data"
+    payload = {
+        "message": "Portal DB backup",
+        "content": base64.b64encode(data_bytes).decode("ascii"),
+        "branch": branch,
+    }
+    if sha:
+        payload["sha"] = sha
+    try:
+        pr = requests.put(url, headers=headers, json=payload, timeout=20)
+        if pr.status_code in [200, 201]:
+            return True, "Backed up"
+        return False, f"Error {pr.status_code}"
+    except Exception:
+        return False, "Request failed"
 
 def reset_db():
     conn = get_conn()
@@ -705,6 +761,23 @@ elif page == "Admin Panel":
             st.download_button("Download DB", data=dbb, file_name=os.path.basename(DB_PATH) or "valorant_s23.db", mime="application/octet-stream")
         else:
             st.info("Database file not found")
+        st.subheader("Cloud Backup")
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("Backup DB to GitHub"):
+                ok, msg = backup_db_to_github()
+                if ok:
+                    st.success("Backup complete")
+                else:
+                    st.error(msg)
+        with c2:
+            if st.button("Restore DB from GitHub"):
+                ok = restore_db_from_github()
+                if ok:
+                    st.success("Restore complete")
+                    st.rerun()
+                else:
+                    st.error("Restore failed")
         st.subheader("Match Editor")
         conn = get_conn()
         weeks_df = pd.read_sql_query("SELECT DISTINCT week FROM matches ORDER BY week", conn)
