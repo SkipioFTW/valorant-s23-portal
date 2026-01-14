@@ -53,10 +53,6 @@ def ensure_base_schema():
         default_team_id INTEGER,
         FOREIGN KEY(default_team_id) REFERENCES teams(id)
     )''')
-    try:
-        c.execute("ALTER TABLE players ADD COLUMN rank TEXT")
-    except sqlite3.OperationalError:
-        pass
     c.execute('''CREATE TABLE IF NOT EXISTS matches (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         week INTEGER,
@@ -99,6 +95,18 @@ def ensure_base_schema():
     conn.commit()
     conn.close()
 
+def ensure_column(table, column_name, column_def_sql):
+    conn = get_conn()
+    c = conn.cursor()
+    cols = [r[1] for r in c.execute(f"PRAGMA table_info({table})").fetchall()]
+    if column_name not in cols:
+        try:
+            c.execute(f"ALTER TABLE {table} ADD COLUMN {column_def_sql}")
+        except sqlite3.OperationalError:
+            pass
+    conn.commit()
+    conn.close()
+
 def ensure_upgrade_schema():
     conn = get_conn()
     c = conn.cursor()
@@ -118,18 +126,29 @@ def ensure_upgrade_schema():
         FOREIGN KEY(team_id) REFERENCES teams(id),
         FOREIGN KEY(season_id) REFERENCES seasons(id)
     )''')
-    try:
-        c.execute("ALTER TABLE teams ADD COLUMN logo_path TEXT")
-    except sqlite3.OperationalError:
-        pass
-    c.execute("INSERT OR IGNORE INTO seasons (id, name, is_active) VALUES (22, 'Season 22', 0)")
-    c.execute("INSERT OR IGNORE INTO seasons (id, name, is_active) VALUES (23, 'Season 23', 1)")
-    c.execute("SELECT id, group_name FROM teams")
-    teams = c.fetchall()
-    for tid, grp in teams:
-        c.execute("INSERT OR IGNORE INTO team_history (team_id, season_id, group_name) VALUES (?, 23, ?)", (tid, grp))
     conn.commit()
     conn.close()
+    ensure_column("teams", "logo_path", "logo_path TEXT")
+    ensure_column("players", "rank", "rank TEXT")
+    ensure_column("matches", "format", "format TEXT")
+    ensure_column("matches", "maps_played", "maps_played INTEGER DEFAULT 0")
+    ensure_column("seasons", "is_active", "is_active BOOLEAN DEFAULT 0")
+    conn2 = get_conn()
+    c2 = conn2.cursor()
+    try:
+        c2.execute("INSERT OR IGNORE INTO seasons (id, name, is_active) VALUES (22, 'Season 22', 0)")
+        c2.execute("INSERT OR IGNORE INTO seasons (id, name, is_active) VALUES (23, 'Season 23', 1)")
+    except Exception:
+        pass
+    try:
+        c2.execute("SELECT id, group_name FROM teams")
+        teams = c2.fetchall()
+        for tid, grp in teams:
+            c2.execute("INSERT OR IGNORE INTO team_history (team_id, season_id, group_name) VALUES (?, 23, ?)", (tid, grp))
+    except Exception:
+        pass
+    conn2.commit()
+    conn2.close()
 
 def import_sqlite_db(upload_bytes):
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
@@ -160,6 +179,23 @@ def import_sqlite_db(upload_bytes):
     src.close()
     tgt.close()
     return summary
+
+def reset_db():
+    conn = get_conn()
+    c = conn.cursor()
+    for t in [
+        "admins","match_stats_map","match_stats","match_maps","matches","players","teams","agents","team_history","seasons"
+    ]:
+        try:
+            c.execute(f"DROP TABLE IF EXISTS {t}")
+        except Exception:
+            pass
+    conn.commit()
+    conn.close()
+    ensure_base_schema()
+    init_admin_table()
+    init_match_stats_map_table()
+    ensure_upgrade_schema()
 
 def hash_password(password, salt=None):
     if salt is None:
@@ -240,7 +276,7 @@ def get_standings():
     conn = get_conn()
     try:
         teams_df = pd.read_sql_query("SELECT id, name, group_name, logo_path FROM teams", conn)
-        matches_df = pd.read_sql_query("SELECT * FROM matches WHERE status='completed'", conn)
+        matches_df = pd.read_sql_query("SELECT * FROM matches WHERE status='completed' AND (UPPER(format)='BO1' OR format IS NULL)", conn)
     except Exception:
         conn.close()
         return pd.DataFrame()
@@ -629,6 +665,12 @@ elif page == "Admin Panel":
     if not st.session_state.get('is_admin'):
         st.warning("Admin only")
     else:
+        st.subheader("Database Reset")
+        do_reset = st.checkbox("Confirm reset all tables")
+        if do_reset and st.button("Reset DB"):
+            reset_db()
+            st.success("Database reset")
+            st.rerun()
         st.subheader("Data Import")
         up = st.file_uploader("Upload SQLite .db", type=["db","sqlite"])
         if up and st.button("Import DB"):
@@ -720,8 +762,13 @@ elif page == "Admin Panel":
                     agents_df = pd.read_sql("SELECT name FROM agents ORDER BY name", conn_p)
                     existing = pd.read_sql("SELECT * FROM match_stats_map WHERE match_id=? AND map_index=? AND team_id=?", conn_p, params=(int(m['id']), map_idx, team_id))
                     conn_p.close()
+                    conn_all = get_conn()
+                    all_df = pd.read_sql("SELECT id, name FROM players ORDER BY name", conn_all)
+                    conn_all.close()
                     roster_list = roster_df['name'].tolist()
                     roster_map = dict(zip(roster_df['name'], roster_df['id']))
+                    global_list = all_df['name'].tolist()
+                    global_map = dict(zip(all_df['name'], all_df['id']))
                     agents_list = agents_df['name'].tolist()
                     rows = []
                     if not existing.empty:
@@ -758,7 +805,7 @@ elif page == "Admin Panel":
                         entries = []
                         for i, rowd in enumerate(rows):
                             c1,c2,c3,c4,c5,c6,c7,c8 = st.columns([2,1.2,2,2,1,1,1,1])
-                            psel = c1.selectbox(f"P{i}", roster_list + [""], index=(roster_list.index(rowd['player']) if rowd['player'] in roster_list else len(roster_list)), label_visibility="collapsed")
+                            psel = c1.selectbox(f"P{i}", global_list + [""], index=(global_list.index(rowd['player']) if rowd['player'] in global_list else len(global_list)), label_visibility="collapsed")
                             is_sub = c2.checkbox(f"S{i}", value=rowd['is_sub'], label_visibility="collapsed")
                             sf_sel = c3.selectbox(f"SF{i}", roster_list + [""], index=(roster_list.index(rowd['subbed_for']) if rowd['subbed_for'] in roster_list else (0 if roster_list else 0)), label_visibility="collapsed")
                             ag_sel = c4.selectbox(f"Ag{i}", agents_list + [""], index=(agents_list.index(rowd['agent']) if rowd['agent'] in agents_list else (0 if agents_list else 0)), label_visibility="collapsed")
@@ -767,7 +814,7 @@ elif page == "Admin Panel":
                             d = c7.number_input(f"D{i}", min_value=0, value=rowd['d'], label_visibility="collapsed")
                             a = c8.number_input(f"A{i}", min_value=0, value=rowd['a'], label_visibility="collapsed")
                             entries.append({
-                                'player_id': roster_map.get(psel),
+                                'player_id': global_map.get(psel),
                                 'is_sub': int(is_sub),
                                 'subbed_for_id': roster_map.get(sf_sel),
                                 'agent': ag_sel or None,
