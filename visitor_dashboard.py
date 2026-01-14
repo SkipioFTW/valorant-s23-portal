@@ -305,7 +305,7 @@ def get_player_profile(player_id):
     sr_avg_acs = float(same_rank['acs'].mean()) if not same_rank.empty else 0.0
     sr_k = float(same_rank['kills'].mean()) if not same_rank.empty else 0.0
     sr_d = float(same_rank['deaths'].mean()) if not same_rank.empty else 0.0
-    sr_a = float(same_rank['assists'].mean']) if not same_rank.empty else 0.0
+    sr_a = float(same_rank['assists'].mean()) if not same_rank.empty else 0.0
     lg_avg_acs = float(league['acs'].mean()) if not league.empty else 0.0
     lg_k = float(league['kills'].mean()) if not league.empty else 0.0
     lg_d = float(league['deaths'].mean()) if not league.empty else 0.0
