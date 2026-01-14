@@ -296,19 +296,19 @@ def get_standings():
             stats[t1]['RD'] += (s1 - s2)
             if s1 > s2:
                 stats[t1]['Wins'] += 1
-                stats[t1]['Points'] += 15
             else:
                 stats[t1]['Losses'] += 1
-                stats[t1]['Points'] += s1
         if t2 in stats:
             stats[t2]['Played'] += 1
             stats[t2]['RD'] += (s2 - s1)
             if s2 > s1:
                 stats[t2]['Wins'] += 1
-                stats[t2]['Points'] += 15
             else:
                 stats[t2]['Losses'] += 1
-                stats[t2]['Points'] += s2
+        if s1 > s2 and t1 in stats:
+            stats[t1]['Points'] += 3
+        elif s2 > s1 and t2 in stats:
+            stats[t2]['Points'] += 3
     standings = []
     for tid, data in stats.items():
         row = teams_df[teams_df['id'] == tid].iloc[0].to_dict()
@@ -324,16 +324,18 @@ def get_player_leaderboard():
     try:
         df = pd.read_sql_query(
             """
-            SELECT p.name, t.tag as team,
-                   COUNT(ms.id) as games,
-                   AVG(ms.acs) as avg_acs,
-                   SUM(ms.kills) as total_kills,
-                   SUM(ms.deaths) as total_deaths,
-                   SUM(ms.assists) as total_assists
-            FROM match_stats ms
-            JOIN players p ON ms.player_id = p.id
-            LEFT JOIN teams t ON ms.team_id = t.id
-            GROUP BY p.id
+            SELECT p.id as player_id,
+                   p.name,
+                   t.tag as team,
+                   COUNT(DISTINCT msm.match_id) as games,
+                   AVG(msm.acs) as avg_acs,
+                   SUM(msm.kills) as total_kills,
+                   SUM(msm.deaths) as total_deaths,
+                   SUM(msm.assists) as total_assists
+            FROM match_stats_map msm
+            JOIN players p ON msm.player_id = p.id
+            LEFT JOIN teams t ON msm.team_id = t.id
+            GROUP BY p.id, p.name, t.tag
             HAVING games > 0
             """,
             conn,
