@@ -281,6 +281,10 @@ def get_standings():
         conn.close()
         return pd.DataFrame()
     conn.close()
+    exclude_ids = set(teams_df[teams_df['name'].isin(['FAT1','FAT2'])]['id'].tolist())
+    if exclude_ids:
+        teams_df = teams_df[~teams_df['id'].isin(exclude_ids)]
+        matches_df = matches_df[~(matches_df['team1_id'].isin(exclude_ids) | matches_df['team2_id'].isin(exclude_ids))]
     stats = {}
     for _, row in teams_df.iterrows():
         stats[row['id']] = {'Wins': 0, 'Losses': 0, 'RD': 0, 'Points': 0, 'Played': 0}
@@ -581,13 +585,16 @@ elif page == "Players Directory":
     except Exception:
         players_df = pd.DataFrame(columns=['id','name','riot_id','rank','team'])
     conn.close()
-    ranks = ["Unranked", "Iron", "Bronze", "Silver", "Gold", "Platinum", "Diamond", "Ascendant", "Immortal", "Radiant"]
+    ranks_base = ["Unranked", "Iron", "Bronze", "Silver", "Gold", "Platinum", "Diamond", "Ascendant", "Immortal", "Radiant"]
+    dynamic_ranks = sorted(list(set(players_df['rank'].dropna().unique().tolist() + ranks_base)))
     c1, c2 = st.columns([2, 1])
     with c1:
-        rf = st.multiselect("Rank", ranks, default=ranks)
+        rf = st.multiselect("Rank", dynamic_ranks, default=dynamic_ranks)
     with c2:
         q = st.text_input("Search name or Riot ID")
-    out = players_df[players_df['rank'].isin(rf)]
+    out = players_df.copy()
+    out['rank'] = out['rank'].fillna("Unranked")
+    out = out[out['rank'].isin(rf)]
     if q:
         s = q.lower()
         out = out[out.apply(lambda r: s in str(r['name']).lower() or s in str(r['riot_id']).lower(), axis=1)]
@@ -791,7 +798,7 @@ elif page == "Admin Panel":
                                 'd': int(r['deaths'] or 0),
                                 'a': int(r['assists'] or 0),
                             })
-                    rows = rows or ([{'player': roster_list[i] if i < len(roster_list) else "", 'is_sub': False, 'subbed_for': roster_list[i] if i < len(roster_list) else "", 'agent': agents_list[0] if agents_list else "", 'acs': 0, 'k':0,'d':0,'a':0} for i in range(min(5, max(1,len(roster_list))))])
+                    rows = rows or ([{'player': (global_list[0] if global_list else ""), 'is_sub': False, 'subbed_for': roster_list[i] if i < len(roster_list) else "", 'agent': agents_list[0] if agents_list else "", 'acs': 0, 'k':0,'d':0,'a':0} for i in range(min(5, max(1,len(roster_list))))])
                     with st.form(f"sb_{team_key}_{map_idx}"):
                         h1,h2,h3,h4,h5,h6,h7,h8 = st.columns([2,1.2,2,2,1,1,1,1])
                         h1.write("Player")
@@ -855,11 +862,27 @@ elif page == "Admin Panel":
         team_names = teams_list['name'].tolist()
         team_map = dict(zip(teams_list['name'], teams_list['id']))
         rvals = ["Unranked","Iron","Bronze","Silver","Gold","Platinum","Diamond","Ascendant","Immortal","Radiant"]
+        rvals_all = sorted(list(set(rvals + players_df['rank'].dropna().unique().tolist())))
+        st.subheader("Add Player")
+        with st.form("add_player_admin"):
+            nm_new = st.text_input("Name")
+            rid_new = st.text_input("Riot ID")
+            rk_new = st.selectbox("Rank", rvals, index=0)
+            tmn_new = st.selectbox("Team", [""] + team_names, index=0)
+            add_ok = st.form_submit_button("Create Player")
+            if add_ok and nm_new:
+                conn_add = get_conn()
+                dtid_new = team_map.get(tmn_new) if tmn_new else None
+                conn_add.execute("INSERT INTO players (name, riot_id, rank, default_team_id) VALUES (?, ?, ?, ?)", (nm_new, rid_new, rk_new, dtid_new))
+                conn_add.commit()
+                conn_add.close()
+                st.success("Player added")
+                st.rerun()
         cfa, cfb, cfc = st.columns([2,2,2])
         with cfa:
             tf = st.multiselect("Team", [""] + team_names, default=[""] + team_names)
         with cfb:
-            rf = st.multiselect("Rank", rvals, default=rvals)
+            rf = st.multiselect("Rank", rvals_all, default=rvals_all)
         with cfc:
             q = st.text_input("Search")
         fdf = players_df.copy()
