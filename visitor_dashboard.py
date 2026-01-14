@@ -215,7 +215,10 @@ def get_standings():
         row = teams_df[teams_df['id'] == tid].iloc[0].to_dict()
         row.update(data)
         standings.append(row)
-    return pd.DataFrame(standings).sort_values(by=['Points', 'RD'], ascending=False)
+    df = pd.DataFrame(standings)
+    if df.empty:
+        return df
+    return df.sort_values(by=['Points', 'RD'], ascending=False)
 
 def get_player_leaderboard():
     conn = get_conn()
