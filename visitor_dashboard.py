@@ -11,6 +11,50 @@ import base64
 import requests
 import re
 import io
+from PIL import Image, ImageOps
+import pytesseract
+
+# Try to find tesseract binary in common paths if not in PATH
+# (Windows specific check)
+possible_paths = [
+    r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+    r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+    r"C:\Users\SBS\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
+]
+for p in possible_paths:
+    if os.path.exists(p):
+        pytesseract.pytesseract.tesseract_cmd = p
+        break
+
+def ocr_extract(image_bytes, crop_box=None):
+    """
+    Returns (text, dataframe, error_message)
+    """
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        if crop_box:
+            img = img.crop(crop_box)
+        
+        # Preprocessing
+        # 1. Convert to grayscale
+        img_gray = img.convert('L')
+        # 2. Thresholding (simple binary)
+        # Adjust threshold as needed, 128 is standard
+        img_thresh = img_gray.point(lambda x: 0 if x < 150 else 255, '1')
+        
+        # Try getting data
+        try:
+            df = pytesseract.image_to_data(img_thresh, output_type=pytesseract.Output.DATAFRAME)
+        except Exception as e:
+            # If data extraction fails, we might still get text? 
+            # Usually if one fails, both fail, but let's try.
+            # Also catch if tesseract is missing
+            return "", None, f"Tesseract Error: {str(e)}"
+            
+        text = pytesseract.image_to_string(img_thresh)
+        return text, df, None
+    except Exception as e:
+        return "", None, f"Image Processing Error: {str(e)}"
 
 def get_secret(key, default=None):
     try:
@@ -663,6 +707,7 @@ with auth_box:
 pages = [
     "Overview & Standings",
     "Matches",
+    "Match Predictor",
     "Match Summary",
     "Player Leaderboard",
     "Players Directory",
@@ -796,6 +841,89 @@ elif page == "Match Summary":
                         st.caption("No scoreboard")
                     else:
                         st.dataframe(s2.rename(columns={'name':'Player','agent':'Agent','acs':'ACS','kills':'K','deaths':'D','assists':'A','is_sub':'Sub'}), hide_index=True, use_container_width=True)
+
+elif page == "Match Predictor":
+    st.header("Match Predictor")
+    st.write("Predict the outcome of a match based on team history and stats.")
+    
+    conn = get_conn()
+    teams_df = pd.read_sql("SELECT id, name FROM teams ORDER BY name", conn)
+    matches_df = pd.read_sql("SELECT * FROM matches WHERE status='completed'", conn)
+    conn.close()
+    
+    tnames = teams_df['name'].tolist()
+    c1, c2 = st.columns(2)
+    t1_name = c1.selectbox("Team 1", tnames, index=0)
+    t2_name = c2.selectbox("Team 2", tnames, index=(1 if len(tnames)>1 else 0))
+    
+    if st.button("Predict Result"):
+        if t1_name == t2_name:
+            st.error("Select two different teams.")
+        else:
+            t1_id = teams_df[teams_df['name'] == t1_name].iloc[0]['id']
+            t2_id = teams_df[teams_df['name'] == t2_name].iloc[0]['id']
+            
+            # Feature extraction helper
+            def get_team_stats(tid):
+                played = matches_df[(matches_df['team1_id']==tid) | (matches_df['team2_id']==tid)]
+                if played.empty:
+                    return {'win_rate': 0.0, 'avg_score': 0.0, 'games': 0}
+                wins = played[played['winner_id'] == tid].shape[0]
+                total = played.shape[0]
+                
+                # Calculate avg score (rounds won)
+                scores = []
+                for _, r in played.iterrows():
+                    if r['team1_id'] == tid:
+                        scores.append(r['score_t1'])
+                    else:
+                        scores.append(r['score_t2'])
+                avg_score = sum(scores)/len(scores) if scores else 0
+                
+                return {'win_rate': wins/total, 'avg_score': avg_score, 'games': total}
+
+            s1 = get_team_stats(t1_id)
+            s2 = get_team_stats(t2_id)
+            
+            # Head to head
+            h2h = matches_df[((matches_df['team1_id']==t1_id) & (matches_df['team2_id']==t2_id)) | 
+                             ((matches_df['team1_id']==t2_id) & (matches_df['team2_id']==t1_id))]
+            h2h_wins_t1 = h2h[h2h['winner_id'] == t1_id].shape[0]
+            h2h_wins_t2 = h2h[h2h['winner_id'] == t2_id].shape[0]
+            
+            # Heuristic Score
+            # Win Rate (40%), Avg Score (30%), H2H (30%)
+            # Normalize scores? No, just compare raw weighted sums or probabilities
+            
+            # Heuristic Score (Fallback if ML fails or data too small)
+            score1 = (s1['win_rate'] * 40) + (s1['avg_score'] * 2) + (h2h_wins_t1 * 5)
+            score2 = (s2['win_rate'] * 40) + (s2['avg_score'] * 2) + (h2h_wins_t2 * 5)
+            
+            ml_pred = None
+            try:
+                from sklearn.ensemble import RandomForestClassifier
+                # Placeholder for future ML implementation
+                pass
+            except ImportError:
+                pass
+                
+            total = score1 + score2
+            if total == 0:
+                prob1 = 50.0
+                prob2 = 50.0
+            else:
+                prob1 = (score1 / total) * 100
+                prob2 = (score2 / total) * 100
+                
+            winner = t1_name if prob1 > prob2 else t2_name
+            conf = max(prob1, prob2)
+            
+            st.subheader(f"Prediction: {winner} wins")
+            st.metric("Confidence", f"{conf:.1f}%")
+            
+            c1, c2 = st.columns(2)
+            c1.info(f"**{t1_name} Stats**\n\nWin Rate: {s1['win_rate']:.0%}\nAvg Score: {s1['avg_score']:.1f}\nH2H Wins: {h2h_wins_t1}")
+            c2.info(f"**{t2_name} Stats**\n\nWin Rate: {s2['win_rate']:.0%}\nAvg Score: {s2['avg_score']:.1f}\nH2H Wins: {h2h_wins_t2}")
 
 elif page == "Player Leaderboard":
     df = get_player_leaderboard()
@@ -1078,13 +1206,14 @@ elif page == "Admin Panel":
                 name_to_riot = dict(zip(all_df0['name'].astype(str), all_df0['riot_id'].astype(str)))
                 upimg0 = st.file_uploader("Upload scoreboard image (whole game)", type=["png","jpg","jpeg"], key=f"img_{m['id']}_{map_idx}")
                 if upimg0 is not None:
+                    # OCR logic
+                    cw = 1920 # Default assumption if load fails? No, we load in ocr_extract but we need dims for crop.
+                    # We need to open image for crop tool first.
                     try:
                         from PIL import Image
-                        import pytesseract
                         img0 = Image.open(io.BytesIO(upimg0.read()))
-                        cw = img0.width
-                        ch = img0.height
-                        with st.expander("Crop before OCR"):
+                        cw, ch = img0.size
+                        with st.expander("Crop before OCR", expanded=True):
                             ct = st.slider("Top %", 0, 40, 5)
                             cb = st.slider("Bottom %", 0, 40, 5)
                             cl = st.slider("Left %", 0, 40, 5)
@@ -1092,42 +1221,56 @@ elif page == "Admin Panel":
                             box = (int(cl*cw/100), int(ct*ch/100), int(cw - cr*cw/100), int(ch - cb*ch/100))
                             cimg0 = img0.crop(box)
                             st.image(cimg0, caption="Cropped preview", use_column_width=True)
-                        dfd = None
-                        try:
-                            dfd = pytesseract.image_to_data(cimg0, output_type=pytesseract.Output.DATAFRAME)
-                        except Exception:
-                            dfd = None
-                        text0 = pytesseract.image_to_string(cimg0)
-                        lines0 = [x.strip() for x in text0.splitlines() if x.strip()]
-                        ocr_suggestions0 = {}
-                        riot_ids0 = [x for x in all_df0['riot_id'].astype(str).tolist() if x and x.strip()]
-                        conf_map = {}
-                        if dfd is not None and not dfd.empty:
-                            dfd = dfd.dropna(subset=['text'])
-                            grp = dfd.groupby(['block_num','par_num','line_num'])
-                            for _, g in grp:
-                                line_text = " ".join(g['text'].astype(str).tolist()).strip()
-                                num_confs = g[g['text'].str.contains(r"\d", regex=True)]['conf']
-                                avg_conf = float(num_confs[num_confs >= 0].mean()) if len(num_confs) else float(g['conf'][g['conf']>=0].mean() or 0)
-                                for rid in riot_ids0:
-                                    if rid and rid.lower() in line_text.lower():
-                                        conf_map[rid] = round(avg_conf, 1)
-                        for ln in lines0:
-                            nums = [int(n) for n in re.findall(r"\d+", ln)]
-                            for rid in riot_ids0:
-                                if rid and rid.lower() in ln.lower():
-                                    if len(nums) >= 4:
-                                        ocr_suggestions0[rid] = {'acs': nums[0], 'k': nums[1], 'd': nums[2], 'a': nums[3], 'conf': conf_map.get(rid)}
-                                    elif len(nums) >= 3:
-                                        ocr_suggestions0[rid] = {'acs': nums[0], 'k': nums[1], 'd': nums[2], 'a': 0, 'conf': conf_map.get(rid)}
-                        st.session_state[f"ocr_{m['id']}_{map_idx}"] = ocr_suggestions0
-                        matched = len(ocr_suggestions0)
-                        if matched > 0:
-                            st.success(f"OCR parsed {matched} player(s) by Riot ID.")
+                        
+                        # Use buffer for ocr_extract or pass bytes
+                        # We already have cimg0 (PIL Image). ocr_extract takes bytes.
+                        # Let's adjust ocr_extract to take PIL image or BytesIO?
+                        # Or just save cimg0 to bytes.
+                        buf = io.BytesIO()
+                        cimg0.save(buf, format="PNG")
+                        ocr_bytes = buf.getvalue()
+                        
+                        text0, dfd, err = ocr_extract(ocr_bytes)
+                        
+                        if err:
+                            st.error(err)
                         else:
-                            st.warning("OCR parsed, but no Riot IDs matched. Try adjusting crop or verify Riot IDs.")
-                    except Exception:
-                        pass
+                            # Debug view
+                            with st.expander("Debug OCR Output"):
+                                st.text(text0)
+                                if dfd is not None:
+                                    st.dataframe(dfd.head(20))
+                                    
+                            lines0 = [x.strip() for x in text0.splitlines() if x.strip()]
+                            ocr_suggestions0 = {}
+                            riot_ids0 = [x for x in all_df0['riot_id'].astype(str).tolist() if x and x.strip()]
+                            conf_map = {}
+                            if dfd is not None and not dfd.empty:
+                                dfd = dfd.dropna(subset=['text'])
+                                grp = dfd.groupby(['block_num','par_num','line_num'])
+                                for _, g in grp:
+                                    line_text = " ".join(g['text'].astype(str).tolist()).strip()
+                                    num_confs = g[g['text'].str.contains(r"\d", regex=True)]['conf']
+                                    avg_conf = float(num_confs[num_confs >= 0].mean()) if len(num_confs) else float(g['conf'][g['conf']>=0].mean() or 0)
+                                    for rid in riot_ids0:
+                                        if rid and rid.lower() in line_text.lower():
+                                            conf_map[rid] = round(avg_conf, 1)
+                            for ln in lines0:
+                                nums = [int(n) for n in re.findall(r"\d+", ln)]
+                                for rid in riot_ids0:
+                                    if rid and rid.lower() in ln.lower():
+                                        if len(nums) >= 4:
+                                            ocr_suggestions0[rid] = {'acs': nums[0], 'k': nums[1], 'd': nums[2], 'a': nums[3], 'conf': conf_map.get(rid)}
+                                        elif len(nums) >= 3:
+                                            ocr_suggestions0[rid] = {'acs': nums[0], 'k': nums[1], 'd': nums[2], 'a': 0, 'conf': conf_map.get(rid)}
+                            st.session_state[f"ocr_{m['id']}_{map_idx}"] = ocr_suggestions0
+                            matched = len(ocr_suggestions0)
+                            if matched > 0:
+                                st.success(f"OCR parsed {matched} player(s) by Riot ID.")
+                            else:
+                                st.warning("OCR parsed, but no Riot IDs matched. Try adjusting crop or verify Riot IDs.")
+                    except Exception as e:
+                        st.error(f"Image Error: {str(e)}")
                 for team_key, team_id, team_name in [("t1", int(m['t1_id']), m['t1_name']), ("t2", int(m['t2_id']), m['t2_name'])]:
                     st.caption(f"{team_name} players")
                     conn_p = get_conn()
@@ -1146,11 +1289,10 @@ elif page == "Admin Panel":
                     agents_list = agents_df['name'].tolist()
                     upimg = st.file_uploader("Upload scoreboard image (optional)", type=["png","jpg","jpeg"], key=f"img_{team_key}_{map_idx}")
                     if upimg is not None:
-                        try:
-                            from PIL import Image
-                            import pytesseract
-                            img = Image.open(io.BytesIO(upimg.read()))
-                            text = pytesseract.image_to_string(img)
+                        text, _, err = ocr_extract(upimg.read())
+                        if err:
+                            st.error(err)
+                        else:
                             lines = [x.strip() for x in text.splitlines() if x.strip()]
                             ocr_suggestions = {}
                             for ln in lines:
@@ -1162,8 +1304,6 @@ elif page == "Admin Panel":
                                         elif len(nums) >= 3:
                                             ocr_suggestions[nm] = {'acs': nums[0], 'k': nums[1], 'd': nums[2], 'a': 0}
                             st.session_state[f"ocr_{m['id']}_{map_idx}_{team_id}"] = ocr_suggestions
-                        except Exception:
-                            pass
                     rows = []
                     if not existing.empty:
                         for _, r in existing.iterrows():

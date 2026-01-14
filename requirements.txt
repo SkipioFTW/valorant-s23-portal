@@ -1,2 +1,5 @@
 streamlit
 pandas
+scikit-learn
+Pillow
+pytesseract
