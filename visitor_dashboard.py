@@ -1133,7 +1133,7 @@ elif page == "Admin Panel":
                     conn_p = get_conn()
                     roster_df = pd.read_sql("SELECT id, name, riot_id FROM players WHERE default_team_id=? ORDER BY name", conn_p, params=(team_id,))
                     agents_df = pd.read_sql("SELECT name FROM agents ORDER BY name", conn_p)
-                    existing = pd.read_sql("SELECT * FROM match_stats_map WHERE match_id=? AND map_index=? AND team_id?", conn_p, params=(int(m['id']), map_idx, team_id))
+                    existing = pd.read_sql("SELECT * FROM match_stats_map WHERE match_id=? AND map_index=? AND team_id=?", conn_p, params=(int(m['id']), map_idx, team_id))
                     conn_p.close()
                     conn_all = get_conn()
                     all_df = pd.read_sql("SELECT id, name, riot_id FROM players ORDER BY name", conn_all)
