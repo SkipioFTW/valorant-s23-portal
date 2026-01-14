@@ -48,9 +48,14 @@ def ensure_base_schema():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT UNIQUE,
         riot_id TEXT,
+        rank TEXT,
         default_team_id INTEGER,
         FOREIGN KEY(default_team_id) REFERENCES teams(id)
     )''')
+    try:
+        c.execute("ALTER TABLE players ADD COLUMN rank TEXT")
+    except sqlite3.OperationalError:
+        pass
     c.execute('''CREATE TABLE IF NOT EXISTS matches (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         week INTEGER,
@@ -66,6 +71,29 @@ def ensure_base_schema():
         FOREIGN KEY(team1_id) REFERENCES teams(id),
         FOREIGN KEY(team2_id) REFERENCES teams(id),
         FOREIGN KEY(winner_id) REFERENCES teams(id)
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS match_maps (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        match_id INTEGER NOT NULL,
+        map_index INTEGER NOT NULL,
+        map_name TEXT,
+        team1_rounds INTEGER,
+        team2_rounds INTEGER,
+        winner_id INTEGER
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS match_stats (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        match_id INTEGER NOT NULL,
+        player_id INTEGER NOT NULL,
+        team_id INTEGER,
+        acs INTEGER,
+        kills INTEGER,
+        deaths INTEGER,
+        assists INTEGER
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS agents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT UNIQUE
     )''')
     conn.commit()
     conn.close()
@@ -222,22 +250,26 @@ def get_standings():
 
 def get_player_leaderboard():
     conn = get_conn()
-    df = pd.read_sql_query(
-        """
-        SELECT p.name, t.tag as team,
-               COUNT(ms.id) as games,
-               AVG(ms.acs) as avg_acs,
-               SUM(ms.kills) as total_kills,
-               SUM(ms.deaths) as total_deaths,
-               SUM(ms.assists) as total_assists
-        FROM match_stats ms
-        JOIN players p ON ms.player_id = p.id
-        LEFT JOIN teams t ON ms.team_id = t.id
-        GROUP BY p.id
-        HAVING games > 0
-        """,
-        conn,
-    )
+    try:
+        df = pd.read_sql_query(
+            """
+            SELECT p.name, t.tag as team,
+                   COUNT(ms.id) as games,
+                   AVG(ms.acs) as avg_acs,
+                   SUM(ms.kills) as total_kills,
+                   SUM(ms.deaths) as total_deaths,
+                   SUM(ms.assists) as total_assists
+            FROM match_stats ms
+            JOIN players p ON ms.player_id = p.id
+            LEFT JOIN teams t ON ms.team_id = t.id
+            GROUP BY p.id
+            HAVING games > 0
+            """,
+            conn,
+        )
+    except Exception:
+        conn.close()
+        return pd.DataFrame()
     conn.close()
     if not df.empty:
         df['kd_ratio'] = df['total_kills'] / df['total_deaths'].replace(0, 1)
@@ -469,15 +501,18 @@ elif page == "Player Leaderboard":
 
 elif page == "Players Directory":
     conn = get_conn()
-    players_df = pd.read_sql(
-        """
-        SELECT p.id, p.name, p.riot_id, p.rank, t.name AS team
-        FROM players p
-        LEFT JOIN teams t ON p.default_team_id = t.id
-        ORDER BY p.name
-        """,
-        conn,
-    )
+    try:
+        players_df = pd.read_sql(
+            """
+            SELECT p.id, p.name, p.riot_id, p.rank, t.name AS team
+            FROM players p
+            LEFT JOIN teams t ON p.default_team_id = t.id
+            ORDER BY p.name
+            """,
+            conn,
+        )
+    except Exception:
+        players_df = pd.DataFrame(columns=['id','name','riot_id','rank','team'])
     conn.close()
     ranks = ["Unranked", "Iron", "Bronze", "Silver", "Gold", "Platinum", "Diamond", "Ascendant", "Immortal", "Radiant"]
     c1, c2 = st.columns([2, 1])
