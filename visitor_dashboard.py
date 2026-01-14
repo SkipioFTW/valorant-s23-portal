@@ -247,6 +247,87 @@ def backup_db_to_github():
     except Exception:
         return False, "Request failed"
 
+def get_substitutions_log():
+    conn = get_conn()
+    try:
+        df = pd.read_sql(
+            """
+            SELECT msm.match_id, msm.map_index, m.week, m.group_name,
+                   t.name AS team, p.name AS player, sp.name AS subbed_for,
+                   msm.agent, msm.acs, msm.kills, msm.deaths, msm.assists
+            FROM match_stats_map msm
+            JOIN matches m ON msm.match_id = m.id
+            LEFT JOIN teams t ON msm.team_id = t.id
+            LEFT JOIN players p ON msm.player_id = p.id
+            LEFT JOIN players sp ON msm.subbed_for_id = sp.id
+            WHERE msm.is_sub = 1
+            ORDER BY m.week, msm.match_id, msm.map_index
+            """,
+            conn,
+        )
+    except Exception:
+        conn.close()
+        return pd.DataFrame()
+    conn.close()
+    return df
+
+def get_player_profile(player_id):
+    conn = get_conn()
+    info = pd.read_sql(
+        "SELECT p.id, p.name, p.rank, t.tag as team FROM players p LEFT JOIN teams t ON p.default_team_id=t.id WHERE p.id=?",
+        conn,
+        params=(int(player_id),),
+    )
+    stats = pd.read_sql(
+        "SELECT match_id, map_index, agent, acs, kills, deaths, assists, is_sub FROM match_stats_map WHERE player_id=?",
+        conn,
+        params=(int(player_id),),
+    )
+    league = pd.read_sql(
+        "SELECT msm.player_id, msm.acs, msm.kills, msm.deaths, msm.assists FROM match_stats_map msm",
+        conn,
+    )
+    rank_df = pd.read_sql(
+        "SELECT p.id as player_id, p.rank, msm.acs, msm.kills, msm.deaths, msm.assists FROM match_stats_map msm JOIN players p ON msm.player_id=p.id",
+        conn,
+    )
+    conn.close()
+    if info.empty:
+        return {}
+    rank_val = info.iloc[0]['rank']
+    games = stats['match_id'].nunique() if not stats.empty else 0
+    avg_acs = float(stats['acs'].mean()) if not stats.empty else 0.0
+    total_k = int(stats['kills'].sum()) if not stats.empty else 0
+    total_d = int(stats['deaths'].sum()) if not stats.empty else 0
+    total_a = int(stats['assists'].sum()) if not stats.empty else 0
+    kd = (total_k / (total_d if total_d != 0 else 1)) if not stats.empty else 0.0
+    same_rank = rank_df[rank_df['rank'] == rank_val] if not rank_df.empty else pd.DataFrame()
+    sr_avg_acs = float(same_rank['acs'].mean()) if not same_rank.empty else 0.0
+    sr_k = float(same_rank['kills'].mean()) if not same_rank.empty else 0.0
+    sr_d = float(same_rank['deaths'].mean()) if not same_rank.empty else 0.0
+    sr_a = float(same_rank['assists'].mean']) if not same_rank.empty else 0.0
+    lg_avg_acs = float(league['acs'].mean()) if not league.empty else 0.0
+    lg_k = float(league['kills'].mean()) if not league.empty else 0.0
+    lg_d = float(league['deaths'].mean()) if not league.empty else 0.0
+    lg_a = float(league['assists'].mean()) if not league.empty else 0.0
+    return {
+        'info': info.iloc[0].to_dict(),
+        'games': int(games),
+        'avg_acs': round(avg_acs, 1),
+        'total_kills': total_k,
+        'total_deaths': total_d,
+        'total_assists': total_a,
+        'kd_ratio': round(kd, 2),
+        'sr_avg_acs': round(sr_avg_acs, 1),
+        'sr_k': round(sr_k, 1),
+        'sr_d': round(sr_d, 1),
+        'sr_a': round(sr_a, 1),
+        'lg_avg_acs': round(lg_avg_acs, 1),
+        'lg_k': round(lg_k, 1),
+        'lg_d': round(lg_d, 1),
+        'lg_a': round(lg_a, 1),
+        'maps': stats,
+    }
 def reset_db():
     conn = get_conn()
     c = conn.cursor()
@@ -504,6 +585,8 @@ pages = [
     "Player Leaderboard",
     "Players Directory",
     "Teams",
+    "Substitutions Log",
+    "Player Profile",
 ]
 if st.session_state['is_admin']:
     pages.append("Admin Panel")
@@ -638,6 +721,31 @@ elif page == "Player Leaderboard":
         st.info("No player stats yet.")
     else:
         st.dataframe(df, use_container_width=True, hide_index=True)
+        names = df['name'].tolist()
+        sel = st.selectbox("View player profile", names) if names else None
+        if sel:
+            conn_pp = get_conn()
+            pid_row = pd.read_sql("SELECT id FROM players WHERE name=?", conn_pp, params=(sel,))
+            conn_pp.close()
+            if not pid_row.empty:
+                prof = get_player_profile(int(pid_row.iloc[0]['id']))
+                if prof:
+                    st.subheader(f"{prof['info'].get('name')} • {prof['info'].get('team') or ''}")
+                    c1,c2,c3,c4 = st.columns(4)
+                    c1.metric("Games", prof['games'])
+                    c2.metric("Avg ACS", prof['avg_acs'])
+                    c3.metric("KD", prof['kd_ratio'])
+                    c4.metric("Assists", prof['total_assists'])
+                    cmp_df = pd.DataFrame({
+                        'Metric': ['ACS','Kills','Deaths','Assists'],
+                        'Player': [prof['avg_acs'], prof['total_kills']/max(prof['games'],1), prof['total_deaths']/max(prof['games'],1), prof['total_assists']/max(prof['games'],1)],
+                        'Rank Avg': [prof['sr_avg_acs'], prof['sr_k'], prof['sr_d'], prof['sr_a']],
+                        'League Avg': [prof['lg_avg_acs'], prof['lg_k'], prof['lg_d'], prof['lg_a']],
+                    })
+                    st.dataframe(cmp_df, hide_index=True, use_container_width=True)
+                    if not prof['maps'].empty:
+                        st.caption("Maps played")
+                        st.dataframe(prof['maps'][['match_id','map_index','agent','acs','kills','deaths','assists','is_sub']], hide_index=True, use_container_width=True)
 
 elif page == "Players Directory":
     conn = get_conn()
@@ -1034,3 +1142,37 @@ elif page == "Admin Panel":
             conn_ins.close()
             st.success("Match added")
             st.rerun()
+
+elif page == "Substitutions Log":
+    df = get_substitutions_log()
+    if df.empty:
+        st.info("No substitutions recorded.")
+    else:
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+elif page == "Player Profile":
+    conn_pl = get_conn()
+    players_df = pd.read_sql("SELECT id, name FROM players ORDER BY name", conn_pl)
+    conn_pl.close()
+    opts = players_df['name'].tolist()
+    sel = st.selectbox("Player", opts) if opts else None
+    if sel:
+        pid = int(players_df[players_df['name'] == sel].iloc[0]['id'])
+        prof = get_player_profile(pid)
+        if prof:
+            st.subheader(f"{prof['info'].get('name')} • {prof['info'].get('team') or ''}")
+            c1,c2,c3,c4 = st.columns(4)
+            c1.metric("Games", prof['games'])
+            c2.metric("Avg ACS", prof['avg_acs'])
+            c3.metric("KD", prof['kd_ratio'])
+            c4.metric("Assists", prof['total_assists'])
+            cmp_df = pd.DataFrame({
+                'Metric': ['ACS','Kills','Deaths','Assists'],
+                'Player': [prof['avg_acs'], prof['total_kills']/max(prof['games'],1), prof['total_deaths']/max(prof['games'],1), prof['total_assists']/max(prof['games'],1)],
+                'Rank Avg': [prof['sr_avg_acs'], prof['sr_k'], prof['sr_d'], prof['sr_a']],
+                'League Avg': [prof['lg_avg_acs'], prof['lg_k'], prof['lg_d'], prof['lg_a']],
+            })
+            st.dataframe(cmp_df, hide_index=True, use_container_width=True)
+            if not prof['maps'].empty:
+                st.caption("Maps played")
+                st.dataframe(prof['maps'][['match_id','map_index','agent','acs','kills','deaths','assists','is_sub']], hide_index=True, use_container_width=True)
