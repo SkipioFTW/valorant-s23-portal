@@ -9,6 +9,8 @@ import tempfile
 import os
 import base64
 import requests
+import re
+import io
 
 def get_secret(key, default=None):
     try:
@@ -594,6 +596,22 @@ st.set_page_config(page_title="S23 Portal", layout="wide")
 
 st.title("Valorant S23 • Portal")
 
+st.markdown(
+    """
+    <link href='https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Rajdhani:wght@400;600&display=swap' rel='stylesheet'>
+    <style>
+    .stApp { background: radial-gradient(ellipse at top,#0b1f2a,#08141c); color:#e6f4ff; }
+    h1,h2,h3 { font-family: 'Orbitron', sans-serif; letter-spacing: 0.5px; color: #5bc0ff; }
+    .block-container { padding-top: 1rem; }
+    .stButton>button { background-color:#0d2a3a; border:1px solid #5bc0ff; color:#e6f4ff; }
+    .stDownloadButton>button { background-color:#0d2a3a; border:1px solid #5bc0ff; color:#e6f4ff; }
+    .stFileUploader { color:#e6f4ff; }
+    .stSelectbox, .stTextInput, .stNumberInput { color:#e6f4ff; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 ensure_base_schema()
 init_admin_table()
 init_match_stats_map_table()
@@ -1054,32 +1072,111 @@ elif page == "Admin Panel":
                 st.subheader("Per-Map Scoreboard")
                 map_choice = st.selectbox("Select Map", list(range(1, max_maps+1)), index=0)
                 map_idx = map_choice - 1
+                conn_all0 = get_conn()
+                all_df0 = pd.read_sql("SELECT id, name, riot_id FROM players ORDER BY name", conn_all0)
+                conn_all0.close()
+                name_to_riot = dict(zip(all_df0['name'].astype(str), all_df0['riot_id'].astype(str)))
+                upimg0 = st.file_uploader("Upload scoreboard image (whole game)", type=["png","jpg","jpeg"], key=f"img_{m['id']}_{map_idx}")
+                if upimg0 is not None:
+                    try:
+                        from PIL import Image
+                        import pytesseract
+                        img0 = Image.open(io.BytesIO(upimg0.read()))
+                        cw = img0.width
+                        ch = img0.height
+                        with st.expander("Crop before OCR"):
+                            ct = st.slider("Top %", 0, 40, 5)
+                            cb = st.slider("Bottom %", 0, 40, 5)
+                            cl = st.slider("Left %", 0, 40, 5)
+                            cr = st.slider("Right %", 0, 40, 5)
+                            box = (int(cl*cw/100), int(ct*ch/100), int(cw - cr*cw/100), int(ch - cb*ch/100))
+                            cimg0 = img0.crop(box)
+                            st.image(cimg0, caption="Cropped preview", use_column_width=True)
+                        dfd = None
+                        try:
+                            dfd = pytesseract.image_to_data(cimg0, output_type=pytesseract.Output.DATAFRAME)
+                        except Exception:
+                            dfd = None
+                        text0 = pytesseract.image_to_string(cimg0)
+                        lines0 = [x.strip() for x in text0.splitlines() if x.strip()]
+                        ocr_suggestions0 = {}
+                        riot_ids0 = [x for x in all_df0['riot_id'].astype(str).tolist() if x and x.strip()]
+                        conf_map = {}
+                        if dfd is not None and not dfd.empty:
+                            dfd = dfd.dropna(subset=['text'])
+                            grp = dfd.groupby(['block_num','par_num','line_num'])
+                            for _, g in grp:
+                                line_text = " ".join(g['text'].astype(str).tolist()).strip()
+                                num_confs = g[g['text'].str.contains(r"\d", regex=True)]['conf']
+                                avg_conf = float(num_confs[num_confs >= 0].mean()) if len(num_confs) else float(g['conf'][g['conf']>=0].mean() or 0)
+                                for rid in riot_ids0:
+                                    if rid and rid.lower() in line_text.lower():
+                                        conf_map[rid] = round(avg_conf, 1)
+                        for ln in lines0:
+                            nums = [int(n) for n in re.findall(r"\d+", ln)]
+                            for rid in riot_ids0:
+                                if rid and rid.lower() in ln.lower():
+                                    if len(nums) >= 4:
+                                        ocr_suggestions0[rid] = {'acs': nums[0], 'k': nums[1], 'd': nums[2], 'a': nums[3], 'conf': conf_map.get(rid)}
+                                    elif len(nums) >= 3:
+                                        ocr_suggestions0[rid] = {'acs': nums[0], 'k': nums[1], 'd': nums[2], 'a': 0, 'conf': conf_map.get(rid)}
+                        st.session_state[f"ocr_{m['id']}_{map_idx}"] = ocr_suggestions0
+                        matched = len(ocr_suggestions0)
+                        if matched > 0:
+                            st.success(f"OCR parsed {matched} player(s) by Riot ID.")
+                        else:
+                            st.warning("OCR parsed, but no Riot IDs matched. Try adjusting crop or verify Riot IDs.")
+                    except Exception:
+                        pass
                 for team_key, team_id, team_name in [("t1", int(m['t1_id']), m['t1_name']), ("t2", int(m['t2_id']), m['t2_name'])]:
                     st.caption(f"{team_name} players")
                     conn_p = get_conn()
-                    roster_df = pd.read_sql("SELECT id, name FROM players WHERE default_team_id=? ORDER BY name", conn_p, params=(team_id,))
+                    roster_df = pd.read_sql("SELECT id, name, riot_id FROM players WHERE default_team_id=? ORDER BY name", conn_p, params=(team_id,))
                     agents_df = pd.read_sql("SELECT name FROM agents ORDER BY name", conn_p)
-                    existing = pd.read_sql("SELECT * FROM match_stats_map WHERE match_id=? AND map_index=? AND team_id=?", conn_p, params=(int(m['id']), map_idx, team_id))
+                    existing = pd.read_sql("SELECT * FROM match_stats_map WHERE match_id=? AND map_index=? AND team_id?", conn_p, params=(int(m['id']), map_idx, team_id))
                     conn_p.close()
                     conn_all = get_conn()
-                    all_df = pd.read_sql("SELECT id, name FROM players ORDER BY name", conn_all)
+                    all_df = pd.read_sql("SELECT id, name, riot_id FROM players ORDER BY name", conn_all)
                     conn_all.close()
-                    roster_list = roster_df['name'].tolist()
-                    roster_map = dict(zip(roster_df['name'], roster_df['id']))
-                    global_list = all_df['name'].tolist()
-                    global_map = dict(zip(all_df['name'], all_df['id']))
+                    roster_list = roster_df.apply(lambda r: (f"{str(r['riot_id'])} ({r['name']})" if pd.notna(r['riot_id']) and str(r['riot_id']).strip() else r['name']), axis=1).tolist()
+                    roster_map = dict(zip(roster_list, roster_df['id']))
+                    global_list = all_df.apply(lambda r: (f"{str(r['riot_id'])} ({r['name']})" if pd.notna(r['riot_id']) and str(r['riot_id']).strip() else r['name']), axis=1).tolist()
+                    global_map = dict(zip(global_list, all_df['id']))
+                    label_to_riot = dict(zip(global_list, all_df['riot_id'].astype(str)))
                     agents_list = agents_df['name'].tolist()
+                    upimg = st.file_uploader("Upload scoreboard image (optional)", type=["png","jpg","jpeg"], key=f"img_{team_key}_{map_idx}")
+                    if upimg is not None:
+                        try:
+                            from PIL import Image
+                            import pytesseract
+                            img = Image.open(io.BytesIO(upimg.read()))
+                            text = pytesseract.image_to_string(img)
+                            lines = [x.strip() for x in text.splitlines() if x.strip()]
+                            ocr_suggestions = {}
+                            for ln in lines:
+                                nums = [int(n) for n in re.findall(r"\d+", ln)]
+                                for nm in global_list:
+                                    if nm and nm.lower() in ln.lower():
+                                        if len(nums) >= 4:
+                                            ocr_suggestions[nm] = {'acs': nums[0], 'k': nums[1], 'd': nums[2], 'a': nums[3]}
+                                        elif len(nums) >= 3:
+                                            ocr_suggestions[nm] = {'acs': nums[0], 'k': nums[1], 'd': nums[2], 'a': 0}
+                            st.session_state[f"ocr_{m['id']}_{map_idx}_{team_id}"] = ocr_suggestions
+                        except Exception:
+                            pass
                     rows = []
                     if not existing.empty:
                         for _, r in existing.iterrows():
                             pname = ""
                             if r['player_id']:
-                                rp = get_conn().execute("SELECT name FROM players WHERE id=?", (r['player_id'],)).fetchone()
-                                pname = rp[0] if rp else ""
+                                rp = get_conn().execute("SELECT name, riot_id FROM players WHERE id=?", (r['player_id'],)).fetchone()
+                                if rp:
+                                    pname = (f"{str(rp[1])} ({rp[0]})" if rp[1] else rp[0])
                             sfname = ""
                             if r['subbed_for_id']:
-                                sp = get_conn().execute("SELECT name FROM players WHERE id=?", (r['subbed_for_id'],)).fetchone()
-                                sfname = sp[0] if sp else ""
+                                sp = get_conn().execute("SELECT name, riot_id FROM players WHERE id=?", (r['subbed_for_id'],)).fetchone()
+                                if sp:
+                                    sfname = (f"{str(sp[1])} ({sp[0]})" if sp[1] else sp[0])
                             rows.append({
                                 'player': pname,
                                 'is_sub': bool(r['is_sub']),
@@ -1092,7 +1189,7 @@ elif page == "Admin Panel":
                             })
                     rows = rows or ([{'player': (global_list[0] if global_list else ""), 'is_sub': False, 'subbed_for': roster_list[i] if i < len(roster_list) else "", 'agent': agents_list[0] if agents_list else "", 'acs': 0, 'k':0,'d':0,'a':0} for i in range(min(5, max(1,len(roster_list))))])
                     with st.form(f"sb_{team_key}_{map_idx}"):
-                        h1,h2,h3,h4,h5,h6,h7,h8 = st.columns([2,1.2,2,2,1,1,1,1])
+                        h1,h2,h3,h4,h5,h6,h7,h8,h9 = st.columns([2,1.2,2,2,1,1,1,1,0.8])
                         h1.write("Player")
                         h2.write("Sub?")
                         h3.write("Subbing For")
@@ -1101,17 +1198,21 @@ elif page == "Admin Panel":
                         h6.write("K")
                         h7.write("D")
                         h8.write("A")
+                        h9.write("Conf")
                         entries = []
+                        sug = st.session_state.get(f"ocr_{m['id']}_{map_idx}", st.session_state.get(f"ocr_{m['id']}_{map_idx}_{team_id}", {}))
                         for i, rowd in enumerate(rows):
-                            c1,c2,c3,c4,c5,c6,c7,c8 = st.columns([2,1.2,2,2,1,1,1,1])
+                            c1,c2,c3,c4,c5,c6,c7,c8,c9 = st.columns([2,1.2,2,2,1,1,1,1,0.8])
                             psel = c1.selectbox(f"P{i}", global_list + [""], index=(global_list.index(rowd['player']) if rowd['player'] in global_list else len(global_list)), label_visibility="collapsed")
                             is_sub = c2.checkbox(f"S{i}", value=rowd['is_sub'], label_visibility="collapsed")
                             sf_sel = c3.selectbox(f"SF{i}", roster_list + [""], index=(roster_list.index(rowd['subbed_for']) if rowd['subbed_for'] in roster_list else (0 if roster_list else 0)), label_visibility="collapsed")
                             ag_sel = c4.selectbox(f"Ag{i}", agents_list + [""], index=(agents_list.index(rowd['agent']) if rowd['agent'] in agents_list else (0 if agents_list else 0)), label_visibility="collapsed")
-                            acs = c5.number_input(f"ACS{i}", min_value=0, value=rowd['acs'], label_visibility="collapsed")
-                            k = c6.number_input(f"K{i}", min_value=0, value=rowd['k'], label_visibility="collapsed")
-                            d = c7.number_input(f"D{i}", min_value=0, value=rowd['d'], label_visibility="collapsed")
-                            a = c8.number_input(f"A{i}", min_value=0, value=rowd['a'], label_visibility="collapsed")
+                            rid_psel = label_to_riot.get(psel, None)
+                            acs = c5.number_input(f"ACS{i}", min_value=0, value=(sug.get(rid_psel, {}).get('acs', rowd['acs'])), label_visibility="collapsed")
+                            k = c6.number_input(f"K{i}", min_value=0, value=(sug.get(rid_psel, {}).get('k', rowd['k'])), label_visibility="collapsed")
+                            d = c7.number_input(f"D{i}", min_value=0, value=(sug.get(rid_psel, {}).get('d', rowd['d'])), label_visibility="collapsed")
+                            a = c8.number_input(f"A{i}", min_value=0, value=(sug.get(rid_psel, {}).get('a', rowd['a'])), label_visibility="collapsed")
+                            c9.write(sug.get(rid_psel, {}).get('conf', '-'))
                             entries.append({
                                 'player_id': global_map.get(psel),
                                 'is_sub': int(is_sub),
