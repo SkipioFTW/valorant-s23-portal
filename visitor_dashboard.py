@@ -401,6 +401,37 @@ def create_admin_with_role(username, password, role):
     conn.commit()
     conn.close()
 
+def ensure_seed_admins():
+    su = get_secret("ADMIN_SEED_USER")
+    sp = get_secret("ADMIN_SEED_PWD")
+    sr = get_secret("ADMIN_SEED_ROLE", "admin")
+    conn = get_conn()
+    c = conn.cursor()
+    if su and sp:
+        row = c.execute("SELECT id, role FROM admins WHERE username=?", (su,)).fetchone()
+        if not row:
+            salt, ph = hash_password(sp)
+            c.execute(
+                "INSERT INTO admins (username, password_hash, salt, is_active, role) VALUES (?, ?, ?, 1, ?)",
+                (su, ph, salt, sr)
+            )
+        else:
+            if row[1] != sr:
+                c.execute("UPDATE admins SET role=? WHERE id=?", (sr, int(row[0])))
+    su2 = get_secret("ADMIN2_USER")
+    sp2 = get_secret("ADMIN2_PWD")
+    sr2 = get_secret("ADMIN2_ROLE", "admin")
+    if su2 and sp2:
+        row2 = c.execute("SELECT id FROM admins WHERE username=?", (su2,)).fetchone()
+        if not row2:
+            salt2, ph2 = hash_password(sp2)
+            c.execute(
+                "INSERT INTO admins (username, password_hash, salt, is_active, role) VALUES (?, ?, ?, 1, ?)",
+                (su2, ph2, salt2, sr2)
+            )
+    conn.commit()
+    conn.close()
+
 def authenticate(username, password):
     conn = get_conn()
     row = conn.execute("SELECT username, password_hash, salt FROM admins WHERE username=? AND is_active=1", (username,)).fetchone()
@@ -567,6 +598,7 @@ ensure_base_schema()
 init_admin_table()
 init_match_stats_map_table()
 ensure_upgrade_schema()
+ensure_seed_admins()
 
 auth_box = st.sidebar.container()
 if 'is_admin' not in st.session_state:
@@ -574,14 +606,7 @@ if 'is_admin' not in st.session_state:
 if 'username' not in st.session_state:
     st.session_state['username'] = None
 
-# Seed admin from secrets or environment
-seed_user = get_secret("ADMIN_SEED_USER")
-seed_pwd = get_secret("ADMIN_SEED_PWD")
-if not admin_exists() and seed_user and seed_pwd:
-    try:
-        create_admin(seed_user, seed_pwd)
-    except:
-        pass
+# Seeding handled by ensure_seed_admins()
 
 with auth_box:
     if not admin_exists():
