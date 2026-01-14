@@ -320,7 +320,8 @@ def get_player_profile(player_id):
         agg = agg.merge(mmeta, left_on='match_id', right_on='id', how='left')
         agg['kda'] = agg['kills'] / agg['deaths'].replace(0, 1)
         agg['label'] = agg.apply(lambda r: f"W{int(r['week'] or 0)}-M{int(r['match_id'])}", axis=1)
-        trend = agg[['label','avg_acs','kda']].rename(columns={'acs':'avg_acs'})
+        agg = agg.rename(columns={'acs':'avg_acs'})
+        trend = agg[['label','avg_acs','kda']]
     sub_impact = None
     if not stats.empty:
         s_sub = stats[stats['is_sub'] == 1]
@@ -389,6 +390,13 @@ def create_admin(username, password):
     salt, ph = hash_password(password)
     conn = get_conn()
     role = get_secret("ADMIN_SEED_ROLE", "admin") if not admin_exists() else "admin"
+    conn.execute("INSERT INTO admins (username, password_hash, salt, is_active, role) VALUES (?, ?, ?, 1, ?)", (username, ph, salt, role))
+    conn.commit()
+    conn.close()
+
+def create_admin_with_role(username, password, role):
+    salt, ph = hash_password(password)
+    conn = get_conn()
     conn.execute("INSERT INTO admins (username, password_hash, salt, is_active, role) VALUES (?, ?, ?, 1, ?)", (username, ph, salt, role))
     conn.commit()
     conn.close()
@@ -932,6 +940,19 @@ elif page == "Admin Panel":
                         st.rerun()
                     else:
                         st.error("Restore failed")
+            st.subheader("Admins Management")
+            with st.form("create_admin_form"):
+                na = st.text_input("Username")
+                pa = st.text_input("Password", type="password")
+                ra = st.selectbox("Role", ["admin","dev"], index=0)
+                sa = st.form_submit_button("Create Admin")
+                if sa and na and pa:
+                    try:
+                        create_admin_with_role(na, pa, ra)
+                        st.success("Admin created")
+                        st.rerun()
+                    except Exception:
+                        st.error("Failed to create admin")
         st.subheader("Match Editor")
         conn = get_conn()
         weeks_df = pd.read_sql_query("SELECT DISTINCT week FROM matches ORDER BY week", conn)
