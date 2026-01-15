@@ -3,8 +3,9 @@ pandas
 scikit-learn
 Pillow
 pytesseract
-opencv-python
 plotly
 cloudscraper
-beautifulsoup4
 requests
+numpy
+joblib
+selenium
