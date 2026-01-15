@@ -11,26 +11,27 @@ import base64
 import requests
 import re
 import io
+import json
 from PIL import Image, ImageOps
-import pytesseract
-
-# Try to find tesseract binary in common paths if not in PATH
-# (Windows specific check)
-possible_paths = [
-    r"C:\Program Files\Tesseract-OCR\tesseract.exe",
-    r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
-    r"C:\Users\SBS\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
-]
-for p in possible_paths:
-    if os.path.exists(p):
-        pytesseract.pytesseract.tesseract_cmd = p
-        break
 
 def ocr_extract(image_bytes, crop_box=None):
     """
     Returns (text, dataframe, error_message)
     """
     try:
+        import pytesseract
+        # Try to find tesseract binary in common paths if not in PATH
+        # (Windows specific check)
+        possible_paths = [
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+            r"C:\Users\SBS\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
+        ]
+        for p in possible_paths:
+            if os.path.exists(p):
+                pytesseract.pytesseract.tesseract_cmd = p
+                break
+
         img = Image.open(io.BytesIO(image_bytes))
         if crop_box:
             img = img.crop(crop_box)
@@ -53,6 +54,8 @@ def ocr_extract(image_bytes, crop_box=None):
             
         text = pytesseract.image_to_string(img_thresh)
         return text, df, None
+    except ImportError:
+        return "", None, "pytesseract not installed. Please install it to use OCR."
     except Exception as e:
         return "", None, f"Image Processing Error: {str(e)}"
 
@@ -1204,7 +1207,39 @@ elif page == "Admin Panel":
                 all_df0 = pd.read_sql("SELECT id, name, riot_id FROM players ORDER BY name", conn_all0)
                 conn_all0.close()
                 name_to_riot = dict(zip(all_df0['name'].astype(str), all_df0['riot_id'].astype(str)))
-                upimg0 = st.file_uploader("Upload scoreboard image (whole game)", type=["png","jpg","jpeg"], key=f"img_{m['id']}_{map_idx}")
+                
+                # File uploaders for automatic pre-filling
+                c1, c2 = st.columns(2)
+                upimg0 = c1.file_uploader("Upload scoreboard image", type=["png","jpg","jpeg"], key=f"img_{m['id']}_{map_idx}")
+                upjson0 = c2.file_uploader("Upload Tracker.gg JSON", type=["json"], key=f"json_{m['id']}_{map_idx}")
+                
+                if upjson0 is not None:
+                    try:
+                        jsdata = json.load(upjson0)
+                        json_suggestions = {}
+                        segments = jsdata.get("data", {}).get("segments", [])
+                        for seg in segments:
+                            if seg.get("type") == "player-summary":
+                                rid = seg.get("metadata", {}).get("platformInfo", {}).get("platformUserIdentifier")
+                                st_map = seg.get("stats", {})
+                                # In Tracker JSON, scorePerRound value is usually ACS
+                                acs = st_map.get("scorePerRound", {}).get("value", 0)
+                                k = st_map.get("kills", {}).get("value", 0)
+                                d = st_map.get("deaths", {}).get("value", 0)
+                                a = st_map.get("assists", {}).get("value", 0)
+                                if rid:
+                                    json_suggestions[rid] = {
+                                        'acs': int(acs) if acs is not None else 0, 
+                                        'k': int(k) if k is not None else 0, 
+                                        'd': int(d) if d is not None else 0, 
+                                        'a': int(a) if a is not None else 0, 
+                                        'conf': 100.0
+                                    }
+                        st.session_state[f"ocr_{m['id']}_{map_idx}"] = json_suggestions
+                        st.success(f"JSON parsed {len(json_suggestions)} players.")
+                    except Exception as e:
+                        st.error(f"JSON Error: {str(e)}")
+
                 if upimg0 is not None:
                     # OCR logic
                     cw = 1920 # Default assumption if load fails? No, we load in ocr_extract but we need dims for crop.
