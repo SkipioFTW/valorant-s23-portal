@@ -1426,7 +1426,9 @@ elif page == "Matches":
                         st.caption("No map details")
                     else:
                         md = maps_df.copy()
-                        md['Winner'] = md.apply(lambda r: m['t1_name'] if r['winner_id'] == m['t1_id'] else (m['t2_name'] if r['winner_id'] == m['t2_id'] else ''), axis=1)
+                        t1_id_val = int(m.get('t1_id', m.get('team1_id')))
+                        t2_id_val = int(m.get('t2_id', m.get('team2_id')))
+                        md['Winner'] = md.apply(lambda r: m['t1_name'] if r['winner_id'] == t1_id_val else (m['t2_name'] if r['winner_id'] == t2_id_val else ''), axis=1)
                         md = md.rename(columns={
                             'map_index': 'Map',
                             'map_name': 'Name',
@@ -1481,7 +1483,9 @@ elif page == "Match Summary":
             
             # Map Score Card
             curr_map = maps_df[maps_df['map_index'] == selected_map_idx].iloc[0]
-            st.markdown(f"""<div class="custom-card" style="background: rgba(255,255,255,0.02); margin-bottom: 20px;">
+                            t1_id_val = int(m.get('t1_id', m.get('team1_id')))
+                            t2_id_val = int(m.get('t2_id', m.get('team2_id')))
+                            st.markdown(f"""<div class="custom-card" style="background: rgba(255,255,255,0.02); margin-bottom: 20px;">
 <div style="display: flex; justify-content: center; align-items: center; gap: 40px;">
 <div style="text-align: center;">
 <div style="color: var(--text-dim); font-size: 0.8rem; margin-bottom: 5px;">{html.escape(str(m['t1_name']))}</div>
@@ -1489,7 +1493,7 @@ elif page == "Match Summary":
 </div>
 <div style="text-align: center;">
 <div style="font-family: 'Orbitron'; color: var(--primary-blue); font-size: 1.2rem;">{html.escape(str(curr_map['map_name'].upper()))}</div>
-<div style="color: var(--text-dim); font-size: 0.7rem;">WINNER: {html.escape(str(m['t1_name'] if curr_map['winner_id'] == m['t1_id'] else m['t2_name']))}</div>
+<div style="color: var(--text-dim); font-size: 0.7rem;">WINNER: {html.escape(str(m['t1_name'] if curr_map['winner_id'] == t1_id_val else m['t2_name']))}</div>
 </div>
 <div style="text-align: center;">
 <div style="color: var(--text-dim); font-size: 0.8rem; margin-bottom: 5px;">{html.escape(str(m['t2_name']))}</div>
@@ -1500,8 +1504,10 @@ elif page == "Match Summary":
             
             # Scoreboards
             conn_s = get_conn()
-            s1 = pd.read_sql("SELECT p.name, ms.agent, ms.acs, ms.kills, ms.deaths, ms.assists, ms.is_sub FROM match_stats_map ms JOIN players p ON ms.player_id=p.id WHERE ms.match_id=? AND ms.map_index=? AND ms.team_id=?", conn_s, params=(int(m['id']), selected_map_idx, int(m['t1_id'])))
-            s2 = pd.read_sql("SELECT p.name, ms.agent, ms.acs, ms.kills, ms.deaths, ms.assists, ms.is_sub FROM match_stats_map ms JOIN players p ON ms.player_id=p.id WHERE ms.match_id=? AND ms.map_index=? AND ms.team_id=?", conn_s, params=(int(m['id']), selected_map_idx, int(m['t2_id'])))
+            t1_id_val = int(m.get('t1_id', m.get('team1_id')))
+            t2_id_val = int(m.get('t2_id', m.get('team2_id')))
+            s1 = pd.read_sql("SELECT p.name, ms.agent, ms.acs, ms.kills, ms.deaths, ms.assists, ms.is_sub FROM match_stats_map ms JOIN players p ON ms.player_id=p.id WHERE ms.match_id=? AND ms.map_index=? AND ms.team_id=?", conn_s, params=(int(m['id']), selected_map_idx, t1_id_val))
+            s2 = pd.read_sql("SELECT p.name, ms.agent, ms.acs, ms.kills, ms.deaths, ms.assists, ms.is_sub FROM match_stats_map ms JOIN players p ON ms.player_id=p.id WHERE ms.match_id=? AND ms.map_index=? AND ms.team_id=?", conn_s, params=(int(m['id']), selected_map_idx, t2_id_val))
             conn_s.close()
             
             c1, c2 = st.columns(2)
@@ -2015,12 +2021,14 @@ elif page == "Playoffs":
                     nsel = st.selectbox(f"Name {i+1}", maps_catalog, index=(maps_catalog.index(pre_name) if pre_name in maps_catalog else 0), key=f"po_mname_{i}")
                     t1r = st.number_input(f"{m['t1_name']} rounds", min_value=0, value=pre_t1, key=f"po_t1r_{i}")
                     t2r = st.number_input(f"{m['t2_name']} rounds", min_value=0, value=pre_t2, key=f"po_t2r_{i}")
-                    wsel = st.selectbox("Winner", ["", m['t1_name'], m['t2_name']], index=(1 if pre_win==int(m['t1_id']) else (2 if pre_win==int(m['t2_id']) else 0)), key=f"po_win_{i}")
+                    t1_id_val = int(m.get('t1_id', m.get('team1_id')))
+                    t2_id_val = int(m.get('t2_id', m.get('team2_id')))
+                    wsel = st.selectbox("Winner", ["", m['t1_name'], m['t2_name']], index=(1 if pre_win==t1_id_val else (2 if pre_win==t2_id_val else 0)), key=f"po_win_{i}")
                     wid = None
                     if wsel == m['t1_name']:
-                        wid = int(m['t1_id'])
+                        wid = t1_id_val
                     elif wsel == m['t2_name']:
-                        wid = int(m['t2_id'])
+                        wid = t2_id_val
                     maps_data.append({"map_index": i, "map_name": nsel, "team1_rounds": int(t1r), "team2_rounds": int(t2r), "winner_id": wid})
             
             if st.button("Save Playoff Match & Maps"):
@@ -2030,11 +2038,13 @@ elif page == "Playoffs":
                         played += 1
                 upsert_match_maps(int(m['id']), maps_data[:max_maps])
                 conn_u = get_conn()
+                t1_id_val = int(m.get('t1_id', m.get('team1_id')))
+                t2_id_val = int(m.get('t2_id', m.get('team2_id')))
                 winner_id = None
                 if s1 > s2:
-                    winner_id = int(m['t1_id'])
+                    winner_id = t1_id_val
                 elif s2 > s1:
-                    winner_id = int(m['t2_id'])
+                    winner_id = t2_id_val
                 conn_u.execute("UPDATE matches SET score_t1=?, score_t2=?, winner_id=?, status=?, format=?, maps_played=? WHERE id=?", (int(s1), int(s2), winner_id, 'completed' if played > 0 else 'scheduled', fmt, int(played), int(m['id'])))
                 conn_u.commit()
                 conn_u.close()
@@ -2318,9 +2328,10 @@ elif page == "Admin Panel":
                                         # Improved Team Matching
                                         # Get roster Riot IDs for Team 1
                                         conn_roster = get_conn()
-                                        t1_roster = pd.read_sql("SELECT riot_id FROM players WHERE default_team_id=?", conn_roster, params=(int(m['t1_id']),))['riot_id'].dropna().tolist()
+                                        cur_t1_id = int(m.get('t1_id', m.get('team1_id')))
+                                        t1_roster = pd.read_sql("SELECT riot_id FROM players WHERE default_team_id=?", conn_roster, params=(cur_t1_id,))['riot_id'].dropna().tolist()
                                         conn_roster.close()
-                                        t1_roster = [str(r).strip() for r in t1_roster]
+                                        t1_roster = [str(r).strip().lower() for r in t1_roster]
 
                                         team_segments = [s for s in segments if s.get("type") == "team-summary"]
                                         player_segments = [s for s in segments if s.get("type") == "player-summary"]
@@ -2366,24 +2377,26 @@ elif page == "Admin Panel":
                                 pre_win = int(rowx.iloc[0]['winner_id']) if pd.notna(rowx.iloc[0]['winner_id']) else None
                         
                         # Override with scraped data if available
+                        t1_id_val = int(m.get('t1_id', m.get('team1_id')))
+                        t2_id_val = int(m.get('t2_id', m.get('team2_id')))
                         if scraped:
                             pre_name = scraped['map_name']
                             pre_t1 = scraped['t1_rounds']
                             pre_t2 = scraped['t2_rounds']
                             if pre_t1 > pre_t2:
-                                pre_win = int(m['t1_id'])
+                                pre_win = t1_id_val
                             elif pre_t2 > pre_t1:
-                                pre_win = int(m['t2_id'])
+                                pre_win = t2_id_val
 
                         nsel = st.selectbox(f"Name {i+1}", maps_catalog, index=(maps_catalog.index(pre_name) if pre_name in maps_catalog else 0), key=f"mname_{i}")
                         t1r = st.number_input(f"{m['t1_name']} rounds", min_value=0, value=pre_t1, key=f"t1r_{i}")
                         t2r = st.number_input(f"{m['t2_name']} rounds", min_value=0, value=pre_t2, key=f"t2r_{i}")
-                        wsel = st.selectbox("Winner", ["", m['t1_name'], m['t2_name']], index=(1 if pre_win==int(m['t1_id']) else (2 if pre_win==int(m['t2_id']) else 0)), key=f"win_{i}")
+                        wsel = st.selectbox("Winner", ["", m['t1_name'], m['t2_name']], index=(1 if pre_win==t1_id_val else (2 if pre_win==t2_id_val else 0)), key=f"win_{i}")
                         wid = None
                         if wsel == m['t1_name']:
-                            wid = int(m['t1_id'])
+                            wid = t1_id_val
                         elif wsel == m['t2_name']:
-                            wid = int(m['t2_id'])
+                            wid = t2_id_val
                         maps_data.append({"map_index": i, "map_name": nsel, "team1_rounds": int(t1r), "team2_rounds": int(t2r), "winner_id": wid})
                 if st.button("Save Maps"):
                     played = 0
@@ -2394,9 +2407,9 @@ elif page == "Admin Panel":
                     conn_u = get_conn()
                     winner_id = None
                     if s1 > s2:
-                        winner_id = int(m['t1_id'])
+                        winner_id = t1_id_val
                     elif s2 > s1:
-                        winner_id = int(m['t2_id'])
+                        winner_id = t2_id_val
                     conn_u.execute("UPDATE matches SET score_t1=?, score_t2=?, winner_id=?, status=?, format=?, maps_played=? WHERE id=?", (int(s1), int(s2), winner_id, 'completed', fmt, int(played), int(m['id'])))
                     conn_u.commit()
                     conn_u.close()
