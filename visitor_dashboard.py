@@ -672,7 +672,93 @@ def apply_plotly_theme(fig):
 st.set_page_config(page_title="S23 Portal", layout="wide")
 
 # Hide standard sidebar navigation and other streamlit elements
-st.markdown("<link href='https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Rajdhani:wght@400;600&family=Inter:wght@400;700&display=swap' rel='stylesheet'><style>/* Global Styles */:root {--primary-blue: #3FD1FF;--primary-red: #FF4655;--bg-dark: #0F1923;--card-bg: #1F2933;--text-main: #ECE8E1;--text-dim: #8B97A5;--nav-height: 70px;}.stApp {background-color: var(--bg-dark);background-image: radial-gradient(circle at 20% 30%, rgba(63, 209, 255, 0.05) 0%, transparent 40%), radial-gradient(circle at 80% 70%, rgba(255, 70, 85, 0.05) 0%, transparent 40%);color: var(--text-main);font-family: 'Inter', sans-serif;}[data-testid='stSidebarNav'] {display: none;}[data-testid='stHeader'] {background: rgba(0,0,0,0);}h1, h2, h3 {font-family: 'Orbitron', sans-serif !important;text-transform: uppercase;letter-spacing: 2px;font-weight: 700 !important;}.main-header {color: var(--primary-blue);text-shadow: 0 0 20px rgba(63, 209, 255, 0.3);border-left: 5px solid var(--primary-red);padding-left: 15px;margin-bottom: 2rem !important;font-size: 2.5rem;animation: fadeIn 0.8s ease-out;}h2, h3 {color: var(--primary-blue);}@keyframes fadeIn {from { opacity: 0; transform: translateY(10px); }to { opacity: 1; transform: translateY(0); }}.stMarkdown, .stDataFrame, .stPlotlyChart, .element-container {animation: fadeIn 0.5s ease-out forwards;}.nav-wrapper {position: fixed;top: 0;left: 0;right: 0;height: var(--nav-height);background: rgba(15, 25, 35, 0.95);backdrop-filter: blur(10px);border-bottom: 1px solid rgba(63, 209, 255, 0.1);display: flex;align-items: center;padding: 0 2rem;z-index: 1000;justify-content: flex-start; gap: 2rem;}.nav-logo {font-family: 'Orbitron';color: var(--primary-blue);font-size: 1.2rem;font-weight: bold;letter-spacing: 2px;white-space: nowrap;}.main .block-container {padding-top: calc(var(--nav-height) + 2rem) !important;}</style>", unsafe_allow_html=True)
+st.markdown("<link href='https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Rajdhani:wght@400;600&family=Inter:wght@400;700&display=swap' rel='stylesheet'><style>/* Global Styles */
+:root {
+    --primary-blue: #3FD1FF;
+    --primary-red: #FF4655;
+    --bg-dark: #0F1923;
+    --card-bg: #1F2933;
+    --text-main: #ECE8E1;
+    --text-dim: #8B97A5;
+    --nav-height: 80px;
+}
+
+.stApp {
+    background-color: var(--bg-dark);
+    background-image: radial-gradient(circle at 20% 30%, rgba(63, 209, 255, 0.05) 0%, transparent 40%), radial-gradient(circle at 80% 70%, rgba(255, 70, 85, 0.05) 0%, transparent 40%);
+    color: var(--text-main);
+    font-family: 'Inter', sans-serif;
+}
+
+/* Force padding on the main container to prevent nav overlap */
+.main .block-container {
+    padding-top: 120px !important;
+}
+
+/* Portal Styling */
+.portal-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 80vh;
+    gap: 3rem;
+    animation: fadeIn 1s ease-out;
+}
+
+.portal-options {
+    display: flex;
+    gap: 2rem;
+    flex-wrap: wrap;
+    justify-content: center;
+}
+
+.portal-card {
+    background: var(--card-bg);
+    border: 1px solid rgba(63, 209, 255, 0.1);
+    padding: 2.5rem;
+    border-radius: 12px;
+    width: 300px;
+    text-align: center;
+    transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    cursor: pointer;
+    position: relative;
+    overflow: hidden;
+}
+
+.portal-card:hover:not(.disabled) {
+    transform: translateY(-10px);
+    border-color: var(--primary-blue);
+    box-shadow: 0 15px 40px rgba(63, 209, 255, 0.2);
+}
+
+.portal-card.disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+    border-color: rgba(255, 255, 255, 0.05);
+}
+
+.portal-card.disabled:hover::after {
+    content: "UNDER DEVELOPMENT";
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(15, 25, 35, 0.9);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--primary-red);
+    font-family: 'Orbitron';
+    font-weight: bold;
+    font-size: 0.8rem;
+    letter-spacing: 1px;
+}
+
+[data-testid='stSidebarNav'] {display: none;}
+[data-testid='stHeader'] {display: none;}
+h1, h2, h3 {font-family: 'Orbitron', sans-serif !important;text-transform: uppercase;letter-spacing: 2px;font-weight: 700 !important;}.main-header {color: var(--primary-blue);text-shadow: 0 0 20px rgba(63, 209, 255, 0.3);border-left: 5px solid var(--primary-red);padding-left: 15px;margin-bottom: 2rem !important;font-size: 2.5rem;animation: fadeIn 0.8s ease-out;}h2, h3 {color: var(--primary-blue);}@keyframes fadeIn {from { opacity: 0; transform: translateY(10px); }to { opacity: 1; transform: translateY(0); }}.stMarkdown, .stDataFrame, .stPlotlyChart, .element-container {animation: fadeIn 0.5s ease-out forwards;}.nav-wrapper {position: fixed;top: 0;left: 0;right: 0;height: var(--nav-height);background: rgba(15, 25, 35, 0.95);backdrop-filter: blur(10px);border-bottom: 1px solid rgba(63, 209, 255, 0.1);display: flex;align-items: center;padding: 0 2rem;z-index: 1000;justify-content: flex-start; gap: 2rem;}.nav-logo {font-family: 'Orbitron';color: var(--primary-blue);font-size: 1.2rem;font-weight: bold;letter-spacing: 2px;white-space: nowrap;}</style>", unsafe_allow_html=True)
 
 ensure_base_schema()
 init_admin_table()
@@ -680,47 +766,82 @@ init_match_stats_map_table()
 ensure_upgrade_schema()
 ensure_seed_admins()
 
-auth_box = st.sidebar.container()
+# App Mode Logic
+if 'app_mode' not in st.session_state:
+    st.session_state['app_mode'] = 'portal'
+
+if st.session_state['app_mode'] == 'portal':
+    st.markdown("""
+        <div class="portal-container">
+            <h1 style="color: var(--primary-blue); font-size: 3.5rem; text-shadow: 0 0 30px rgba(63, 209, 255, 0.4);">VALORANT S23 PORTAL</h1>
+            <p style="color: var(--text-dim); font-size: 1.2rem; letter-spacing: 2px;">SELECT YOUR ENTRY POINT</p>
+            <div class="portal-options">
+    """, unsafe_allow_html=True)
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.markdown('<div class="portal-card">', unsafe_allow_html=True)
+        if st.button("VISIT WEBSITE", use_container_width=True, type="primary"):
+            st.session_state['app_mode'] = 'visitor'
+            st.rerun()
+        st.markdown('<p style="color: var(--text-dim); margin-top: 1rem; font-size: 0.9rem;">Browse stats, matches, and standings</p></div>', unsafe_allow_html=True)
+        
+    with col2:
+        st.markdown('<div class="portal-card disabled">', unsafe_allow_html=True)
+        st.button("TEAM LEADER", use_container_width=True, disabled=True)
+        st.markdown('<p style="color: var(--text-dim); margin-top: 1rem; font-size: 0.9rem;">Manage your team roster and stats</p></div>', unsafe_allow_html=True)
+        
+    with col3:
+        st.markdown('<div class="portal-card">', unsafe_allow_html=True)
+        if st.button("ADMIN LOGIN", use_container_width=True):
+            st.session_state['app_mode'] = 'admin'
+            st.rerun()
+        st.markdown('<p style="color: var(--text-dim); margin-top: 1rem; font-size: 0.9rem;">Full system control and data management</p></div>', unsafe_allow_html=True)
+        
+    st.markdown('</div></div>', unsafe_allow_html=True)
+    st.stop()
+
+# If in Visitor or Admin mode, show the dashboard
+if st.session_state['app_mode'] == 'admin' and not st.session_state.get('is_admin'):
+    st.markdown('<div class="nav-wrapper"><div class="nav-logo">VALORANT S23 • PORTAL</div></div>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">ADMIN ACCESS</h1>', unsafe_allow_html=True)
+    
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        st.info("Please enter your administrator credentials to proceed.")
+        with st.form("admin_login_main"):
+            u = st.text_input("Username")
+            p = st.text_input("Password", type="password")
+            tok = st.text_input("Admin Token", type="password")
+            if st.form_submit_button("LOGIN TO ADMIN PANEL", use_container_width=True):
+                env_tok = get_secret("ADMIN_LOGIN_TOKEN", "")
+                if authenticate(u, p) and hmac.compare_digest(tok or "", env_tok):
+                    st.session_state['is_admin'] = True
+                    st.session_state['username'] = u
+                    st.session_state['page'] = "Admin Panel"
+                    st.success("Access Granted")
+                    st.rerun()
+                else:
+                    st.error("Invalid credentials")
+        if st.button("← BACK TO SELECTION"):
+            st.session_state['app_mode'] = 'portal'
+            st.rerun()
+    st.stop()
+
 if 'is_admin' not in st.session_state:
     st.session_state['is_admin'] = False
 if 'username' not in st.session_state:
     st.session_state['username'] = None
 
-# Seeding handled by ensure_seed_admins()
-
-with auth_box:
-    if not admin_exists():
-        st.info("Admin not configured. Set ADMIN_SEED_USER and ADMIN_SEED_PWD.")
-    else:
-        if not st.session_state['is_admin']:
-            st.subheader("Admin Login")
-            with st.form("login_form"):
-                u = st.text_input("Username")
-                p = st.text_input("Password", type="password")
-                tok = st.text_input("Admin Token", type="password")
-                s = st.form_submit_button("Login")
-                if s:
-                    env_tok = get_secret("ADMIN_LOGIN_TOKEN", "")
-                    if authenticate(u, p) and hmac.compare_digest(tok or "", env_tok):
-                        st.session_state['is_admin'] = True
-                        st.session_state['username'] = u
-                        try:
-                            conn_r = get_conn()
-                            rrow = conn_r.execute("SELECT role FROM admins WHERE username=?", (u,)).fetchone()
-                            conn_r.close()
-                            st.session_state['role'] = (rrow[0] if rrow else 'admin')
-                        except Exception:
-                            st.session_state['role'] = 'admin'
-                        st.success("Logged in")
-                        st.rerun()
-                    else:
-                        st.error("Invalid credentials or token")
-        else:
-            st.success(f"Admin: {st.session_state['username']}")
-            if st.button("Logout"):
-                st.session_state['is_admin'] = False
-                st.session_state['username'] = None
-                st.rerun()
+# Admin status display in sidebar
+if st.session_state['is_admin']:
+    st.sidebar.success(f"Logged in as: {st.session_state['username']}")
+    if st.sidebar.button("Logout"):
+        st.session_state['is_admin'] = False
+        st.session_state['username'] = None
+        st.session_state['app_mode'] = 'portal'
+        st.rerun()
 
 if 'page' not in st.session_state:
     st.session_state['page'] = "Overview & Standings"
@@ -742,19 +863,27 @@ if st.session_state['is_admin']:
 # Top Navigation Bar
 st.markdown('<div class="nav-wrapper"><div class="nav-logo">VALORANT S23 • PORTAL</div></div>', unsafe_allow_html=True)
 
-# Navigation Buttons in a horizontal layout
-nav_cols = st.columns(len(pages))
-for i, p in enumerate(pages):
-    with nav_cols[i]:
-        is_active = st.session_state['page'] == p
-        if st.button(p, key=f"nav_{p}", use_container_width=True, 
-                     type="secondary", 
-                     help=f"Go to {p}"):
-            st.session_state['page'] = p
-            st.rerun()
-        
-        if is_active:
-            st.markdown(f'<div class="active-nav-indicator" style="height: 3px; background: var(--primary-red); margin-top: -5px; box-shadow: 0 0 10px var(--primary-red);"></div>', unsafe_allow_html=True)
+# Add Home button to the list of pages visually or as a separate button
+col_home, col_nav = st.columns([0.15, 0.85])
+with col_home:
+    if st.button("🏠 EXIT", use_container_width=True, help="Back to selection screen"):
+        st.session_state['app_mode'] = 'portal'
+        st.rerun()
+
+with col_nav:
+    # Navigation Buttons in a horizontal layout
+    nav_cols = st.columns(len(pages))
+    for i, p in enumerate(pages):
+        with nav_cols[i]:
+            is_active = st.session_state['page'] == p
+            if st.button(p, key=f"nav_{p}", use_container_width=True, 
+                         type="secondary", 
+                         help=f"Go to {p}"):
+                st.session_state['page'] = p
+                st.rerun()
+            
+            if is_active:
+                st.markdown(f'<div class="active-nav-indicator" style="height: 3px; background: var(--primary-red); margin-top: -5px; box-shadow: 0 0 10px var(--primary-red);"></div>', unsafe_allow_html=True)
 
 page = st.session_state['page']
 
