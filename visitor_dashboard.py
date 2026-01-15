@@ -579,13 +579,35 @@ def get_standings():
         matches_df = matches_df[~(matches_df['team1_id'].isin(exclude_ids) | matches_df['team2_id'].isin(exclude_ids))]
     stats = {}
     for _, row in teams_df.iterrows():
-        stats[row['id']] = {'Wins': 0, 'Losses': 0, 'RD': 0, 'Points': 0, 'Played': 0}
+        stats[row['id']] = {'Wins': 0, 'Losses': 0, 'RD': 0, 'Points': 0, 'Points Against': 0, 'Played': 0}
     for _, m in matches_df.iterrows():
         t1, t2 = m['team1_id'], m['team2_id']
         s1, s2 = m['score_t1'], m['score_t2']
+        
+        # Determine if it's overtime (Val: 13-11 is regular, 13-12 is not possible in standard, 
+        # but in many leagues 13+ or 12-12 is OT start)
+        # User rule: "If you hit overtime, both teams get 12 points automatically but the winning team gets 15"
+        # Standard Valorant OT usually ends 14-12, 15-13, etc. 
+        # If score is > 12 and difference is 2, it's usually OT.
+        is_ot = (s1 > 12 or s2 > 12) and abs(s1 - s2) >= 2
+        
+        p1, p2 = s1, s2
+        if is_ot:
+            if s1 > s2:
+                p1, p2 = 15, 12
+            else:
+                p1, p2 = 12, 15
+        else:
+            if s1 > s2:
+                p1 = 15 # Win is 15
+            elif s2 > s1:
+                p2 = 15 # Win is 15
+        
         if t1 in stats:
             stats[t1]['Played'] += 1
             stats[t1]['RD'] += (s1 - s2)
+            stats[t1]['Points'] += p1
+            stats[t1]['Points Against'] += s2 # Every round goes in points against
             if s1 > s2:
                 stats[t1]['Wins'] += 1
             else:
@@ -593,14 +615,13 @@ def get_standings():
         if t2 in stats:
             stats[t2]['Played'] += 1
             stats[t2]['RD'] += (s2 - s1)
+            stats[t2]['Points'] += p2
+            stats[t2]['Points Against'] += s1 # Every round goes in points against
             if s2 > s1:
                 stats[t2]['Wins'] += 1
             else:
                 stats[t2]['Losses'] += 1
-        if s1 > s2 and t1 in stats:
-            stats[t1]['Points'] += 3
-        elif s2 > s1 and t2 in stats:
-            stats[t2]['Points'] += 3
+
     standings = []
     for tid, data in stats.items():
         row = teams_df[teams_df['id'] == tid].iloc[0].to_dict()
@@ -609,7 +630,8 @@ def get_standings():
     df = pd.DataFrame(standings)
     if df.empty:
         return df
-    return df.sort_values(by=['Points', 'RD'], ascending=False)
+    # Higher Points, then Lower Points Against
+    return df.sort_values(by=['Points', 'Points Against'], ascending=[False, True])
 
 def get_player_leaderboard():
     conn = get_conn()
@@ -1522,27 +1544,33 @@ elif page == "Match Predictor":
             score1 = (s1['win_rate'] * 40) + (s1['avg_score'] * 2) + (h2h_wins_t1 * 5)
             score2 = (s2['win_rate'] * 40) + (s2['avg_score'] * 2) + (h2h_wins_t2 * 5)
             
-            ml_pred = None
+            ml_prob = None
             try:
-                from sklearn.ensemble import RandomForestClassifier
-                # Placeholder for future ML implementation
-                pass
-            except ImportError:
+                import predictor_model
+                ml_prob = predictor_model.predict_match(t1_id, t2_id)
+            except Exception as e:
                 pass
                 
-            total = score1 + score2
-            if total == 0:
-                prob1 = 50.0
-                prob2 = 50.0
+            if ml_prob is not None:
+                prob1 = ml_prob * 100
+                prob2 = (1 - ml_prob) * 100
+                prediction_type = "ML MODEL"
             else:
-                prob1 = (score1 / total) * 100
-                prob2 = (score2 / total) * 100
+                total = score1 + score2
+                if total == 0:
+                    prob1 = 50.0
+                    prob2 = 50.0
+                else:
+                    prob1 = (score1 / total) * 100
+                    prob2 = (score2 / total) * 100
+                prediction_type = "HEURISTIC"
                 
             winner = t1_name if prob1 > prob2 else t2_name
             conf = max(prob1, prob2)
             
             st.markdown(f"""<div class="custom-card" style="text-align: center; border-top: 4px solid { 'var(--primary-blue)' if winner == t1_name else 'var(--primary-red)' };">
-<h2 style="margin: 0; color: { 'var(--primary-blue)' if winner == t1_name else 'var(--primary-red)' };">PREDICTION: {html.escape(str(winner))}</h2>
+<div style="color: var(--text-dim); font-size: 0.7rem; margin-bottom: 5px;">{prediction_type} PREDICTION</div>
+<h2 style="margin: 0; color: { 'var(--primary-blue)' if winner == t1_name else 'var(--primary-red)' };">{html.escape(str(winner))}</h2>
 <div style="font-size: 3rem; font-family: 'Orbitron'; margin: 10px 0;">{conf:.1f}%</div>
 <div style="color: var(--text-dim);">CONFIDENCE LEVEL</div>
 </div>""", unsafe_allow_html=True)
