@@ -5,3 +5,6 @@ Pillow
 pytesseract
 opencv-python
 plotly
+cloudscraper
+beautifulsoup4
+requests

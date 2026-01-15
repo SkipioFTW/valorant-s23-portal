@@ -8,6 +8,7 @@ import secrets
 import tempfile
 import base64
 import requests
+import cloudscraper
 import re
 import io
 import json
@@ -69,6 +70,32 @@ def ocr_extract(image_bytes, crop_box=None):
         return "", None, "pytesseract not installed. Please install it to use OCR."
     except Exception as e:
         return "", None, f"Image Processing Error: {str(e)}"
+
+def scrape_tracker_match(url):
+    """
+    Scrapes match data from tracker.gg using the provided URL.
+    Returns (match_data_json, error_message)
+    """
+    try:
+        # Extract match ID from URL
+        # Format: https://tracker.gg/valorant/match/4e473784-f3f5-450e-9f1b-66ba5e90be01
+        match_id_match = re.search(r'match/([a-zA-Z0-9\-]+)', url)
+        if not match_id_match:
+            return None, "Invalid Tracker.gg match URL"
+        
+        match_id = match_id_match.group(1)
+        api_url = f"https://api.tracker.gg/api/v2/valorant/standard/matches/{match_id}"
+        
+        scraper = cloudscraper.create_scraper()
+        r = scraper.get(api_url)
+        
+        if r.status_code != 200:
+            return None, f"Tracker.gg API error: {r.status_code}"
+        
+        data = r.json()
+        return data, None
+    except Exception as e:
+        return None, f"Scraping error: {str(e)}"
 
 def get_secret(key, default=None):
     try:
@@ -584,24 +611,18 @@ def get_standings():
         t1, t2 = m['team1_id'], m['team2_id']
         s1, s2 = m['score_t1'], m['score_t2']
         
-        # Determine if it's overtime (Val: 13-11 is regular, 13-12 is not possible in standard, 
-        # but in many leagues 13+ or 12-12 is OT start)
-        # User rule: "If you hit overtime, both teams get 12 points automatically but the winning team gets 15"
-        # Standard Valorant OT usually ends 14-12, 15-13, etc. 
-        # If score is > 12 and difference is 2, it's usually OT.
-        is_ot = (s1 > 12 or s2 > 12) and abs(s1 - s2) >= 2
+        # Determine if it's overtime
+        # User rule: Overtime starts if both teams reached 12 rounds (12-12).
+        # Winner gets 15 + rounds_won.
+        # Loser gets rounds_won (plus 12 bonus if it was overtime).
+        is_ot = (s1 >= 12 and s2 >= 12)
         
-        p1, p2 = s1, s2
-        if is_ot:
-            if s1 > s2:
-                p1, p2 = 15, 12
-            else:
-                p1, p2 = 12, 15
+        if s1 > s2:
+            p1 = 15 + s1
+            p2 = (12 + s2) if is_ot else s2
         else:
-            if s1 > s2:
-                p1 = 15 # Win is 15
-            elif s2 > s1:
-                p2 = 15 # Win is 15
+            p2 = 15 + s2
+            p1 = (12 + s1) if is_ot else s1
         
         if t1 in stats:
             stats[t1]['Played'] += 1
@@ -2235,10 +2256,92 @@ elif page == "Admin Panel":
                 maps_data = []
                 for i in range(max_maps):
                     with st.expander(f"Map {i+1}"):
+                        # Tracker.gg link for this map
+                        turl = st.text_input(f"Tracker.gg Link for Map {i+1}", key=f"turl_map_{m['id']}_{i}", placeholder="https://tracker.gg/valorant/match/...")
+                        
                         pre_name = ""
                         pre_t1 = 0
                         pre_t2 = 0
                         pre_win = None
+                        
+                        # Check if we just scraped this map
+                        if turl:
+                            if f"scraped_data_{m['id']}_{i}" not in st.session_state or st.session_state[f"scraped_url_{m['id']}_{i}"] != turl:
+                                with st.spinner("Scraping Tracker.gg..."):
+                                    jsdata, err = scrape_tracker_match(turl)
+                                    if err:
+                                        st.error(err)
+                                    else:
+                                        # Save to session state for scoreboard reuse
+                                        json_suggestions = {}
+                                        segments = jsdata.get("data", {}).get("segments", [])
+                                        for seg in segments:
+                                            if seg.get("type") == "player-summary":
+                                                rid = seg.get("metadata", {}).get("platformInfo", {}).get("platformUserIdentifier")
+                                                if rid:
+                                                    rid = str(rid).strip()
+                                                agent = seg.get("metadata", {}).get("agentName")
+                                                st_map = seg.get("stats", {})
+                                                acs = st_map.get("scorePerRound", {}).get("value", 0)
+                                                k = st_map.get("kills", {}).get("value", 0)
+                                                d = st_map.get("deaths", {}).get("value", 0)
+                                                a = st_map.get("assists", {}).get("value", 0)
+                                                if rid:
+                                                    json_suggestions[rid] = {
+                                                        'acs': int(acs) if acs is not None else 0, 
+                                                        'k': int(k) if k is not None else 0, 
+                                                        'd': int(d) if d is not None else 0, 
+                                                        'a': int(a) if a is not None else 0, 
+                                                        'agent': agent,
+                                                        'conf': 100.0
+                                                    }
+                                        st.session_state[f"ocr_{m['id']}_{i}"] = json_suggestions
+                                        
+                                        # Extract map name and rounds
+                                        map_name = jsdata.get("data", {}).get("metadata", {}).get("mapName")
+                                        
+                                        # Improved Team Matching
+                                        # Get roster Riot IDs for Team 1
+                                        conn_roster = get_conn()
+                                        t1_roster = pd.read_sql("SELECT riot_id FROM players WHERE default_team_id=?", conn_roster, params=(int(m['t1_id']),))['riot_id'].dropna().tolist()
+                                        conn_roster.close()
+                                        t1_roster = [str(r).strip() for r in t1_roster]
+
+                                        team_segments = [s for s in segments if s.get("type") == "team-summary"]
+                                        player_segments = [s for s in segments if s.get("type") == "player-summary"]
+                                        
+                                        t1_r = 0
+                                        t2_r = 0
+                                        
+                                        if len(team_segments) >= 2:
+                                            # Determine which Tracker team is our Team 1 by checking players
+                                            tracker_team_1_id = team_segments[0].get("attributes", {}).get("teamId")
+                                            
+                                            # Count how many of our Team 1 players are in Tracker's first team
+                                            t1_matches = 0
+                                            for p_seg in player_segments:
+                                                if p_seg.get("metadata", {}).get("teamId") == tracker_team_1_id:
+                                                    rid = p_seg.get("metadata", {}).get("platformInfo", {}).get("platformUserIdentifier")
+                                                    if rid and str(rid).strip() in t1_roster:
+                                                        t1_matches += 1
+                                            
+                                            if t1_matches >= 1: # Found at least one player from our Team 1 in Tracker Team 1
+                                                t1_r = team_segments[0].get("stats", {}).get("roundsWon", {}).get("value", 0)
+                                                t2_r = team_segments[1].get("stats", {}).get("roundsWon", {}).get("value", 0)
+                                            else: # Team 2 is likely Tracker's Team 1
+                                                t1_r = team_segments[1].get("stats", {}).get("roundsWon", {}).get("value", 0)
+                                                t2_r = team_segments[0].get("stats", {}).get("roundsWon", {}).get("value", 0)
+                                        
+                                        st.session_state[f"scraped_data_{m['id']}_{i}"] = {
+                                            'map_name': map_name,
+                                            't1_rounds': int(t1_r),
+                                            't2_rounds': int(t2_r)
+                                        }
+                                        st.session_state[f"scraped_url_{m['id']}_{i}"] = turl
+                                        st.success("Map data scraped!")
+
+                        scraped = st.session_state.get(f"scraped_data_{m['id']}_{i}")
+                        
                         if not existing_maps_df.empty:
                             rowx = existing_maps_df[existing_maps_df['map_index'] == i]
                             if not rowx.empty:
@@ -2246,6 +2349,17 @@ elif page == "Admin Panel":
                                 pre_t1 = int(rowx.iloc[0]['team1_rounds'])
                                 pre_t2 = int(rowx.iloc[0]['team2_rounds'])
                                 pre_win = int(rowx.iloc[0]['winner_id']) if pd.notna(rowx.iloc[0]['winner_id']) else None
+                        
+                        # Override with scraped data if available
+                        if scraped:
+                            pre_name = scraped['map_name']
+                            pre_t1 = scraped['t1_rounds']
+                            pre_t2 = scraped['t2_rounds']
+                            if pre_t1 > pre_t2:
+                                pre_win = int(m['t1_id'])
+                            elif pre_t2 > pre_t1:
+                                pre_win = int(m['t2_id'])
+
                         nsel = st.selectbox(f"Name {i+1}", maps_catalog, index=(maps_catalog.index(pre_name) if pre_name in maps_catalog else 0), key=f"mname_{i}")
                         t1r = st.number_input(f"{m['t1_name']} rounds", min_value=0, value=pre_t1, key=f"t1r_{i}")
                         t2r = st.number_input(f"{m['t2_name']} rounds", min_value=0, value=pre_t2, key=f"t2r_{i}")
@@ -2284,8 +2398,12 @@ elif page == "Admin Panel":
                 name_to_riot = dict(zip(all_df0['name'].astype(str), all_df0['riot_id'].astype(str)))
                 
                 # Match ID input for automatic pre-filling from folder
-                match_id_input = st.text_input("Enter Match ID to load JSON data", key=f"mid_{m['id']}_{map_idx}")
-                
+                col_json1, col_json2 = st.columns(2)
+                with col_json1:
+                    match_id_input = st.text_input("Enter Match ID to load JSON data", key=f"mid_{m['id']}_{map_idx}")
+                with col_json2:
+                    st.info("💡 **Pro Tip:** Use the **Tracker.gg Scraper** in the 'Per-Map Scores' section above to automatically pre-fill rounds and scoreboard data for this map!")
+
                 if match_id_input:
                     # Sanitize input to prevent path traversal
                     match_id_input = re.sub(r'[^a-zA-Z0-9\-]', '', match_id_input)
