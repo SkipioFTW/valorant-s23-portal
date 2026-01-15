@@ -86,8 +86,23 @@ def scrape_tracker_match(url):
         match_id = match_id_match.group(1)
         api_url = f"https://api.tracker.gg/api/v2/valorant/standard/matches/{match_id}"
         
-        scraper = cloudscraper.create_scraper()
-        r = scraper.get(api_url)
+        # Use cloudscraper with enhanced headers and browser simulation to bypass 403 errors
+        scraper = cloudscraper.create_scraper(
+            browser={
+                'browser': 'chrome',
+                'platform': 'windows',
+                'desktop': True
+            }
+        )
+        
+        headers = {
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': f'https://tracker.gg/valorant/match/{match_id}',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+        
+        r = scraper.get(api_url, headers=headers)
         
         if r.status_code != 200:
             return None, f"Tracker.gg API error: {r.status_code}"
