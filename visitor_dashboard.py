@@ -672,152 +672,131 @@ def apply_plotly_theme(fig):
 st.set_page_config(page_title="S23 Portal", layout="wide")
 
 # Hide standard sidebar navigation and other streamlit elements
-st.markdown("""
-<link href='https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Rajdhani:wght@400;600&family=Inter:wght@400;700&display=swap' rel='stylesheet'>
-<style>
+st.markdown("""<link href='https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Rajdhani:wght@400;600&family=Inter:wght@400;700&display=swap' rel='stylesheet'><style>
 /* Global Styles */
 :root {
-    --primary-blue: #3FD1FF;
-    --primary-red: #FF4655;
-    --bg-dark: #0F1923;
-    --card-bg: #1F2933;
-    --text-main: #ECE8E1;
-    --text-dim: #8B97A5;
-    --nav-height: 80px;
+--primary-blue: #3FD1FF;
+--primary-red: #FF4655;
+--bg-dark: #0F1923;
+--card-bg: #1F2933;
+--text-main: #ECE8E1;
+--text-dim: #8B97A5;
+--nav-height: 80px;
 }
-
 .stApp {
-    background-color: var(--bg-dark);
-    background-image: radial-gradient(circle at 20% 30%, rgba(63, 209, 255, 0.05) 0%, transparent 40%), 
-                      radial-gradient(circle at 80% 70%, rgba(255, 70, 85, 0.05) 0%, transparent 40%);
-    color: var(--text-main);
-    font-family: 'Inter', sans-serif;
+background-color: var(--bg-dark);
+background-image: radial-gradient(circle at 20% 30%, rgba(63, 209, 255, 0.05) 0%, transparent 40%), 
+radial-gradient(circle at 80% 70%, rgba(255, 70, 85, 0.05) 0%, transparent 40%);
+color: var(--text-main);
+font-family: 'Inter', sans-serif;
 }
-
-/* Force padding on the main container to prevent nav overlap */
 .main .block-container {
-    padding-top: 120px !important;
+padding-top: 120px !important;
 }
-
-/* Portal Styling */
 .portal-container {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    min-height: 80vh;
-    gap: 3rem;
-    animation: fadeIn 1s ease-out;
+display: flex;
+flex-direction: column;
+align-items: center;
+justify-content: center;
+min-height: 80vh;
+gap: 3rem;
+animation: fadeIn 1s ease-out;
 }
-
 .portal-options {
-    display: flex;
-    gap: 2rem;
-    flex-wrap: wrap;
-    justify-content: center;
+display: flex;
+gap: 2rem;
+flex-wrap: wrap;
+justify-content: center;
 }
-
 .portal-card {
-    background: var(--card-bg);
-    border: 1px solid rgba(63, 209, 255, 0.1);
-    padding: 2.5rem;
-    border-radius: 12px;
-    width: 300px;
-    text-align: center;
-    transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-    cursor: pointer;
-    position: relative;
-    overflow: hidden;
+background: var(--card-bg);
+border: 1px solid rgba(63, 209, 255, 0.1);
+padding: 2.5rem;
+border-radius: 12px;
+width: 300px;
+text-align: center;
+transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+cursor: pointer;
+position: relative;
+overflow: hidden;
 }
-
 .portal-card:hover:not(.disabled) {
-    transform: translateY(-10px);
-    border-color: var(--primary-blue);
-    box-shadow: 0 15px 40px rgba(63, 209, 255, 0.2);
+transform: translateY(-10px);
+border-color: var(--primary-blue);
+box-shadow: 0 15px 40px rgba(63, 209, 255, 0.2);
 }
-
 .portal-card.disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-    border-color: rgba(255, 255, 255, 0.05);
+opacity: 0.6;
+cursor: not-allowed;
+border-color: rgba(255, 255, 255, 0.05);
 }
-
 .portal-card.disabled:hover::after {
-    content: "UNDER DEVELOPMENT";
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: rgba(15, 25, 35, 0.9);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--primary-red);
-    font-family: 'Orbitron';
-    font-weight: bold;
-    font-size: 0.8rem;
-    letter-spacing: 1px;
+content: "UNDER DEVELOPMENT";
+position: absolute;
+top: 0;
+left: 0;
+right: 0;
+bottom: 0;
+background: rgba(15, 25, 35, 0.9);
+display: flex;
+align-items: center;
+justify-content: center;
+color: var(--primary-red);
+font-family: 'Orbitron';
+font-weight: bold;
+font-size: 0.8rem;
+letter-spacing: 1px;
 }
-
 [data-testid='stSidebarNav'] {display: none;}
 [data-testid='stHeader'] {display: none;}
-
 h1, h2, h3 {
-    font-family: 'Orbitron', sans-serif !important;
-    text-transform: uppercase;
-    letter-spacing: 2px;
-    font-weight: 700 !important;
+font-family: 'Orbitron', sans-serif !important;
+text-transform: uppercase;
+letter-spacing: 2px;
+font-weight: 700 !important;
 }
-
 .main-header {
-    color: var(--primary-blue);
-    text-shadow: 0 0 20px rgba(63, 209, 255, 0.3);
-    border-left: 5px solid var(--primary-red);
-    padding-left: 15px;
-    margin-bottom: 2rem !important;
-    font-size: 2.5rem;
-    animation: fadeIn 0.8s ease-out;
+color: var(--primary-blue);
+text-shadow: 0 0 20px rgba(63, 209, 255, 0.3);
+border-left: 5px solid var(--primary-red);
+padding-left: 15px;
+margin-bottom: 2rem !important;
+font-size: 2.5rem;
+animation: fadeIn 0.8s ease-out;
 }
-
 h2, h3 { color: var(--primary-blue); }
-
 @keyframes fadeIn {
-    from { opacity: 0; transform: translateY(10px); }
-    to { opacity: 1; transform: translateY(0); }
+from { opacity: 0; transform: translateY(10px); }
+to { opacity: 1; transform: translateY(0); }
 }
-
 .stMarkdown, .stDataFrame, .stPlotlyChart, .element-container {
-    animation: fadeIn 0.5s ease-out forwards;
+animation: fadeIn 0.5s ease-out forwards;
 }
-
 .nav-wrapper {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    height: var(--nav-height);
-    background: rgba(15, 25, 35, 0.95);
-    backdrop-filter: blur(10px);
-    border-bottom: 1px solid rgba(63, 209, 255, 0.1);
-    display: flex;
-    align-items: center;
-    padding: 0 2rem;
-    z-index: 1000;
-    justify-content: flex-start;
-    gap: 2rem;
+position: fixed;
+top: 0;
+left: 0;
+right: 0;
+height: var(--nav-height);
+background: rgba(15, 25, 35, 0.95);
+backdrop-filter: blur(10px);
+border-bottom: 1px solid rgba(63, 209, 255, 0.1);
+display: flex;
+align-items: center;
+padding: 0 2rem;
+z-index: 1000;
+justify-content: flex-start;
+gap: 2rem;
 }
-
 .nav-logo {
-    font-family: 'Orbitron';
-    color: var(--primary-blue);
-    font-size: 1.2rem;
-    font-weight: bold;
-    letter-spacing: 2px;
-    white-space: nowrap;
+font-family: 'Orbitron';
+color: var(--primary-blue);
+font-size: 1.2rem;
+font-weight: bold;
+letter-spacing: 2px;
+white-space: nowrap;
 }
-</style>
-""", unsafe_allow_html=True)
+</style>""", unsafe_allow_html=True)
 
 ensure_base_schema()
 init_admin_table()
@@ -830,12 +809,10 @@ if 'app_mode' not in st.session_state:
     st.session_state['app_mode'] = 'portal'
 
 if st.session_state['app_mode'] == 'portal':
-    st.markdown("""
-        <div class="portal-container">
-            <h1 style="color: var(--primary-blue); font-size: 3.5rem; text-shadow: 0 0 30px rgba(63, 209, 255, 0.4);">VALORANT S23 PORTAL</h1>
-            <p style="color: var(--text-dim); font-size: 1.2rem; letter-spacing: 2px;">SELECT YOUR ENTRY POINT</p>
-            <div class="portal-options">
-    """, unsafe_allow_html=True)
+    st.markdown("""<div class="portal-container">
+<h1 style="color: var(--primary-blue); font-size: 3.5rem; text-shadow: 0 0 30px rgba(63, 209, 255, 0.4);">VALORANT S23 PORTAL</h1>
+<p style="color: var(--text-dim); font-size: 1.2rem; letter-spacing: 2px;">SELECT YOUR ENTRY POINT</p>
+<div class="portal-options">""", unsafe_allow_html=True)
     
     col1, col2, col3 = st.columns(3)
     
