@@ -1209,9 +1209,7 @@ elif page == "Admin Panel":
                 name_to_riot = dict(zip(all_df0['name'].astype(str), all_df0['riot_id'].astype(str)))
                 
                 # File uploaders for automatic pre-filling
-                c1, c2 = st.columns(2)
-                upimg0 = c1.file_uploader("Upload scoreboard image", type=["png","jpg","jpeg"], key=f"img_{m['id']}_{map_idx}")
-                upjson0 = c2.file_uploader("Upload Tracker.gg JSON", type=["json"], key=f"json_{m['id']}_{map_idx}")
+                upjson0 = st.file_uploader("Upload Tracker.gg JSON", type=["json"], key=f"json_{m['id']}_{map_idx}")
                 
                 if upjson0 is not None:
                     try:
@@ -1221,6 +1219,9 @@ elif page == "Admin Panel":
                         for seg in segments:
                             if seg.get("type") == "player-summary":
                                 rid = seg.get("metadata", {}).get("platformInfo", {}).get("platformUserIdentifier")
+                                if rid:
+                                    rid = str(rid).strip()
+                                agent = seg.get("metadata", {}).get("agentName")
                                 st_map = seg.get("stats", {})
                                 # In Tracker JSON, scorePerRound value is usually ACS
                                 acs = st_map.get("scorePerRound", {}).get("value", 0)
@@ -1233,6 +1234,7 @@ elif page == "Admin Panel":
                                         'k': int(k) if k is not None else 0, 
                                         'd': int(d) if d is not None else 0, 
                                         'a': int(a) if a is not None else 0, 
+                                        'agent': agent,
                                         'conf': 100.0
                                     }
                         st.session_state[f"ocr_{m['id']}_{map_idx}"] = json_suggestions
@@ -1240,72 +1242,6 @@ elif page == "Admin Panel":
                     except Exception as e:
                         st.error(f"JSON Error: {str(e)}")
 
-                if upimg0 is not None:
-                    # OCR logic
-                    cw = 1920 # Default assumption if load fails? No, we load in ocr_extract but we need dims for crop.
-                    # We need to open image for crop tool first.
-                    try:
-                        from PIL import Image
-                        img0 = Image.open(io.BytesIO(upimg0.read()))
-                        cw, ch = img0.size
-                        with st.expander("Crop before OCR", expanded=True):
-                            ct = st.slider("Top %", 0, 40, 5)
-                            cb = st.slider("Bottom %", 0, 40, 5)
-                            cl = st.slider("Left %", 0, 40, 5)
-                            cr = st.slider("Right %", 0, 40, 5)
-                            box = (int(cl*cw/100), int(ct*ch/100), int(cw - cr*cw/100), int(ch - cb*ch/100))
-                            cimg0 = img0.crop(box)
-                            st.image(cimg0, caption="Cropped preview", use_column_width=True)
-                        
-                        # Use buffer for ocr_extract or pass bytes
-                        # We already have cimg0 (PIL Image). ocr_extract takes bytes.
-                        # Let's adjust ocr_extract to take PIL image or BytesIO?
-                        # Or just save cimg0 to bytes.
-                        buf = io.BytesIO()
-                        cimg0.save(buf, format="PNG")
-                        ocr_bytes = buf.getvalue()
-                        
-                        text0, dfd, err = ocr_extract(ocr_bytes)
-                        
-                        if err:
-                            st.error(err)
-                        else:
-                            # Debug view
-                            with st.expander("Debug OCR Output"):
-                                st.text(text0)
-                                if dfd is not None:
-                                    st.dataframe(dfd.head(20))
-                                    
-                            lines0 = [x.strip() for x in text0.splitlines() if x.strip()]
-                            ocr_suggestions0 = {}
-                            riot_ids0 = [x for x in all_df0['riot_id'].astype(str).tolist() if x and x.strip()]
-                            conf_map = {}
-                            if dfd is not None and not dfd.empty:
-                                dfd = dfd.dropna(subset=['text'])
-                                grp = dfd.groupby(['block_num','par_num','line_num'])
-                                for _, g in grp:
-                                    line_text = " ".join(g['text'].astype(str).tolist()).strip()
-                                    num_confs = g[g['text'].str.contains(r"\d", regex=True)]['conf']
-                                    avg_conf = float(num_confs[num_confs >= 0].mean()) if len(num_confs) else float(g['conf'][g['conf']>=0].mean() or 0)
-                                    for rid in riot_ids0:
-                                        if rid and rid.lower() in line_text.lower():
-                                            conf_map[rid] = round(avg_conf, 1)
-                            for ln in lines0:
-                                nums = [int(n) for n in re.findall(r"\d+", ln)]
-                                for rid in riot_ids0:
-                                    if rid and rid.lower() in ln.lower():
-                                        if len(nums) >= 4:
-                                            ocr_suggestions0[rid] = {'acs': nums[0], 'k': nums[1], 'd': nums[2], 'a': nums[3], 'conf': conf_map.get(rid)}
-                                        elif len(nums) >= 3:
-                                            ocr_suggestions0[rid] = {'acs': nums[0], 'k': nums[1], 'd': nums[2], 'a': 0, 'conf': conf_map.get(rid)}
-                            st.session_state[f"ocr_{m['id']}_{map_idx}"] = ocr_suggestions0
-                            matched = len(ocr_suggestions0)
-                            if matched > 0:
-                                st.success(f"OCR parsed {matched} player(s) by Riot ID.")
-                            else:
-                                st.warning("OCR parsed, but no Riot IDs matched. Try adjusting crop or verify Riot IDs.")
-                    except Exception as e:
-                        st.error(f"Image Error: {str(e)}")
                 for team_key, team_id, team_name in [("t1", int(m['t1_id']), m['t1_name']), ("t2", int(m['t2_id']), m['t2_name'])]:
                     st.caption(f"{team_name} players")
                     conn_p = get_conn()
@@ -1320,26 +1256,14 @@ elif page == "Admin Panel":
                     roster_map = dict(zip(roster_list, roster_df['id']))
                     global_list = all_df.apply(lambda r: (f"{str(r['riot_id'])} ({r['name']})" if pd.notna(r['riot_id']) and str(r['riot_id']).strip() else r['name']), axis=1).tolist()
                     global_map = dict(zip(global_list, all_df['id']))
-                    label_to_riot = dict(zip(global_list, all_df['riot_id'].astype(str)))
+                    # Improved label_to_riot to handle NaN correctly
+                    label_to_riot = {label: str(rid).strip() for label, rid in zip(global_list, all_df['riot_id']) if pd.notna(rid) and str(rid).strip()}
+                    riot_to_label = {v: k for k, v in label_to_riot.items()}
                     agents_list = agents_df['name'].tolist()
-                    upimg = st.file_uploader("Upload scoreboard image (optional)", type=["png","jpg","jpeg"], key=f"img_{team_key}_{map_idx}")
-                    if upimg is not None:
-                        text, _, err = ocr_extract(upimg.read())
-                        if err:
-                            st.error(err)
-                        else:
-                            lines = [x.strip() for x in text.splitlines() if x.strip()]
-                            ocr_suggestions = {}
-                            for ln in lines:
-                                nums = [int(n) for n in re.findall(r"\d+", ln)]
-                                for nm in global_list:
-                                    if nm and nm.lower() in ln.lower():
-                                        if len(nums) >= 4:
-                                            ocr_suggestions[nm] = {'acs': nums[0], 'k': nums[1], 'd': nums[2], 'a': nums[3]}
-                                        elif len(nums) >= 3:
-                                            ocr_suggestions[nm] = {'acs': nums[0], 'k': nums[1], 'd': nums[2], 'a': 0}
-                            st.session_state[f"ocr_{m['id']}_{map_idx}_{team_id}"] = ocr_suggestions
                     rows = []
+                    
+                    sug = st.session_state.get(f"ocr_{m['id']}_{map_idx}", {})
+                    
                     if not existing.empty:
                         for _, r in existing.iterrows():
                             pname = ""
@@ -1362,7 +1286,33 @@ elif page == "Admin Panel":
                                 'd': int(r['deaths'] or 0),
                                 'a': int(r['assists'] or 0),
                             })
-                    rows = rows or ([{'player': (global_list[0] if global_list else ""), 'is_sub': False, 'subbed_for': roster_list[i] if i < len(roster_list) else "", 'agent': agents_list[0] if agents_list else "", 'acs': 0, 'k':0,'d':0,'a':0} for i in range(min(5, max(1,len(roster_list))))])
+                    else:
+                        # For new maps, try to match roster players to suggestions
+                        for i in range(min(5, max(1,len(roster_list)))):
+                            r_label = roster_list[i] if i < len(roster_list) else (global_list[0] if global_list else "")
+                            r_rid = label_to_riot.get(r_label)
+                            
+                            row_data = {
+                                'player': r_label,
+                                'is_sub': False,
+                                'subbed_for': roster_list[i] if i < len(roster_list) else "",
+                                'agent': agents_list[0] if agents_list else "",
+                                'acs': 0, 'k': 0, 'd': 0, 'a': 0
+                            }
+                            
+                            # If we have a suggestion for this roster player, use it
+                            if r_rid and r_rid in sug:
+                                s = sug[r_rid]
+                                row_data.update({
+                                    'acs': s['acs'], 
+                                    'k': s['k'], 
+                                    'd': s['d'], 
+                                    'a': s['a'],
+                                    'agent': s.get('agent') or row_data['agent']
+                                })
+                                
+                            rows.append(row_data)
+
                     with st.form(f"sb_{team_key}_{map_idx}"):
                         h1,h2,h3,h4,h5,h6,h7,h8,h9 = st.columns([2,1.2,2,2,1,1,1,1,0.8])
                         h1.write("Player")
@@ -1375,19 +1325,37 @@ elif page == "Admin Panel":
                         h8.write("A")
                         h9.write("Conf")
                         entries = []
-                        sug = st.session_state.get(f"ocr_{m['id']}_{map_idx}", st.session_state.get(f"ocr_{m['id']}_{map_idx}_{team_id}", {}))
+                        
                         for i, rowd in enumerate(rows):
                             c1,c2,c3,c4,c5,c6,c7,c8,c9 = st.columns([2,1.2,2,2,1,1,1,1,0.8])
-                            psel = c1.selectbox(f"P{i}", global_list + [""], index=(global_list.index(rowd['player']) if rowd['player'] in global_list else len(global_list)), label_visibility="collapsed")
+                            # Find the best index for the player selectbox
+                            if rowd['player'] in global_list:
+                                p_idx = global_list.index(rowd['player'])
+                            else:
+                                p_idx = len(global_list) # Empty
+
+                            psel = c1.selectbox(f"P{i}", global_list + [""], index=p_idx, label_visibility="collapsed")
                             is_sub = c2.checkbox(f"S{i}", value=rowd['is_sub'], label_visibility="collapsed")
                             sf_sel = c3.selectbox(f"SF{i}", roster_list + [""], index=(roster_list.index(rowd['subbed_for']) if rowd['subbed_for'] in roster_list else (0 if roster_list else 0)), label_visibility="collapsed")
                             ag_sel = c4.selectbox(f"Ag{i}", agents_list + [""], index=(agents_list.index(rowd['agent']) if rowd['agent'] in agents_list else (0 if agents_list else 0)), label_visibility="collapsed")
-                            rid_psel = label_to_riot.get(psel, None)
-                            acs = c5.number_input(f"ACS{i}", min_value=0, value=(sug.get(rid_psel, {}).get('acs', rowd['acs'])), label_visibility="collapsed")
-                            k = c6.number_input(f"K{i}", min_value=0, value=(sug.get(rid_psel, {}).get('k', rowd['k'])), label_visibility="collapsed")
-                            d = c7.number_input(f"D{i}", min_value=0, value=(sug.get(rid_psel, {}).get('d', rowd['d'])), label_visibility="collapsed")
-                            a = c8.number_input(f"A{i}", min_value=0, value=(sug.get(rid_psel, {}).get('a', rowd['a'])), label_visibility="collapsed")
-                            c9.write(sug.get(rid_psel, {}).get('conf', '-'))
+                            
+                            rid_psel = label_to_riot.get(psel)
+                            
+                            # Final fallback: if selectbox changed, try to get suggestion again
+                            current_sug = sug.get(rid_psel, {}) if rid_psel else {}
+                            
+                            val_acs = current_sug.get('acs', rowd['acs'])
+                            val_k = current_sug.get('k', rowd['k'])
+                            val_d = current_sug.get('d', rowd['d'])
+                            val_a = current_sug.get('a', rowd['a'])
+                            val_conf = current_sug.get('conf', '-')
+                            
+                            acs = c5.number_input(f"ACS{i}", min_value=0, value=int(val_acs), label_visibility="collapsed")
+                            k = c6.number_input(f"K{i}", min_value=0, value=int(val_k), label_visibility="collapsed")
+                            d = c7.number_input(f"D{i}", min_value=0, value=int(val_d), label_visibility="collapsed")
+                            a = c8.number_input(f"A{i}", min_value=0, value=int(val_a), label_visibility="collapsed")
+                            c9.write(val_conf)
+                            
                             entries.append({
                                 'player_id': global_map.get(psel),
                                 'is_sub': int(is_sub),
