@@ -689,19 +689,41 @@ background-image: radial-gradient(circle at 20% 30%, rgba(63, 209, 255, 0.05) 0%
 radial-gradient(circle at 80% 70%, rgba(255, 70, 85, 0.05) 0%, transparent 40%);
 color: var(--text-main);
 font-family: 'Inter', sans-serif;
+transition: opacity 0.5s ease-in-out;
 }
 .main .block-container {
-padding-top: 120px !important;
+padding-top: 150px !important;
 }
 .portal-container {
 display: flex;
 flex-direction: column;
 align-items: center;
 justify-content: center;
-min-height: 80vh;
-gap: 3rem;
-animation: fadeIn 1s ease-out;
+min-height: 90vh;
+gap: 2rem;
+animation: fadeIn 0.8s ease-out;
+padding-top: 2rem;
 }
+.status-grid {
+display: grid;
+grid-template-columns: repeat(3, 1fr);
+gap: 2rem;
+width: 100%;
+max-width: 960px;
+margin: 0 auto 1rem auto;
+}
+.status-indicator {
+padding: 0.5rem 1rem;
+border-radius: 4px;
+font-family: 'Orbitron';
+font-size: 0.7rem;
+letter-spacing: 1px;
+text-align: center;
+background: rgba(255, 255, 255, 0.03);
+border: 1px solid rgba(255, 255, 255, 0.1);
+}
+.status-online { color: #00ff88; border-color: rgba(0, 255, 136, 0.2); background: rgba(0, 255, 136, 0.05); }
+.status-offline { color: var(--primary-red); border-color: rgba(255, 70, 85, 0.2); background: rgba(255, 70, 85, 0.05); }
 .portal-options {
 display: flex;
 gap: 2rem;
@@ -760,17 +782,18 @@ color: var(--primary-blue);
 text-shadow: 0 0 20px rgba(63, 209, 255, 0.3);
 border-left: 5px solid var(--primary-red);
 padding-left: 15px;
+margin-top: 1rem !important;
 margin-bottom: 2rem !important;
 font-size: 2.5rem;
 animation: fadeIn 0.8s ease-out;
 }
 h2, h3 { color: var(--primary-blue); }
 @keyframes fadeIn {
-from { opacity: 0; transform: translateY(10px); }
+from { opacity: 0; transform: translateY(5px); }
 to { opacity: 1; transform: translateY(0); }
 }
 .stMarkdown, .stDataFrame, .stPlotlyChart, .element-container {
-animation: fadeIn 0.5s ease-out forwards;
+animation: fadeIn 0.4s ease-out forwards;
 }
 .nav-wrapper {
 position: fixed;
@@ -778,15 +801,16 @@ top: 0;
 left: 0;
 right: 0;
 height: var(--nav-height);
-background: rgba(15, 25, 35, 0.95);
-backdrop-filter: blur(10px);
-border-bottom: 1px solid rgba(63, 209, 255, 0.1);
+background: rgba(15, 25, 35, 0.98);
+backdrop-filter: blur(20px);
+border-bottom: 1px solid rgba(63, 209, 255, 0.2);
 display: flex;
 align-items: center;
 padding: 0 2rem;
-z-index: 1000;
+z-index: 9999;
 justify-content: flex-start;
 gap: 2rem;
+box-shadow: 0 4px 30px rgba(0, 0, 0, 0.5);
 }
 .nav-logo {
 font-family: 'Orbitron';
@@ -808,39 +832,51 @@ ensure_seed_admins()
 if 'app_mode' not in st.session_state:
     st.session_state['app_mode'] = 'portal'
 
+# Use a placeholder to clear the screen during transitions
+main_container = st.empty()
+
 if st.session_state['app_mode'] == 'portal':
-    st.markdown("""<div class="portal-container">
-<h1 style="color: var(--primary-blue); font-size: 3.5rem; text-shadow: 0 0 30px rgba(63, 209, 255, 0.4);">VALORANT S23 PORTAL</h1>
-<p style="color: var(--text-dim); font-size: 1.2rem; letter-spacing: 2px;">SELECT YOUR ENTRY POINT</p>
+    with main_container.container():
+        st.markdown("""<div class="portal-container">
+<h1 style="color: var(--primary-blue); font-size: 3.5rem; text-shadow: 0 0 30px rgba(63, 209, 255, 0.4); margin-bottom: 0;">VALORANT S23 PORTAL</h1>
+<p style="color: var(--text-dim); font-size: 1rem; letter-spacing: 4px; margin-bottom: 2rem;">SYSTEM STATUS & ACCESS</p>
+<div class="status-grid">
+<div class="status-indicator status-online">● VISITOR ACCESS: LIVE</div>
+<div class="status-indicator status-offline">● TEAM PANEL: STAGING</div>
+<div class="status-indicator status-online">● ADMIN CORE: SECURE</div>
+</div>
 <div class="portal-options">""", unsafe_allow_html=True)
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.markdown('<div class="portal-card">', unsafe_allow_html=True)
-        if st.button("VISIT WEBSITE", use_container_width=True, type="primary"):
-            st.session_state['app_mode'] = 'visitor'
-            st.rerun()
-        st.markdown('<p style="color: var(--text-dim); margin-top: 1rem; font-size: 0.9rem;">Browse stats, matches, and standings</p></div>', unsafe_allow_html=True)
         
-    with col2:
-        st.markdown('<div class="portal-card disabled">', unsafe_allow_html=True)
-        st.button("TEAM LEADER", use_container_width=True, disabled=True)
-        st.markdown('<p style="color: var(--text-dim); margin-top: 1rem; font-size: 0.9rem;">Manage your team roster and stats</p></div>', unsafe_allow_html=True)
+        col1, col2, col3 = st.columns(3)
         
-    with col3:
-        st.markdown('<div class="portal-card">', unsafe_allow_html=True)
-        if st.button("ADMIN LOGIN", use_container_width=True):
-            st.session_state['app_mode'] = 'admin'
-            st.rerun()
-        st.markdown('<p style="color: var(--text-dim); margin-top: 1rem; font-size: 0.9rem;">Full system control and data management</p></div>', unsafe_allow_html=True)
-        
-    st.markdown('</div></div>', unsafe_allow_html=True)
+        with col1:
+            st.markdown('<div class="portal-card">', unsafe_allow_html=True)
+            if st.button("VISIT WEBSITE", use_container_width=True, type="primary"):
+                st.session_state['app_mode'] = 'visitor'
+                st.rerun()
+            st.markdown('<p style="color: var(--text-dim); margin-top: 1rem; font-size: 0.9rem;">Browse stats, matches, and standings</p></div>', unsafe_allow_html=True)
+            
+        with col2:
+            st.markdown('<div class="portal-card disabled">', unsafe_allow_html=True)
+            st.button("TEAM LEADER", use_container_width=True, disabled=True)
+            st.markdown('<p style="color: var(--text-dim); margin-top: 1rem; font-size: 0.9rem;">Manage your team roster and stats</p></div>', unsafe_allow_html=True)
+            
+        with col3:
+            st.markdown('<div class="portal-card">', unsafe_allow_html=True)
+            if st.button("ADMIN LOGIN", use_container_width=True):
+                st.session_state['app_mode'] = 'admin'
+                st.rerun()
+            st.markdown('<p style="color: var(--text-dim); margin-top: 1rem; font-size: 0.9rem;">Full system control and data management</p></div>', unsafe_allow_html=True)
+            
+        st.markdown('</div></div>', unsafe_allow_html=True)
     st.stop()
 
 # If in Visitor or Admin mode, show the dashboard
 if st.session_state['app_mode'] == 'admin' and not st.session_state.get('is_admin'):
-    st.markdown('<div class="nav-wrapper"><div class="nav-logo">VALORANT S23 • PORTAL</div></div>', unsafe_allow_html=True)
+    # Show a simplified nav for login screen
+    st.markdown('<div class="nav-wrapper"><div class="nav-logo" style="margin-left: auto; margin-right: auto;">VALORANT S23 • ADMIN PORTAL</div></div>', unsafe_allow_html=True)
+    
+    st.markdown('<div style="margin-top: 40px;"></div>', unsafe_allow_html=True)
     st.markdown('<h1 class="main-header">ADMIN ACCESS</h1>', unsafe_allow_html=True)
     
     col1, col2 = st.columns([1, 1])
