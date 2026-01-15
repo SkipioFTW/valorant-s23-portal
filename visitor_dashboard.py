@@ -692,7 +692,7 @@ font-family: 'Inter', sans-serif;
 transition: opacity 0.5s ease-in-out;
 }
 .main .block-container {
-padding-top: 260px !important;
+padding-top: 320px !important;
 }
 .portal-container {
 display: flex;
@@ -1011,34 +1011,34 @@ if st.session_state['is_admin']:
     pages.append("Admin Panel")
 
 # Top Navigation Bar
-          st.markdown('<div class="nav-wrapper"><div class="nav-logo">VALORANT S23 • PORTAL</div></div>', unsafe_allow_html=True)
-          
-          # Navigation Layout
-          st.markdown('<div class="sub-nav-wrapper">', unsafe_allow_html=True)
-          # Use a container to hold the columns, but we need to style the container itself to be part of the sub-nav
-          # Since we can't easily wrap st.columns in a div that stays fixed, we rely on sub-nav-wrapper
-          cols = st.columns([0.6] + [1] * len(pages))
-          
-          with cols[0]:
-              st.markdown('<div class="exit-btn">', unsafe_allow_html=True)
-              if st.button("🏠 EXIT", key="exit_portal", use_container_width=True):
-                  st.session_state['app_mode'] = 'portal'
-                  st.rerun()
-              st.markdown('</div>', unsafe_allow_html=True)
-              
-          for i, p in enumerate(pages):
-              with cols[i+1]:
-                  is_active = st.session_state['page'] == p
-                  st.markdown(f'<div class="{"active-nav" if is_active else ""}">', unsafe_allow_html=True)
-                  if st.button(p, key=f"nav_{p}", use_container_width=True, 
-                               type="primary" if is_active else "secondary"):
-                      st.session_state['page'] = p
-                      st.rerun()
-                  st.markdown('</div>', unsafe_allow_html=True)
-                  
-                  if is_active:
-                      st.markdown('<div style="height: 3px; background: var(--primary-red); margin-top: -8px; box-shadow: 0 0 10px var(--primary-red); border-radius: 2px;"></div>', unsafe_allow_html=True)
-          st.markdown('</div>', unsafe_allow_html=True)
+st.markdown('<div class="nav-wrapper"><div class="nav-logo">VALORANT S23 • PORTAL</div></div>', unsafe_allow_html=True)
+
+# Navigation Layout
+st.markdown('<div class="sub-nav-wrapper">', unsafe_allow_html=True)
+# Use a container to hold the columns, but we need to style the container itself to be part of the sub-nav
+# Since we can't easily wrap st.columns in a div that stays fixed, we rely on sub-nav-wrapper
+cols = st.columns([0.6] + [1] * len(pages))
+
+with cols[0]:
+    st.markdown('<div class="exit-btn">', unsafe_allow_html=True)
+    if st.button("🏠 EXIT", key="exit_portal", use_container_width=True):
+        st.session_state['app_mode'] = 'portal'
+        st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+    
+for i, p in enumerate(pages):
+    with cols[i+1]:
+        is_active = st.session_state['page'] == p
+        st.markdown(f'<div class="{"active-nav" if is_active else ""}">', unsafe_allow_html=True)
+        if st.button(p, key=f"nav_{p}", use_container_width=True, 
+                     type="primary" if is_active else "secondary"):
+            st.session_state['page'] = p
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+        if is_active:
+            st.markdown('<div style="height: 3px; background: var(--primary-red); margin-top: -8px; box-shadow: 0 0 10px var(--primary-red); border-radius: 2px;"></div>', unsafe_allow_html=True)
+st.markdown('</div>', unsafe_allow_html=True)
 
 page = st.session_state['page']
 
