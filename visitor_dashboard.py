@@ -1647,6 +1647,32 @@ elif page == "Player Leaderboard":
                         'League Avg': [prof['lg_avg_acs'], prof['lg_k'], prof['lg_d'], prof['lg_a']],
                     })
                     st.dataframe(cmp_df, hide_index=True, use_container_width=True)
+                    
+                    # Performance Benchmarks Chart (Dual Axis)
+                    from plotly.subplots import make_subplots
+                    fig_cmp_admin = make_subplots(specs=[[{"secondary_y": True}]])
+                    
+                    fig_cmp_admin.add_trace(go.Bar(name='Player ACS', x=['ACS'], y=[prof['avg_acs']], marker_color='#3FD1FF'), secondary_y=False)
+                    fig_cmp_admin.add_trace(go.Bar(name='Rank Avg ACS', x=['ACS'], y=[prof['sr_avg_acs']], marker_color='#FF4655', opacity=0.7), secondary_y=False)
+                    fig_cmp_admin.add_trace(go.Bar(name='League Avg ACS', x=['ACS'], y=[prof['lg_avg_acs']], marker_color='#ECE8E1', opacity=0.5), secondary_y=False)
+                    
+                    other_metrics = ['Kills', 'Deaths', 'Assists']
+                    player_others = [prof['total_kills']/max(prof['games'],1), prof['total_deaths']/max(prof['games'],1), prof['total_assists']/max(prof['games'],1)]
+                    rank_others = [prof['sr_k'], prof['sr_d'], prof['sr_a']]
+                    league_others = [prof['lg_k'], prof['lg_d'], prof['lg_a']]
+                    
+                    fig_cmp_admin.add_trace(go.Bar(name='Player Stats', x=other_metrics, y=player_others, marker_color='#3FD1FF', showlegend=False), secondary_y=True)
+                    fig_cmp_admin.add_trace(go.Bar(name='Rank Avg Stats', x=other_metrics, y=rank_others, marker_color='#FF4655', opacity=0.7, showlegend=False), secondary_y=True)
+                    fig_cmp_admin.add_trace(go.Bar(name='League Avg Stats', x=other_metrics, y=league_others, marker_color='#ECE8E1', opacity=0.5, showlegend=False), secondary_y=True)
+                    
+                    fig_cmp_admin.update_layout(
+                        barmode='group', height=350,
+                        title_text="Performance vs Benchmarks",
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                    )
+                    fig_cmp_admin.update_yaxes(title_text="ACS", secondary_y=False)
+                    fig_cmp_admin.update_yaxes(title_text="K/D/A", secondary_y=True)
+                    st.plotly_chart(apply_plotly_theme(fig_cmp_admin), use_container_width=True)
                     if 'trend' in prof and not prof['trend'].empty:
                         st.caption("ACS trend")
                         fig_acs = px.line(prof['trend'], x='label', y='avg_acs', 
@@ -1662,15 +1688,20 @@ elif page == "Player Leaderboard":
 
                     if 'sub_impact' in prof:
                         sid = prof['sub_impact']
-                        sidf = pd.DataFrame({
-                            'Role': ['Starter','Sub'],
-                            'ACS': [sid['starter_acs'], sid['sub_acs']],
-                            'KDA': [sid['starter_kda'], sid['sub_kda']],
-                        })
                         st.caption("Substitution impact")
-                        fig_sub = px.bar(sidf, x='Role', y=['ACS', 'KDA'], barmode='group',
-                                         color_discrete_map={'ACS': '#3FD1FF', 'KDA': '#FF4655'})
-                        st.plotly_chart(apply_plotly_theme(fig_sub), use_container_width=True)
+                        c_sub1, c_sub2 = st.columns(2)
+                        with c_sub1:
+                            fig_sub_acs = px.bar(x=['Starter', 'Sub'], y=[sid['starter_acs'], sid['sub_acs']], 
+                                               title="ACS: Starter vs Sub",
+                                               labels={'x': 'Role', 'y': 'ACS'},
+                                               color_discrete_sequence=['#3FD1FF'])
+                            st.plotly_chart(apply_plotly_theme(fig_sub_acs), use_container_width=True)
+                        with c_sub2:
+                            fig_sub_kda = px.bar(x=['Starter', 'Sub'], y=[sid['starter_kda'], sid['sub_kda']], 
+                                               title="KDA: Starter vs Sub",
+                                               labels={'x': 'Role', 'y': 'KDA'},
+                                               color_discrete_sequence=['#FF4655'])
+                            st.plotly_chart(apply_plotly_theme(fig_sub_kda), use_container_width=True)
                     if not prof['maps'].empty:
                         st.caption("Maps played")
                         st.dataframe(prof['maps'][['match_id','map_index','agent','acs','kills','deaths','assists','is_sub']], hide_index=True, use_container_width=True)
@@ -2611,13 +2642,34 @@ elif page == "Player Profile":
                 'League Avg': [prof['lg_avg_acs'], prof['lg_k'], prof['lg_d'], prof['lg_a']],
             })
             
-            # Plotly Bar Chart for comparison
-            fig_cmp = go.Figure()
-            fig_cmp.add_trace(go.Bar(name='Player', x=cmp_df['Metric'], y=cmp_df['Player'], marker_color='#3FD1FF'))
-            fig_cmp.add_trace(go.Bar(name='Rank Avg', x=cmp_df['Metric'], y=cmp_df['Rank Avg'], marker_color='#FF4655', opacity=0.7))
-            fig_cmp.add_trace(go.Bar(name='League Avg', x=cmp_df['Metric'], y=cmp_df['League Avg'], marker_color='#ECE8E1', opacity=0.5))
+            # Plotly Bar Chart for comparison with dual axis
+            from plotly.subplots import make_subplots
+            fig_cmp = make_subplots(specs=[[{"secondary_y": True}]])
             
-            fig_cmp.update_layout(barmode='group', height=400)
+            # ACS (Primary Y-Axis)
+            fig_cmp.add_trace(go.Bar(name='Player ACS', x=['ACS'], y=[prof['avg_acs']], marker_color='#3FD1FF'), secondary_y=False)
+            fig_cmp.add_trace(go.Bar(name='Rank Avg ACS', x=['ACS'], y=[prof['sr_avg_acs']], marker_color='#FF4655', opacity=0.7), secondary_y=False)
+            fig_cmp.add_trace(go.Bar(name='League Avg ACS', x=['ACS'], y=[prof['lg_avg_acs']], marker_color='#ECE8E1', opacity=0.5), secondary_y=False)
+            
+            # Per-Match Stats (Secondary Y-Axis)
+            other_metrics = ['Kills/Match', 'Deaths/Match', 'Assists/Match']
+            player_others = [prof['total_kills']/max(prof['games'],1), prof['total_deaths']/max(prof['games'],1), prof['total_assists']/max(prof['games'],1)]
+            rank_others = [prof['sr_k'], prof['sr_d'], prof['sr_a']]
+            league_others = [prof['lg_k'], prof['lg_d'], prof['lg_a']]
+            
+            fig_cmp.add_trace(go.Bar(name='Player Stats', x=other_metrics, y=player_others, marker_color='#3FD1FF', showlegend=False), secondary_y=True)
+            fig_cmp.add_trace(go.Bar(name='Rank Avg Stats', x=other_metrics, y=rank_others, marker_color='#FF4655', opacity=0.7, showlegend=False), secondary_y=True)
+            fig_cmp.add_trace(go.Bar(name='League Avg Stats', x=other_metrics, y=league_others, marker_color='#ECE8E1', opacity=0.5, showlegend=False), secondary_y=True)
+            
+            fig_cmp.update_layout(
+                barmode='group', 
+                height=400,
+                title_text="Performance vs Benchmarks (ACS on Left, Others on Right)",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            )
+            fig_cmp.update_yaxes(title_text="Average Combat Score (ACS)", secondary_y=False)
+            fig_cmp.update_yaxes(title_text="K/D/A Per Match", secondary_y=True)
+            
             st.plotly_chart(apply_plotly_theme(fig_cmp), use_container_width=True)
             
             if not prof['maps'].empty:
