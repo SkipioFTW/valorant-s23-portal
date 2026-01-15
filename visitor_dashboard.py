@@ -692,7 +692,7 @@ font-family: 'Inter', sans-serif;
 transition: opacity 0.5s ease-in-out;
 }
 .main .block-container {
-padding-top: 180px !important;
+padding-top: 260px !important;
 }
 .portal-container {
 display: flex;
@@ -821,16 +821,15 @@ position: fixed;
 top: 0;
 left: 0;
 right: 0;
-height: var(--nav-height);
+height: 60px;
 background: rgba(15, 25, 35, 0.98);
 backdrop-filter: blur(20px);
 border-bottom: 1px solid rgba(63, 209, 255, 0.2);
 display: flex;
 align-items: center;
-padding: 0 2rem;
+padding: 0 1.5rem;
 z-index: 9999;
-justify-content: flex-start;
-gap: 2rem;
+justify-content: center;
 box-shadow: 0 4px 30px rgba(0, 0, 0, 0.5);
 }
 .nav-logo {
@@ -838,8 +837,21 @@ font-family: 'Orbitron';
 color: var(--primary-blue);
 font-size: 1.2rem;
 font-weight: bold;
-letter-spacing: 2px;
+letter-spacing: 4px;
 white-space: nowrap;
+text-shadow: 0 0 15px rgba(63, 209, 255, 0.5);
+}
+.sub-nav-wrapper {
+position: fixed;
+top: 60px;
+left: 0;
+right: 0;
+z-index: 9998;
+background: rgba(15, 25, 35, 0.9);
+padding: 8px 1.5rem;
+border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+backdrop-filter: blur(10px);
+box-shadow: 0 4px 20px rgba(0,0,0,0.3);
 }
 /* Navigation Button Styling */
 .stButton > button {
@@ -870,7 +882,7 @@ background: #ff5c6a !important;
 box-shadow: 0 0 20px rgba(255, 70, 85, 0.4) !important;
 }
 /* Active Tab Style */
-div[data-testid="column"] button.active-nav {
+.active-nav button {
 border-bottom: 2px solid var(--primary-red) !important;
 color: white !important;
 background: rgba(255, 255, 255, 0.05) !important;
@@ -880,6 +892,7 @@ border-radius: 4px 4px 0 0 !important;
 .exit-btn button {
 border-color: var(--primary-red) !important;
 color: var(--primary-red) !important;
+font-weight: bold !important;
 }
 .exit-btn button:hover {
 background: rgba(255, 70, 85, 0.1) !important;
@@ -998,31 +1011,34 @@ if st.session_state['is_admin']:
     pages.append("Admin Panel")
 
 # Top Navigation Bar
-st.markdown('<div class="nav-wrapper"><div class="nav-logo">VALORANT S23 • PORTAL</div></div>', unsafe_allow_html=True)
-
-# Navigation Layout
-nav_container = st.container()
-with nav_container:
-    # Use a specific ratio to keep the EXIT button small and others balanced
-    cols = st.columns([0.8] + [1] * len(pages))
-    
-    with cols[0]:
-        st.markdown('<div class="exit-btn">', unsafe_allow_html=True)
-        if st.button("🏠 EXIT", key="exit_portal", use_container_width=True):
-            st.session_state['app_mode'] = 'portal'
-            st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
-        
-    for i, p in enumerate(pages):
-        with cols[i+1]:
-            is_active = st.session_state['page'] == p
-            if st.button(p, key=f"nav_{p}", use_container_width=True, 
-                         type="primary" if is_active else "secondary"):
-                st.session_state['page'] = p
-                st.rerun()
-            
-            if is_active:
-                st.markdown('<div style="height: 3px; background: var(--primary-red); margin-top: -8px; box-shadow: 0 0 10px var(--primary-red); border-radius: 2px;"></div>', unsafe_allow_html=True)
+          st.markdown('<div class="nav-wrapper"><div class="nav-logo">VALORANT S23 • PORTAL</div></div>', unsafe_allow_html=True)
+          
+          # Navigation Layout
+          st.markdown('<div class="sub-nav-wrapper">', unsafe_allow_html=True)
+          # Use a container to hold the columns, but we need to style the container itself to be part of the sub-nav
+          # Since we can't easily wrap st.columns in a div that stays fixed, we rely on sub-nav-wrapper
+          cols = st.columns([0.6] + [1] * len(pages))
+          
+          with cols[0]:
+              st.markdown('<div class="exit-btn">', unsafe_allow_html=True)
+              if st.button("🏠 EXIT", key="exit_portal", use_container_width=True):
+                  st.session_state['app_mode'] = 'portal'
+                  st.rerun()
+              st.markdown('</div>', unsafe_allow_html=True)
+              
+          for i, p in enumerate(pages):
+              with cols[i+1]:
+                  is_active = st.session_state['page'] == p
+                  st.markdown(f'<div class="{"active-nav" if is_active else ""}">', unsafe_allow_html=True)
+                  if st.button(p, key=f"nav_{p}", use_container_width=True, 
+                               type="primary" if is_active else "secondary"):
+                      st.session_state['page'] = p
+                      st.rerun()
+                  st.markdown('</div>', unsafe_allow_html=True)
+                  
+                  if is_active:
+                      st.markdown('<div style="height: 3px; background: var(--primary-red); margin-top: -8px; box-shadow: 0 0 10px var(--primary-red); border-radius: 2px;"></div>', unsafe_allow_html=True)
+          st.markdown('</div>', unsafe_allow_html=True)
 
 page = st.session_state['page']
 
@@ -1059,18 +1075,16 @@ if page == "Overview & Standings":
                     else:
                         logo_html = "<div style='width:40px;height:40px;background:rgba(255,255,255,0.05);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--text-dim);'>?</div>"
                     
-                    st.markdown(f"""
-                        <div class="custom-card" style="height: 100%;">
-                            <div style="display: flex; align-items: center; gap: 15px; margin-bottom: 10px;">
-                                {logo_html}
-                                <div style="font-weight: bold; color: var(--primary-blue); font-size: 1rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{row['name']}</div>
-                            </div>
-                            <div style="display: flex; justify-content: space-between; color: var(--text-dim); font-size: 0.8rem;">
-                                <span>WINS: <span style="color: var(--text-main); font-family: 'Orbitron';">{row['Wins']}</span></span>
-                                <span>PTS: <span style="color: var(--primary-blue); font-family: 'Orbitron';">{row['Points']}</span></span>
-                            </div>
-                        </div>
-                    """, unsafe_allow_html=True)
+                    st.markdown(f"""<div class="custom-card" style="height: 100%;">
+<div style="display: flex; align-items: center; gap: 15px; margin-bottom: 10px;">
+{logo_html}
+<div style="font-weight: bold; color: var(--primary-blue); font-size: 1rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{row['name']}</div>
+</div>
+<div style="display: flex; justify-content: space-between; color: var(--text-dim); font-size: 0.8rem;">
+<span>WINS: <span style="color: var(--text-main); font-family: 'Orbitron';">{row['Wins']}</span></span>
+<span>PTS: <span style="color: var(--primary-blue); font-family: 'Orbitron';">{row['Points']}</span></span>
+</div>
+</div>""", unsafe_allow_html=True)
                     
                     with st.expander("Roster"):
                         conn_r = get_conn()
@@ -1107,16 +1121,14 @@ elif page == "Matches":
             st.caption("None")
         else:
             for _, m in sched.iterrows():
-                st.markdown(f"""
-                <div class="custom-card">
-                    <div style="display: flex; justify-content: space-between; align-items: center;">
-                        <div style="flex: 1; text-align: right; font-weight: bold; color: var(--primary-blue);">{m['t1_name']}</div>
-                        <div style="margin: 0 20px; color: var(--text-dim); font-family: 'Orbitron';">VS</div>
-                        <div style="flex: 1; text-align: left; font-weight: bold; color: var(--primary-red);">{m['t2_name']}</div>
-                    </div>
-                    <div style="text-align: center; color: var(--text-dim); font-size: 0.8rem; margin-top: 10px;">{m['format']} • {m['group_name']}</div>
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown(f"""<div class="custom-card">
+<div style="display: flex; justify-content: space-between; align-items: center;">
+<div style="flex: 1; text-align: right; font-weight: bold; color: var(--primary-blue);">{m['t1_name']}</div>
+<div style="margin: 0 20px; color: var(--text-dim); font-family: 'Orbitron';">VS</div>
+<div style="flex: 1; text-align: left; font-weight: bold; color: var(--primary-red);">{m['t2_name']}</div>
+</div>
+<div style="text-align: center; color: var(--text-dim); font-size: 0.8rem; margin-top: 10px;">{m['format']} • {m['group_name']}</div>
+</div>""", unsafe_allow_html=True)
         
         st.markdown("### Completed")
         comp = df[df['status'] == 'completed']
@@ -1125,22 +1137,20 @@ elif page == "Matches":
                 winner_color_1 = "var(--primary-blue)" if m['score_t1'] > m['score_t2'] else "var(--text-main)"
                 winner_color_2 = "var(--primary-red)" if m['score_t2'] > m['score_t1'] else "var(--text-main)"
                 
-                st.markdown(f"""
-                <div class="custom-card" style="border-left: 4px solid {'var(--primary-blue)' if m['score_t1'] > m['score_t2'] else 'var(--primary-red)'};">
-                    <div style="display: flex; justify-content: space-between; align-items: center;">
-                        <div style="flex: 1; text-align: right;">
-                            <span style="font-weight: bold; color: {winner_color_1};">{m['t1_name']}</span>
-                            <span style="font-size: 1.5rem; margin-left: 10px; font-family: 'Orbitron';">{m['score_t1']}</span>
-                        </div>
-                        <div style="margin: 0 20px; color: var(--text-dim); font-family: 'Orbitron';">-</div>
-                        <div style="flex: 1; text-align: left;">
-                            <span style="font-size: 1.5rem; margin-right: 10px; font-family: 'Orbitron';">{m['score_t2']}</span>
-                            <span style="font-weight: bold; color: {winner_color_2};">{m['t2_name']}</span>
-                        </div>
-                    </div>
-                    <div style="text-align: center; color: var(--text-dim); font-size: 0.8rem; margin-top: 10px;">{m['format']} • {m['group_name']}</div>
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown(f"""<div class="custom-card" style="border-left: 4px solid {'var(--primary-blue)' if m['score_t1'] > m['score_t2'] else 'var(--primary-red)'};">
+<div style="display: flex; justify-content: space-between; align-items: center;">
+<div style="flex: 1; text-align: right;">
+<span style="font-weight: bold; color: {winner_color_1};">{m['t1_name']}</span>
+<span style="font-size: 1.5rem; margin-left: 10px; font-family: 'Orbitron';">{m['score_t1']}</span>
+</div>
+<div style="margin: 0 20px; color: var(--text-dim); font-family: 'Orbitron';">-</div>
+<div style="flex: 1; text-align: left;">
+<span style="font-size: 1.5rem; margin-right: 10px; font-family: 'Orbitron';">{m['score_t2']}</span>
+<span style="font-weight: bold; color: {winner_color_2};">{m['t2_name']}</span>
+</div>
+</div>
+<div style="text-align: center; color: var(--text-dim); font-size: 0.8rem; margin-top: 10px;">{m['format']} • {m['group_name']}</div>
+</div>""", unsafe_allow_html=True)
                 
                 with st.expander("Match Details"):
                     maps_df = get_match_maps(int(m['id']))
@@ -1172,24 +1182,22 @@ elif page == "Match Summary":
         m = df.iloc[sel]
         
         # Match Score Card
-        st.markdown(f"""
-            <div class="custom-card" style="margin-bottom: 2rem; border-bottom: 4px solid {'var(--primary-blue)' if m['score_t1'] > m['score_t2'] else 'var(--primary-red)'};">
-                <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 0;">
-                    <div style="flex: 1; text-align: right;">
-                        <h2 style="margin: 0; color: {'var(--primary-blue)' if m['score_t1'] > m['score_t2'] else 'var(--text-main)'}; font-family: 'Orbitron';">{m['t1_name']}</h2>
-                    </div>
-                    <div style="margin: 0 30px; display: flex; align-items: center; gap: 15px;">
-                        <span style="font-size: 3rem; font-family: 'Orbitron'; color: var(--text-main);">{m['score_t1']}</span>
-                        <span style="font-size: 1.5rem; color: var(--text-dim); font-family: 'Orbitron';">:</span>
-                        <span style="font-size: 3rem; font-family: 'Orbitron'; color: var(--text-main);">{m['score_t2']}</span>
-                    </div>
-                    <div style="flex: 1; text-align: left;">
-                        <h2 style="margin: 0; color: {'var(--primary-red)' if m['score_t2'] > m['score_t1'] else 'var(--text-main)'}; font-family: 'Orbitron';">{m['t2_name']}</h2>
-                    </div>
-                </div>
-                <div style="text-align: center; color: var(--text-dim); font-size: 0.9rem; margin-top: 10px; letter-spacing: 2px;">{m['format'].upper()} • {m['group_name'].upper()}</div>
-            </div>
-        """, unsafe_allow_html=True)
+        st.markdown(f"""<div class="custom-card" style="margin-bottom: 2rem; border-bottom: 4px solid {'var(--primary-blue)' if m['score_t1'] > m['score_t2'] else 'var(--primary-red)'};">
+<div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 0;">
+<div style="flex: 1; text-align: right;">
+<h2 style="margin: 0; color: {'var(--primary-blue)' if m['score_t1'] > m['score_t2'] else 'var(--text-main)'}; font-family: 'Orbitron';">{m['t1_name']}</h2>
+</div>
+<div style="margin: 0 30px; display: flex; align-items: center; gap: 15px;">
+<span style="font-size: 3rem; font-family: 'Orbitron'; color: var(--text-main);">{m['score_t1']}</span>
+<span style="font-size: 1.5rem; color: var(--text-dim); font-family: 'Orbitron';">:</span>
+<span style="font-size: 3rem; font-family: 'Orbitron'; color: var(--text-main);">{m['score_t2']}</span>
+</div>
+<div style="flex: 1; text-align: left;">
+<h2 style="margin: 0; color: {'var(--primary-red)' if m['score_t2'] > m['score_t1'] else 'var(--text-main)'}; font-family: 'Orbitron';">{m['t2_name']}</h2>
+</div>
+</div>
+<div style="text-align: center; color: var(--text-dim); font-size: 0.9rem; margin-top: 10px; letter-spacing: 2px;">{m['format'].upper()} • {m['group_name'].upper()}</div>
+</div>""", unsafe_allow_html=True)
         
         maps_df = get_match_maps(int(m['id']))
         if maps_df.empty:
@@ -1205,24 +1213,22 @@ elif page == "Match Summary":
             
             # Map Score Card
             curr_map = maps_df[maps_df['map_index'] == selected_map_idx].iloc[0]
-            st.markdown(f"""
-                <div class="custom-card" style="background: rgba(255,255,255,0.02); margin-bottom: 20px;">
-                    <div style="display: flex; justify-content: center; align-items: center; gap: 40px;">
-                        <div style="text-align: center;">
-                            <div style="color: var(--text-dim); font-size: 0.8rem; margin-bottom: 5px;">{m['t1_name']}</div>
-                            <div style="font-size: 2rem; font-family: 'Orbitron'; color: {'var(--primary-blue)' if curr_map['team1_rounds'] > curr_map['team2_rounds'] else 'var(--text-main)'};">{curr_map['team1_rounds']}</div>
-                        </div>
-                        <div style="text-align: center;">
-                            <div style="font-family: 'Orbitron'; color: var(--primary-blue); font-size: 1.2rem;">{curr_map['map_name'].upper()}</div>
-                            <div style="color: var(--text-dim); font-size: 0.7rem;">WINNER: {m['t1_name'] if curr_map['winner_id'] == m['t1_id'] else m['t2_name']}</div>
-                        </div>
-                        <div style="text-align: center;">
-                            <div style="color: var(--text-dim); font-size: 0.8rem; margin-bottom: 5px;">{m['t2_name']}</div>
-                            <div style="font-size: 2rem; font-family: 'Orbitron'; color: {'var(--primary-red)' if curr_map['team2_rounds'] > curr_map['team1_rounds'] else 'var(--text-main)'};">{curr_map['team2_rounds']}</div>
-                        </div>
-                    </div>
-                </div>
-            """, unsafe_allow_html=True)
+            st.markdown(f"""<div class="custom-card" style="background: rgba(255,255,255,0.02); margin-bottom: 20px;">
+<div style="display: flex; justify-content: center; align-items: center; gap: 40px;">
+<div style="text-align: center;">
+<div style="color: var(--text-dim); font-size: 0.8rem; margin-bottom: 5px;">{m['t1_name']}</div>
+<div style="font-size: 2rem; font-family: 'Orbitron'; color: {'var(--primary-blue)' if curr_map['team1_rounds'] > curr_map['team2_rounds'] else 'var(--text-main)'};">{curr_map['team1_rounds']}</div>
+</div>
+<div style="text-align: center;">
+<div style="font-family: 'Orbitron'; color: var(--primary-blue); font-size: 1.2rem;">{curr_map['map_name'].upper()}</div>
+<div style="color: var(--text-dim); font-size: 0.7rem;">WINNER: {m['t1_name'] if curr_map['winner_id'] == m['t1_id'] else m['t2_name']}</div>
+</div>
+<div style="text-align: center;">
+<div style="color: var(--text-dim); font-size: 0.8rem; margin-bottom: 5px;">{m['t2_name']}</div>
+<div style="font-size: 2rem; font-family: 'Orbitron'; color: {'var(--primary-red)' if curr_map['team2_rounds'] > curr_map['team1_rounds'] else 'var(--text-main)'};">{curr_map['team2_rounds']}</div>
+</div>
+</div>
+</div>""", unsafe_allow_html=True)
             
             # Scoreboards
             conn_s = get_conn()
@@ -1325,67 +1331,59 @@ elif page == "Match Predictor":
             winner = t1_name if prob1 > prob2 else t2_name
             conf = max(prob1, prob2)
             
-            st.markdown(f"""
-            <div class="custom-card" style="text-align: center; border-top: 4px solid { 'var(--primary-blue)' if winner == t1_name else 'var(--primary-red)' };">
-                <h2 style="margin: 0; color: { 'var(--primary-blue)' if winner == t1_name else 'var(--primary-red)' };">PREDICTION: {winner}</h2>
-                <div style="font-size: 3rem; font-family: 'Orbitron'; margin: 10px 0;">{conf:.1f}%</div>
-                <div style="color: var(--text-dim);">CONFIDENCE LEVEL</div>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown(f"""<div class="custom-card" style="text-align: center; border-top: 4px solid { 'var(--primary-blue)' if winner == t1_name else 'var(--primary-red)' };">
+<h2 style="margin: 0; color: { 'var(--primary-blue)' if winner == t1_name else 'var(--primary-red)' };">PREDICTION: {winner}</h2>
+<div style="font-size: 3rem; font-family: 'Orbitron'; margin: 10px 0;">{conf:.1f}%</div>
+<div style="color: var(--text-dim);">CONFIDENCE LEVEL</div>
+</div>""", unsafe_allow_html=True)
 
             # Probability Bar
-            st.markdown(f"""
-            <div style="width: 100%; background: rgba(255,255,255,0.05); height: 20px; border-radius: 10px; overflow: hidden; display: flex; margin: 20px 0;">
-                <div style="width: {prob1}%; background: var(--primary-blue); height: 100%; transition: width 1s ease-in-out;"></div>
-                <div style="width: {prob2}%; background: var(--primary-red); height: 100%; transition: width 1s ease-in-out;"></div>
-            </div>
-            <div style="display: flex; justify-content: space-between; font-family: 'Orbitron'; font-size: 0.8rem;">
-                <div style="color: var(--primary-blue);">{t1_name} ({prob1:.1f}%)</div>
-                <div style="color: var(--primary-red);">{t2_name} ({prob2:.1f}%)</div>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown(f"""<div style="width: 100%; background: rgba(255,255,255,0.05); height: 20px; border-radius: 10px; overflow: hidden; display: flex; margin: 20px 0;">
+<div style="width: {prob1}%; background: var(--primary-blue); height: 100%; transition: width 1s ease-in-out;"></div>
+<div style="width: {prob2}%; background: var(--primary-red); height: 100%; transition: width 1s ease-in-out;"></div>
+</div>
+<div style="display: flex; justify-content: space-between; font-family: 'Orbitron'; font-size: 0.8rem;">
+<div style="color: var(--primary-blue);">{t1_name} ({prob1:.1f}%)</div>
+<div style="color: var(--primary-red);">{t2_name} ({prob2:.1f}%)</div>
+</div>""", unsafe_allow_html=True)
             
             c1, c2 = st.columns(2)
             with c1:
-                st.markdown(f"""
-                <div class="custom-card">
-                    <h3 style="color: var(--primary-blue); margin-top: 0;">{t1_name} Analysis</h3>
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
-                        <div>
-                            <div style="color: var(--text-dim); font-size: 0.7rem; text-transform: uppercase;">Win Rate</div>
-                            <div style="font-size: 1.2rem; font-family: 'Orbitron';">{s1['win_rate']:.0%}</div>
-                        </div>
-                        <div>
-                            <div style="color: var(--text-dim); font-size: 0.7rem; text-transform: uppercase;">Avg Score</div>
-                            <div style="font-size: 1.2rem; font-family: 'Orbitron';">{s1['avg_score']:.1f}</div>
-                        </div>
-                        <div>
-                            <div style="color: var(--text-dim); font-size: 0.7rem; text-transform: uppercase;">H2H Wins</div>
-                            <div style="font-size: 1.2rem; font-family: 'Orbitron';">{h2h_wins_t1}</div>
-                        </div>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown(f"""<div class="custom-card">
+<h3 style="color: var(--primary-blue); margin-top: 0;">{t1_name} Analysis</h3>
+<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+<div>
+<div style="color: var(--text-dim); font-size: 0.7rem; text-transform: uppercase;">Win Rate</div>
+<div style="font-size: 1.2rem; font-family: 'Orbitron';">{s1['win_rate']:.0%}</div>
+</div>
+<div>
+<div style="color: var(--text-dim); font-size: 0.7rem; text-transform: uppercase;">Avg Score</div>
+<div style="font-size: 1.2rem; font-family: 'Orbitron';">{s1['avg_score']:.1f}</div>
+</div>
+<div>
+<div style="color: var(--text-dim); font-size: 0.7rem; text-transform: uppercase;">H2H Wins</div>
+<div style="font-size: 1.2rem; font-family: 'Orbitron';">{h2h_wins_t1}</div>
+</div>
+</div>
+</div>""", unsafe_allow_html=True)
             with c2:
-                st.markdown(f"""
-                <div class="custom-card">
-                    <h3 style="color: var(--primary-red); margin-top: 0;">{t2_name} Analysis</h3>
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
-                        <div>
-                            <div style="color: var(--text-dim); font-size: 0.7rem; text-transform: uppercase;">Win Rate</div>
-                            <div style="font-size: 1.2rem; font-family: 'Orbitron';">{s2['win_rate']:.0%}</div>
-                        </div>
-                        <div>
-                            <div style="color: var(--text-dim); font-size: 0.7rem; text-transform: uppercase;">Avg Score</div>
-                            <div style="font-size: 1.2rem; font-family: 'Orbitron';">{s2['avg_score']:.1f}</div>
-                        </div>
-                        <div>
-                            <div style="color: var(--text-dim); font-size: 0.7rem; text-transform: uppercase;">H2H Wins</div>
-                            <div style="font-size: 1.2rem; font-family: 'Orbitron';">{h2h_wins_t2}</div>
-                        </div>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown(f"""<div class="custom-card">
+<h3 style="color: var(--primary-red); margin-top: 0;">{t2_name} Analysis</h3>
+<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+<div>
+<div style="color: var(--text-dim); font-size: 0.7rem; text-transform: uppercase;">Win Rate</div>
+<div style="font-size: 1.2rem; font-family: 'Orbitron';">{s2['win_rate']:.0%}</div>
+</div>
+<div>
+<div style="color: var(--text-dim); font-size: 0.7rem; text-transform: uppercase;">Avg Score</div>
+<div style="font-size: 1.2rem; font-family: 'Orbitron';">{s2['avg_score']:.1f}</div>
+</div>
+<div>
+<div style="color: var(--text-dim); font-size: 0.7rem; text-transform: uppercase;">H2H Wins</div>
+<div style="font-size: 1.2rem; font-family: 'Orbitron';">{h2h_wins_t2}</div>
+</div>
+</div>
+</div>""", unsafe_allow_html=True)
 
 elif page == "Player Leaderboard":
     df = get_player_leaderboard()
@@ -1401,15 +1399,13 @@ elif page == "Player Leaderboard":
         
         for i, (_, row) in enumerate(top3.iterrows()):
             with cols[i]:
-                st.markdown(f"""
-                <div class="custom-card" style="text-align: center; border-bottom: 3px solid {colors[i]};">
-                    <div style="font-size: 2rem;">{medals[i]}</div>
-                    <div style="font-weight: bold; color: var(--primary-blue); font-size: 1.2rem; margin: 10px 0;">{row['name']}</div>
-                    <div style="color: var(--text-dim); font-size: 0.8rem;">{row['team']}</div>
-                    <div style="font-family: 'Orbitron'; font-size: 1.5rem; color: var(--text-main); margin-top: 10px;">{row['avg_acs']}</div>
-                    <div style="font-size: 0.6rem; color: var(--text-dim);">AVG ACS</div>
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown(f"""<div class="custom-card" style="text-align: center; border-bottom: 3px solid {colors[i]};">
+<div style="font-size: 2rem;">{medals[i]}</div>
+<div style="font-weight: bold; color: var(--primary-blue); font-size: 1.2rem; margin: 10px 0;">{row['name']}</div>
+<div style="color: var(--text-dim); font-size: 0.8rem;">{row['team']}</div>
+<div style="font-family: 'Orbitron'; font-size: 1.5rem; color: var(--text-main); margin-top: 10px;">{row['avg_acs']}</div>
+<div style="font-size: 0.6rem; color: var(--text-dim);">AVG ACS</div>
+</div>""", unsafe_allow_html=True)
         
         st.divider()
         st.dataframe(df, use_container_width=True, hide_index=True)
@@ -1423,12 +1419,10 @@ elif page == "Player Leaderboard":
             if not pid_row.empty:
                 prof = get_player_profile(int(pid_row.iloc[0]['id']))
                 if prof:
-                    st.markdown(f"""
-                    <div style="margin-top: 2rem; padding: 1rem; border-left: 5px solid var(--primary-blue); background: rgba(63, 209, 255, 0.05);">
-                        <h2 style="margin: 0;">{prof['info'].get('name')}</h2>
-                        <div style="color: var(--text-dim); font-family: 'Orbitron';">{prof['info'].get('team') or 'No Team'} • {prof['info'].get('rank') or 'Unranked'}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
+                    st.markdown(f"""<div style="margin-top: 2rem; padding: 1rem; border-left: 5px solid var(--primary-blue); background: rgba(63, 209, 255, 0.05);">
+<h2 style="margin: 0;">{prof['info'].get('name')}</h2>
+<div style="color: var(--text-dim); font-family: 'Orbitron';">{prof['info'].get('team') or 'No Team'} • {prof['info'].get('rank') or 'Unranked'}</div>
+</div>""", unsafe_allow_html=True)
                     
                     st.write("") # Spacer
                     c1,c2,c3,c4 = st.columns(4)
@@ -1546,19 +1540,17 @@ elif page == "Teams":
     for _, row in show.iterrows():
         with st.container():
             # Team Header Card
-            st.markdown(f"""
-                <div class="custom-card" style="margin-bottom: 10px;">
-                    <div style="display: flex; align-items: center; gap: 20px;">
-                        <div style="flex-shrink: 0;">
-                            {"<img src='data:image/png;base64," + base64.b64encode(open(row['logo_path'], "rb").read()).decode() + "' width='60'/>" if row['logo_path'] and os.path.exists(row['logo_path']) else "<div style='width:60px;height:60px;background:rgba(255,255,255,0.05);border-radius:8px;display:flex;align-items:center;justify-content:center;color:var(--text-dim);'>?</div>"}
-                        </div>
-                        <div>
-                            <h3 style="margin: 0; color: var(--primary-blue); font-family: 'Orbitron';">{row['name']} <span style="color: var(--text-dim); font-size: 0.9rem;">[{row['tag'] or ''}]</span></h3>
-                            <div style="color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">Group {row['group_name']}</div>
-                        </div>
-                    </div>
-                </div>
-            """, unsafe_allow_html=True)
+            st.markdown(f"""<div class="custom-card" style="margin-bottom: 10px;">
+<div style="display: flex; align-items: center; gap: 20px;">
+<div style="flex-shrink: 0;">
+{"<img src='data:image/png;base64," + base64.b64encode(open(row['logo_path'], "rb").read()).decode() + "' width='60'/>" if row['logo_path'] and os.path.exists(row['logo_path']) else "<div style='width:60px;height:60px;background:rgba(255,255,255,0.05);border-radius:8px;display:flex;align-items:center;justify-content:center;color:var(--text-dim);'>?</div>"}
+</div>
+<div>
+<h3 style="margin: 0; color: var(--primary-blue); font-family: 'Orbitron';">{row['name']} <span style="color: var(--text-dim); font-size: 0.9rem;">[{row['tag'] or ''}]</span></h3>
+<div style="color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">Group {row['group_name']}</div>
+</div>
+</div>
+</div>""", unsafe_allow_html=True)
             
             with st.expander("Manage Roster & Details"):
                 conn_r = get_conn()
@@ -2046,20 +2038,16 @@ elif page == "Substitutions Log":
         # Summary Metrics
         m1, m2 = st.columns(2)
         with m1:
-            st.markdown(f"""
-                <div class="custom-card" style="text-align: center;">
-                    <div style="color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">Total Subs</div>
-                    <div style="font-size: 2.5rem; font-family: 'Orbitron'; color: var(--primary-blue); margin: 10px 0;">{len(df)}</div>
-                </div>
-            """, unsafe_allow_html=True)
+            st.markdown(f"""<div class="custom-card" style="text-align: center;">
+<div style="color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">Total Subs</div>
+<div style="font-size: 2.5rem; font-family: 'Orbitron'; color: var(--primary-blue); margin: 10px 0;">{len(df)}</div>
+</div>""", unsafe_allow_html=True)
         with m2:
             top_team = df.groupby('team').size().idxmax() if not df.empty else "N/A"
-            st.markdown(f"""
-                <div class="custom-card" style="text-align: center;">
-                    <div style="color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">Most Active Team</div>
-                    <div style="font-size: 1.5rem; font-family: 'Orbitron'; color: var(--primary-red); margin: 10px 0;">{top_team}</div>
-                </div>
-            """, unsafe_allow_html=True)
+            st.markdown(f"""<div class="custom-card" style="text-align: center;">
+<div style="color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">Most Active Team</div>
+<div style="font-size: 1.5rem; font-family: 'Orbitron'; color: var(--primary-red); margin: 10px 0;">{top_team}</div>
+</div>""", unsafe_allow_html=True)
             
         st.markdown("<br>", unsafe_allow_html=True)
         
@@ -2098,50 +2086,40 @@ elif page == "Player Profile":
         
         if prof:
             # Header Card
-            st.markdown(f"""
-                <div class="custom-card" style="margin-bottom: 2rem;">
-                    <div style="display: flex; align-items: center; gap: 20px;">
-                        <div style="background: var(--primary-blue); width: 60px; height: 60px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 2rem; color: var(--bg-dark);">
-                            {prof['info'].get('name')[0].upper() if prof['info'].get('name') else 'P'}
-                        </div>
-                        <div>
-                            <h2 style="margin: 0; color: var(--primary-blue); font-family: 'Orbitron';">{prof['info'].get('name')}</h2>
-                            <div style="color: var(--text-dim); font-size: 1.1rem;">{prof['info'].get('team') or 'Free Agent'}</div>
-                        </div>
-                    </div>
-                </div>
-            """, unsafe_allow_html=True)
+            st.markdown(f"""<div class="custom-card" style="margin-bottom: 2rem;">
+<div style="display: flex; align-items: center; gap: 20px;">
+<div style="background: var(--primary-blue); width: 60px; height: 60px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 2rem; color: var(--bg-dark);">
+{prof['info'].get('name')[0].upper() if prof['info'].get('name') else 'P'}
+</div>
+<div>
+<h2 style="margin: 0; color: var(--primary-blue); font-family: 'Orbitron';">{prof['info'].get('name')}</h2>
+<div style="color: var(--text-dim); font-size: 1.1rem;">{prof['info'].get('team') or 'Free Agent'}</div>
+</div>
+</div>
+</div>""", unsafe_allow_html=True)
             
             # Metrics Grid
             m1, m2, m3, m4 = st.columns(4)
             with m1:
-                st.markdown(f"""
-                    <div class="custom-card" style="text-align: center;">
-                        <div style="color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">Games</div>
-                        <div style="font-size: 2rem; font-family: 'Orbitron'; color: var(--text-main); margin: 10px 0;">{prof['games']}</div>
-                    </div>
-                """, unsafe_allow_html=True)
+                st.markdown(f"""<div class="custom-card" style="text-align: center;">
+<div style="color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">Games</div>
+<div style="font-size: 2rem; font-family: 'Orbitron'; color: var(--text-main); margin: 10px 0;">{prof['games']}</div>
+</div>""", unsafe_allow_html=True)
             with m2:
-                st.markdown(f"""
-                    <div class="custom-card" style="text-align: center;">
-                        <div style="color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">Avg ACS</div>
-                        <div style="font-size: 2rem; font-family: 'Orbitron'; color: var(--primary-blue); margin: 10px 0;">{prof['avg_acs']}</div>
-                    </div>
-                """, unsafe_allow_html=True)
+                st.markdown(f"""<div class="custom-card" style="text-align: center;">
+<div style="color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">Avg ACS</div>
+<div style="font-size: 2rem; font-family: 'Orbitron'; color: var(--primary-blue); margin: 10px 0;">{prof['avg_acs']}</div>
+</div>""", unsafe_allow_html=True)
             with m3:
-                st.markdown(f"""
-                    <div class="custom-card" style="text-align: center;">
-                        <div style="color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">KD Ratio</div>
-                        <div style="font-size: 2rem; font-family: 'Orbitron'; color: var(--primary-red); margin: 10px 0;">{prof['kd_ratio']}</div>
-                    </div>
-                """, unsafe_allow_html=True)
+                st.markdown(f"""<div class="custom-card" style="text-align: center;">
+<div style="color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">KD Ratio</div>
+<div style="font-size: 2rem; font-family: 'Orbitron'; color: var(--primary-red); margin: 10px 0;">{prof['kd_ratio']}</div>
+</div>""", unsafe_allow_html=True)
             with m4:
-                st.markdown(f"""
-                    <div class="custom-card" style="text-align: center;">
-                        <div style="color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">Assists</div>
-                        <div style="font-size: 2rem; font-family: 'Orbitron'; color: var(--text-main); margin: 10px 0;">{prof['total_assists']}</div>
-                    </div>
-                """, unsafe_allow_html=True)
+                st.markdown(f"""<div class="custom-card" style="text-align: center;">
+<div style="color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">Assists</div>
+<div style="font-size: 2rem; font-family: 'Orbitron'; color: var(--text-main); margin: 10px 0;">{prof['total_assists']}</div>
+</div>""", unsafe_allow_html=True)
             
             st.markdown("<br>", unsafe_allow_html=True)
             
