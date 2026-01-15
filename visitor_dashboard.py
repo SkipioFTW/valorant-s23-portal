@@ -11,9 +11,19 @@ import requests
 import re
 import io
 import json
+import html
+import time
 import plotly.express as px
 import plotly.graph_objects as go
 from PIL import Image, ImageOps
+
+def is_safe_path(path):
+    if not path:
+        return False
+    # Prevent path traversal, absolute paths, and alternate data streams (Windows)
+    if ".." in path or os.path.isabs(path) or ":" in path:
+        return False
+    return True
 
 def ocr_extract(image_bytes, crop_box=None):
     """
@@ -149,11 +159,19 @@ def ensure_base_schema():
     conn.close()
 
 def ensure_column(table, column_name, column_def_sql):
+    # Allowed tables for security validation
+    ALLOWED_TABLES = {"teams", "players", "matches", "match_maps", "match_stats_map", "match_stats", "agents", "seasons", "team_history", "admins"}
+    if table not in ALLOWED_TABLES:
+        return # Skip if table is not allowed
+    
     conn = get_conn()
     c = conn.cursor()
+    # Use string interpolation only for table names which are now validated against ALLOWED_TABLES
     cols = [r[1] for r in c.execute(f"PRAGMA table_info({table})").fetchall()]
     if column_name not in cols:
         try:
+            # Validate column_def_sql basic structure to prevent injection if it comes from untrusted source
+            # In this app, it is hardcoded, but good practice to validate
             c.execute(f"ALTER TABLE {table} ADD COLUMN {column_def_sql}")
         except sqlite3.OperationalError:
             pass
@@ -187,6 +205,9 @@ def ensure_upgrade_schema():
     ensure_column("matches", "maps_played", "maps_played INTEGER DEFAULT 0")
     ensure_column("seasons", "is_active", "is_active BOOLEAN DEFAULT 0")
     ensure_column("admins", "role", "role TEXT DEFAULT 'admin'")
+    ensure_column("matches", "match_type", "match_type TEXT DEFAULT 'regular'")
+    ensure_column("matches", "playoff_round", "playoff_round INTEGER")
+    ensure_column("matches", "bracket_pos", "bracket_pos INTEGER")
     conn2 = get_conn()
     c2 = conn2.cursor()
     try:
@@ -206,33 +227,41 @@ def ensure_upgrade_schema():
 
 def import_sqlite_db(upload_bytes):
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
-    tmp.write(upload_bytes)
-    tmp.flush()
-    src = sqlite3.connect(tmp.name)
-    tgt = get_conn()
-    tables = [
-        "teams","players","matches","match_maps","match_stats_map","match_stats","agents","seasons","team_history"
-    ]
-    summary = {}
-    for t in tables:
-        try:
-            df = pd.read_sql(f"SELECT * FROM {t}", src)
-        except Exception:
-            continue
-        if df.empty:
-            continue
-        cols = [r[1] for r in tgt.execute(f"PRAGMA table_info({t})").fetchall()]
-        use = [c for c in df.columns if c in cols]
-        if not use:
-            continue
-        q = f"INSERT OR REPLACE INTO {t} (" + ",".join(use) + ") VALUES (" + ",".join(["?"]*len(use)) + ")"
-        vals = df[use].values.tolist()
-        tgt.executemany(q, vals)
-        summary[t] = len(vals)
-    tgt.commit()
-    src.close()
-    tgt.close()
-    return summary
+    try:
+        tmp.write(upload_bytes)
+        tmp.flush()
+        src = sqlite3.connect(tmp.name)
+        tgt = get_conn()
+        tables = [
+            "teams","players","matches","match_maps","match_stats_map","match_stats","agents","seasons","team_history"
+        ]
+        summary = {}
+        for t in tables:
+            try:
+                df = pd.read_sql(f"SELECT * FROM {t}", src)
+            except Exception:
+                continue
+            if df.empty:
+                continue
+            cols = [r[1] for r in tgt.execute(f"PRAGMA table_info({t})").fetchall()]
+            use = [c for c in df.columns if c in cols]
+            if not use:
+                continue
+            q = f"INSERT OR REPLACE INTO {t} (" + ",".join(use) + ") VALUES (" + ",".join(["?"]*len(use)) + ")"
+            vals = df[use].values.tolist()
+            tgt.executemany(q, vals)
+            summary[t] = len(vals)
+        tgt.commit()
+        src.close()
+        tgt.close()
+        return summary
+    finally:
+        tmp.close()
+        if os.path.exists(tmp.name):
+            try:
+                os.remove(tmp.name)
+            except Exception:
+                pass
 
 def export_db_bytes():
     p = os.path.abspath(DB_PATH)
@@ -484,12 +513,14 @@ def ensure_seed_admins():
 
 def authenticate(username, password):
     conn = get_conn()
-    row = conn.execute("SELECT username, password_hash, salt FROM admins WHERE username=? AND is_active=1", (username,)).fetchone()
+    row = conn.execute("SELECT username, password_hash, salt, role FROM admins WHERE username=? AND is_active=1", (username,)).fetchone()
     conn.close()
     if not row:
-        return False
-    _, ph, salt = row
-    return verify_password(password, salt, ph)
+        return None
+    u, ph, salt, role = row
+    if verify_password(password, salt, ph):
+        return {"username": u, "role": role}
+    return None
 
 def init_match_stats_map_table():
     conn = get_conn()
@@ -537,7 +568,7 @@ def get_standings():
     conn = get_conn()
     try:
         teams_df = pd.read_sql_query("SELECT id, name, group_name, logo_path FROM teams", conn)
-        matches_df = pd.read_sql_query("SELECT * FROM matches WHERE status='completed' AND (UPPER(format)='BO1' OR format IS NULL)", conn)
+        matches_df = pd.read_sql_query("SELECT * FROM matches WHERE status='completed' AND match_type='regular' AND (UPPER(format)='BO1' OR format IS NULL)", conn)
     except Exception:
         conn.close()
         return pd.DataFrame()
@@ -621,11 +652,30 @@ def get_week_matches(week):
         FROM matches m
         JOIN teams t1 ON m.team1_id = t1.id
         JOIN teams t2 ON m.team2_id = t2.id
-        WHERE m.week = ?
+        WHERE m.week = ? AND m.match_type = 'regular'
         ORDER BY m.id
         """,
         conn,
         params=(week,),
+    )
+    conn.close()
+    return df
+
+def get_playoff_matches():
+    conn = get_conn()
+    df = pd.read_sql_query(
+        """
+        SELECT m.id, m.playoff_round, m.bracket_pos, m.status, m.format, m.maps_played,
+               t1.name as t1_name, t2.name as t2_name,
+               m.score_t1, m.score_t2, t1.id as t1_id, t2.id as t2_id,
+               m.winner_id
+        FROM matches m
+        LEFT JOIN teams t1 ON m.team1_id = t1.id
+        LEFT JOIN teams t2 ON m.team2_id = t2.id
+        WHERE m.match_type = 'playoff'
+        ORDER BY m.playoff_round ASC, m.bracket_pos ASC
+        """,
+        conn
     )
     conn.close()
     return df
@@ -671,6 +721,10 @@ def apply_plotly_theme(fig):
 
 st.set_page_config(page_title="S23 Portal", layout="wide")
 
+# App Mode Logic
+if 'app_mode' not in st.session_state:
+    st.session_state['app_mode'] = 'portal'
+
 # Hide standard sidebar navigation and other streamlit elements
 st.markdown("""<link href='https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Rajdhani:wght@400;600&family=Inter:wght@400;700&display=swap' rel='stylesheet'><style>
 /* Global Styles */
@@ -691,8 +745,69 @@ color: var(--text-main);
 font-family: 'Inter', sans-serif;
 transition: opacity 0.5s ease-in-out;
 }
-.main .block-container {
-padding-top: 320px !important;
+.stApp .main .block-container {
+padding-top: var(--padding-top, 60px) !important;
+}
+.portal-header {
+color: var(--primary-blue);
+font-size: 3.5rem;
+text-shadow: 0 0 30px rgba(63, 209, 255, 0.4);
+margin-bottom: 0;
+text-align: center;
+font-family: 'Orbitron', sans-serif;
+}
+.portal-subtitle {
+color: var(--text-dim);
+font-size: 0.9rem;
+letter-spacing: 5px;
+margin-bottom: 3rem;
+text-transform: uppercase;
+text-align: center;
+}
+/* Navigation Button Styling */
+.stButton > button {
+background: transparent !important;
+border: 1px solid rgba(255, 255, 255, 0.1) !important;
+color: var(--text-dim) !important;
+font-family: 'Inter', sans-serif !important;
+font-weight: 600 !important;
+transition: all 0.3s ease !important;
+border-radius: 4px !important;
+text-transform: uppercase !important;
+letter-spacing: 1px !important;
+font-size: 0.8rem !important;
+height: 40px !important;
+}
+.stButton > button:hover {
+border-color: var(--primary-blue) !important;
+color: var(--primary-blue) !important;
+background: rgba(63, 209, 255, 0.05) !important;
+}
+.stButton > button[kind="primary"] {
+background: var(--primary-red) !important;
+border-color: var(--primary-red) !important;
+color: white !important;
+}
+.stButton > button[kind="primary"]:hover {
+background: #ff5c6a !important;
+box-shadow: 0 0 20px rgba(255, 70, 85, 0.4) !important;
+}
+/* Active Tab Style */
+.active-nav button {
+border-bottom: 2px solid var(--primary-red) !important;
+color: white !important;
+background: rgba(255, 255, 255, 0.05) !important;
+border-radius: 4px 4px 0 0 !important;
+}
+/* Exit Button Style */
+.exit-btn button {
+border-color: var(--primary-red) !important;
+color: var(--primary-red) !important;
+font-weight: bold !important;
+}
+.exit-btn button:hover {
+background: rgba(255, 70, 85, 0.1) !important;
+color: white !important;
 }
 .portal-container {
 display: flex;
@@ -741,7 +856,7 @@ max-width: 1100px;
 margin-top: 1rem;
 }
 .portal-card-wrapper {
-background: var(--card-bg);
+background: linear-gradient(145deg, var(--card-bg), #1a222a);
 border: 1px solid rgba(63, 209, 255, 0.15);
 padding: 0;
 border-radius: 16px;
@@ -751,11 +866,25 @@ overflow: hidden;
 display: flex;
 flex-direction: column;
 height: 100%;
+box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+}
+.portal-card-wrapper::before {
+content: '';
+position: absolute;
+top: 0;
+left: 0;
+right: 0;
+height: 2px;
+background: linear-gradient(90deg, transparent, var(--primary-blue), transparent);
+opacity: 0.3;
 }
 .portal-card-wrapper:hover:not(.disabled) {
 transform: translateY(-12px);
 border-color: var(--primary-blue);
-box-shadow: 0 20px 50px rgba(63, 209, 255, 0.25);
+box-shadow: 0 20px 50px rgba(63, 209, 255, 0.2);
+}
+.portal-card-wrapper:hover:not(.disabled)::before {
+opacity: 1;
 }
 .portal-card-content {
 padding: 2.5rem 2rem;
@@ -790,6 +919,22 @@ font-size: 1rem;
 letter-spacing: 2px;
 z-index: 10;
 }
+.custom-card {
+background: var(--card-bg);
+border: 1px solid rgba(63, 209, 255, 0.1);
+border-radius: 12px;
+padding: 1.5rem;
+margin-bottom: 1.5rem;
+box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+transition: all 0.3s ease;
+position: relative;
+overflow: hidden;
+}
+.custom-card:hover {
+border-color: var(--primary-blue);
+transform: translateY(-2px);
+box-shadow: 0 8px 30px rgba(63, 209, 255, 0.15);
+}
 [data-testid='stSidebarNav'] {display: none;}
 [data-testid='stHeader'] {display: none;}
 h1, h2, h3 {
@@ -821,13 +966,13 @@ position: fixed;
 top: 0;
 left: 0;
 right: 0;
-height: 60px;
+height: 100px;
 background: rgba(15, 25, 35, 0.98);
 backdrop-filter: blur(20px);
 border-bottom: 1px solid rgba(63, 209, 255, 0.2);
 display: flex;
-align-items: center;
-padding: 0 1.5rem;
+align-items: flex-start;
+padding: 20px 1.5rem 0 1.5rem;
 z-index: 9999;
 justify-content: center;
 box-shadow: 0 4px 30px rgba(0, 0, 0, 0.5);
@@ -840,65 +985,102 @@ font-weight: bold;
 letter-spacing: 4px;
 white-space: nowrap;
 text-shadow: 0 0 15px rgba(63, 209, 255, 0.5);
+line-height: 1;
 }
 .sub-nav-wrapper {
 position: fixed;
-top: 60px;
+top: 100px;
 left: 0;
 right: 0;
 z-index: 9998;
 background: rgba(15, 25, 35, 0.9);
-padding: 8px 1.5rem;
+padding: 15px 1.5rem;
 border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 backdrop-filter: blur(10px);
 box-shadow: 0 4px 20px rgba(0,0,0,0.3);
 }
-/* Navigation Button Styling */
-.stButton > button {
-background: transparent !important;
-border: 1px solid rgba(255, 255, 255, 0.1) !important;
-color: var(--text-dim) !important;
-font-family: 'Inter', sans-serif !important;
-font-weight: 600 !important;
-transition: all 0.3s ease !important;
-border-radius: 4px !important;
-text-transform: uppercase !important;
-letter-spacing: 1px !important;
-font-size: 0.8rem !important;
-height: 40px !important;
+/* Responsive Adjustments */
+@media (max-width: 768px) {
+.stApp .main .block-container {
+padding-top: 140px !important;
+padding-left: 1rem !important;
+padding-right: 1rem !important;
 }
-.stButton > button:hover {
-border-color: var(--primary-blue) !important;
-color: var(--primary-blue) !important;
-background: rgba(63, 209, 255, 0.05) !important;
+.portal-container {
+padding: 1rem;
+min-height: auto;
 }
-.stButton > button[kind="primary"] {
-background: var(--primary-red) !important;
-border-color: var(--primary-red) !important;
-color: white !important;
+.portal-header {
+font-size: 2rem !important;
 }
-.stButton > button[kind="primary"]:hover {
-background: #ff5c6a !important;
-box-shadow: 0 0 20px rgba(255, 70, 85, 0.4) !important;
+.portal-subtitle {
+font-size: 0.7rem !important;
+letter-spacing: 2px !important;
+margin-bottom: 1.5rem !important;
 }
-/* Active Tab Style */
-.active-nav button {
-border-bottom: 2px solid var(--primary-red) !important;
-color: white !important;
-background: rgba(255, 255, 255, 0.05) !important;
-border-radius: 4px 4px 0 0 !important;
+.status-grid {
+flex-direction: column;
+gap: 0.8rem;
 }
-/* Exit Button Style */
-.exit-btn button {
-border-color: var(--primary-red) !important;
-color: var(--primary-red) !important;
-font-weight: bold !important;
+.status-indicator {
+min-width: 100%;
 }
-.exit-btn button:hover {
-background: rgba(255, 70, 85, 0.1) !important;
-color: white !important;
+.portal-options {
+grid-template-columns: 1fr;
+gap: 1.5rem;
+}
+.nav-wrapper {
+height: 60px;
+padding: 0 1rem;
+align-items: center;
+}
+.nav-logo {
+font-size: 0.9rem;
+letter-spacing: 2px;
+}
+.sub-nav-wrapper {
+top: 60px;
+padding: 8px 0.5rem;
+overflow-x: auto;
+white-space: nowrap;
+display: block !important;
+-webkit-overflow-scrolling: touch;
+background: rgba(15, 25, 35, 0.95);
+}
+.sub-nav-wrapper [data-testid="stHorizontalBlock"] {
+display: flex !important;
+flex-wrap: nowrap !important;
+width: max-content !important;
+gap: 12px !important;
+padding: 0 10px !important;
+}
+.sub-nav-wrapper [data-testid="column"] {
+width: auto !important;
+min-width: 130px !important;
+flex: 0 0 auto !important;
+}
+/* Hide the scrollbar for sub-nav */
+.sub-nav-wrapper::-webkit-scrollbar {
+display: none;
+}
+.sub-nav-wrapper {
+-ms-overflow-style: none;
+scrollbar-width: none;
+}
+.main-header {
+font-size: 1.8rem !important;
+margin-bottom: 1.5rem !important;
+}
 }
 </style>""", unsafe_allow_html=True)
+
+# Dynamic padding based on mode
+if st.session_state.get('app_mode') == 'portal':
+    st.markdown("<style>:root { --padding-top: 60px; }</style>", unsafe_allow_html=True)
+    st.markdown("<style>@media (max-width: 768px) { :root { --padding-top: 30px; } }</style>", unsafe_allow_html=True)
+else:
+    st.markdown("<style>:root { --padding-top: 180px; }</style>", unsafe_allow_html=True)
+    st.markdown("<style>@media (max-width: 768px) { :root { --padding-top: 140px; } }</style>", unsafe_allow_html=True)
 
 ensure_base_schema()
 init_admin_table()
@@ -907,8 +1089,10 @@ ensure_upgrade_schema()
 ensure_seed_admins()
 
 # App Mode Logic
-if 'app_mode' not in st.session_state:
-    st.session_state['app_mode'] = 'portal'
+if 'login_attempts' not in st.session_state:
+    st.session_state['login_attempts'] = 0
+if 'last_login_attempt' not in st.session_state:
+    st.session_state['last_login_attempt'] = 0
 
 # Use a placeholder to clear the screen during transitions
 main_container = st.empty()
@@ -916,8 +1100,8 @@ main_container = st.empty()
 if st.session_state['app_mode'] == 'portal':
     with main_container.container():
         st.markdown("""<div class="portal-container">
-<h1 style="color: var(--primary-blue); font-size: 3.5rem; text-shadow: 0 0 30px rgba(63, 209, 255, 0.4); margin-bottom: 0;">VALORANT S23 PORTAL</h1>
-<p style="color: var(--text-dim); font-size: 0.9rem; letter-spacing: 5px; margin-bottom: 3rem; text-transform: uppercase;">System Status & Access Terminal</p>
+<h1 class="portal-header">VALORANT S23 PORTAL</h1>
+<p class="portal-subtitle">System Status & Access Terminal</p>
 <div class="status-grid">
 <div class="status-indicator status-online">● VISITOR ACCESS: LIVE</div>
 <div class="status-indicator status-offline">● TEAM PANEL: STAGING</div>
@@ -960,20 +1144,44 @@ if st.session_state['app_mode'] == 'admin' and not st.session_state.get('is_admi
     col1, col2 = st.columns([1, 1])
     with col1:
         st.info("Please enter your administrator credentials to proceed.")
+        
+        # Simple rate limiting
+        if st.session_state['login_attempts'] >= 5:
+            time_since_last = time.time() - st.session_state['last_login_attempt']
+            if time_since_last < 300: # 5 minute lockout
+                st.error(f"Too many failed attempts. Please wait {int(300 - time_since_last)} seconds.")
+                if st.button("← BACK TO SELECTION"):
+                    st.session_state['app_mode'] = 'portal'
+                    st.rerun()
+                st.stop()
+            else:
+                st.session_state['login_attempts'] = 0
+
         with st.form("admin_login_main"):
             u = st.text_input("Username")
             p = st.text_input("Password", type="password")
             tok = st.text_input("Admin Token", type="password")
             if st.form_submit_button("LOGIN TO ADMIN PANEL", use_container_width=True):
-                env_tok = get_secret("ADMIN_LOGIN_TOKEN", "")
-                if authenticate(u, p) and hmac.compare_digest(tok or "", env_tok):
-                    st.session_state['is_admin'] = True
-                    st.session_state['username'] = u
-                    st.session_state['page'] = "Admin Panel"
-                    st.success("Access Granted")
-                    st.rerun()
+                env_tok = get_secret("ADMIN_LOGIN_TOKEN", None)
+                
+                if env_tok is None or env_tok == "":
+                    st.error("Security Error: ADMIN_LOGIN_TOKEN not configured in environment.")
+                    st.session_state['last_login_attempt'] = time.time()
+                    st.session_state['login_attempts'] += 1
                 else:
-                    st.error("Invalid credentials")
+                    auth_res = authenticate(u, p)
+                    if auth_res and hmac.compare_digest(tok or "", env_tok):
+                        st.session_state['is_admin'] = True
+                        st.session_state['username'] = auth_res['username']
+                        st.session_state['role'] = auth_res['role']
+                        st.session_state['page'] = "Admin Panel"
+                        st.session_state['login_attempts'] = 0
+                        st.success("Access Granted")
+                        st.rerun()
+                    else:
+                        st.session_state['last_login_attempt'] = time.time()
+                        st.session_state['login_attempts'] += 1
+                        st.error(f"Invalid credentials (Attempt {st.session_state['login_attempts']}/5)")
         if st.button("← BACK TO SELECTION"):
             st.session_state['app_mode'] = 'portal'
             st.rerun()
@@ -1008,7 +1216,9 @@ pages = [
     "Player Profile",
 ]
 if st.session_state['is_admin']:
-    pages.append("Admin Panel")
+    pages.insert(pages.index("Admin Panel") if "Admin Panel" in pages else len(pages), "Playoffs")
+    if "Admin Panel" not in pages:
+        pages.append("Admin Panel")
 
 # Top Navigation Bar
 st.markdown('<div class="nav-wrapper"><div class="nav-logo">VALORANT S23 • PORTAL</div></div>', unsafe_allow_html=True)
@@ -1055,12 +1265,12 @@ if page == "Overview & Standings":
         conn.close()
         df = df.merge(hist, left_on='id', right_on='team_id', how='left')
         df['season_count'] = df['season_count'].fillna(1).astype(int)
-        df['logo_display'] = df['logo_path'].apply(lambda x: x if x and os.path.exists(x) else None)
+        df['logo_display'] = df['logo_path'].apply(lambda x: x if x and is_safe_path(x) and os.path.exists(x) else None)
         
         groups = sorted(df['group_name'].unique())
         
         for grp in groups:
-            st.markdown(f'<h2 style="color: var(--primary-blue); font-family: \'Orbitron\'; border-left: 4px solid var(--primary-blue); padding-left: 15px; margin: 2rem 0 1rem 0;">GROUP {grp}</h2>', unsafe_allow_html=True)
+            st.markdown(f'<h2 style="color: var(--primary-blue); font-family: \'Orbitron\'; border-left: 4px solid var(--primary-blue); padding-left: 15px; margin: 2rem 0 1rem 0;">GROUP {html.escape(str(grp))}</h2>', unsafe_allow_html=True)
             
             grp_df = df[df['group_name'] == grp]
             
@@ -1078,7 +1288,7 @@ if page == "Overview & Standings":
                     st.markdown(f"""<div class="custom-card" style="height: 100%;">
 <div style="display: flex; align-items: center; gap: 15px; margin-bottom: 10px;">
 {logo_html}
-<div style="font-weight: bold; color: var(--primary-blue); font-size: 1rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{row['name']}</div>
+<div style="font-weight: bold; color: var(--primary-blue); font-size: 1rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{html.escape(str(row['name']))}</div>
 </div>
 <div style="display: flex; justify-content: space-between; color: var(--text-dim); font-size: 0.8rem;">
 <span>WINS: <span style="color: var(--text-main); font-family: 'Orbitron';">{row['Wins']}</span></span>
@@ -1123,11 +1333,11 @@ elif page == "Matches":
             for _, m in sched.iterrows():
                 st.markdown(f"""<div class="custom-card">
 <div style="display: flex; justify-content: space-between; align-items: center;">
-<div style="flex: 1; text-align: right; font-weight: bold; color: var(--primary-blue);">{m['t1_name']}</div>
+<div style="flex: 1; text-align: right; font-weight: bold; color: var(--primary-blue);">{html.escape(str(m['t1_name']))}</div>
 <div style="margin: 0 20px; color: var(--text-dim); font-family: 'Orbitron';">VS</div>
-<div style="flex: 1; text-align: left; font-weight: bold; color: var(--primary-red);">{m['t2_name']}</div>
+<div style="flex: 1; text-align: left; font-weight: bold; color: var(--primary-red);">{html.escape(str(m['t2_name']))}</div>
 </div>
-<div style="text-align: center; color: var(--text-dim); font-size: 0.8rem; margin-top: 10px;">{m['format']} • {m['group_name']}</div>
+<div style="text-align: center; color: var(--text-dim); font-size: 0.8rem; margin-top: 10px;">{html.escape(str(m['format']))} • {html.escape(str(m['group_name']))}</div>
 </div>""", unsafe_allow_html=True)
         
         st.markdown("### Completed")
@@ -1140,16 +1350,16 @@ elif page == "Matches":
                 st.markdown(f"""<div class="custom-card" style="border-left: 4px solid {'var(--primary-blue)' if m['score_t1'] > m['score_t2'] else 'var(--primary-red)'};">
 <div style="display: flex; justify-content: space-between; align-items: center;">
 <div style="flex: 1; text-align: right;">
-<span style="font-weight: bold; color: {winner_color_1};">{m['t1_name']}</span>
+<span style="font-weight: bold; color: {winner_color_1};">{html.escape(str(m['t1_name']))}</span>
 <span style="font-size: 1.5rem; margin-left: 10px; font-family: 'Orbitron';">{m['score_t1']}</span>
 </div>
 <div style="margin: 0 20px; color: var(--text-dim); font-family: 'Orbitron';">-</div>
 <div style="flex: 1; text-align: left;">
 <span style="font-size: 1.5rem; margin-right: 10px; font-family: 'Orbitron';">{m['score_t2']}</span>
-<span style="font-weight: bold; color: {winner_color_2};">{m['t2_name']}</span>
+<span style="font-weight: bold; color: {winner_color_2};">{html.escape(str(m['t2_name']))}</span>
 </div>
 </div>
-<div style="text-align: center; color: var(--text-dim); font-size: 0.8rem; margin-top: 10px;">{m['format']} • {m['group_name']}</div>
+<div style="text-align: center; color: var(--text-dim); font-size: 0.8rem; margin-top: 10px;">{html.escape(str(m['format']))} • {html.escape(str(m['group_name']))}</div>
 </div>""", unsafe_allow_html=True)
                 
                 with st.expander("Match Details"):
@@ -1185,7 +1395,7 @@ elif page == "Match Summary":
         st.markdown(f"""<div class="custom-card" style="margin-bottom: 2rem; border-bottom: 4px solid {'var(--primary-blue)' if m['score_t1'] > m['score_t2'] else 'var(--primary-red)'};">
 <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 0;">
 <div style="flex: 1; text-align: right;">
-<h2 style="margin: 0; color: {'var(--primary-blue)' if m['score_t1'] > m['score_t2'] else 'var(--text-main)'}; font-family: 'Orbitron';">{m['t1_name']}</h2>
+<h2 style="margin: 0; color: {'var(--primary-blue)' if m['score_t1'] > m['score_t2'] else 'var(--text-main)'}; font-family: 'Orbitron';">{html.escape(str(m['t1_name']))}</h2>
 </div>
 <div style="margin: 0 30px; display: flex; align-items: center; gap: 15px;">
 <span style="font-size: 3rem; font-family: 'Orbitron'; color: var(--text-main);">{m['score_t1']}</span>
@@ -1193,10 +1403,10 @@ elif page == "Match Summary":
 <span style="font-size: 3rem; font-family: 'Orbitron'; color: var(--text-main);">{m['score_t2']}</span>
 </div>
 <div style="flex: 1; text-align: left;">
-<h2 style="margin: 0; color: {'var(--primary-red)' if m['score_t2'] > m['score_t1'] else 'var(--text-main)'}; font-family: 'Orbitron';">{m['t2_name']}</h2>
+<h2 style="margin: 0; color: {'var(--primary-red)' if m['score_t2'] > m['score_t1'] else 'var(--text-main)'}; font-family: 'Orbitron';">{html.escape(str(m['t2_name']))}</h2>
 </div>
 </div>
-<div style="text-align: center; color: var(--text-dim); font-size: 0.9rem; margin-top: 10px; letter-spacing: 2px;">{m['format'].upper()} • {m['group_name'].upper()}</div>
+<div style="text-align: center; color: var(--text-dim); font-size: 0.9rem; margin-top: 10px; letter-spacing: 2px;">{html.escape(str(m['format'].upper()))} • {html.escape(str(m['group_name'].upper()))}</div>
 </div>""", unsafe_allow_html=True)
         
         maps_df = get_match_maps(int(m['id']))
@@ -1216,15 +1426,15 @@ elif page == "Match Summary":
             st.markdown(f"""<div class="custom-card" style="background: rgba(255,255,255,0.02); margin-bottom: 20px;">
 <div style="display: flex; justify-content: center; align-items: center; gap: 40px;">
 <div style="text-align: center;">
-<div style="color: var(--text-dim); font-size: 0.8rem; margin-bottom: 5px;">{m['t1_name']}</div>
+<div style="color: var(--text-dim); font-size: 0.8rem; margin-bottom: 5px;">{html.escape(str(m['t1_name']))}</div>
 <div style="font-size: 2rem; font-family: 'Orbitron'; color: {'var(--primary-blue)' if curr_map['team1_rounds'] > curr_map['team2_rounds'] else 'var(--text-main)'};">{curr_map['team1_rounds']}</div>
 </div>
 <div style="text-align: center;">
-<div style="font-family: 'Orbitron'; color: var(--primary-blue); font-size: 1.2rem;">{curr_map['map_name'].upper()}</div>
-<div style="color: var(--text-dim); font-size: 0.7rem;">WINNER: {m['t1_name'] if curr_map['winner_id'] == m['t1_id'] else m['t2_name']}</div>
+<div style="font-family: 'Orbitron'; color: var(--primary-blue); font-size: 1.2rem;">{html.escape(str(curr_map['map_name'].upper()))}</div>
+<div style="color: var(--text-dim); font-size: 0.7rem;">WINNER: {html.escape(str(m['t1_name'] if curr_map['winner_id'] == m['t1_id'] else m['t2_name']))}</div>
 </div>
 <div style="text-align: center;">
-<div style="color: var(--text-dim); font-size: 0.8rem; margin-bottom: 5px;">{m['t2_name']}</div>
+<div style="color: var(--text-dim); font-size: 0.8rem; margin-bottom: 5px;">{html.escape(str(m['t2_name']))}</div>
 <div style="font-size: 2rem; font-family: 'Orbitron'; color: {'var(--primary-red)' if curr_map['team2_rounds'] > curr_map['team1_rounds'] else 'var(--text-main)'};">{curr_map['team2_rounds']}</div>
 </div>
 </div>
@@ -1238,14 +1448,14 @@ elif page == "Match Summary":
             
             c1, c2 = st.columns(2)
             with c1:
-                st.markdown(f'<h4 style="color: var(--primary-blue); font-family: \'Orbitron\';">{m["t1_name"]} Scoreboard</h4>', unsafe_allow_html=True)
+                st.markdown(f'<h4 style="color: var(--primary-blue); font-family: \'Orbitron\';">{html.escape(str(m["t1_name"]))} Scoreboard</h4>', unsafe_allow_html=True)
                 if s1.empty:
                     st.info("No scoreboard data")
                 else:
                     st.dataframe(s1.rename(columns={'name':'Player','agent':'Agent','acs':'ACS','kills':'K','deaths':'D','assists':'A','is_sub':'Sub'}), hide_index=True, use_container_width=True)
             
             with c2:
-                st.markdown(f'<h4 style="color: var(--primary-red); font-family: \'Orbitron\';">{m["t2_name"]} Scoreboard</h4>', unsafe_allow_html=True)
+                st.markdown(f'<h4 style="color: var(--primary-red); font-family: \'Orbitron\';">{html.escape(str(m["t2_name"]))} Scoreboard</h4>', unsafe_allow_html=True)
                 if s2.empty:
                     st.info("No scoreboard data")
                 else:
@@ -1332,7 +1542,7 @@ elif page == "Match Predictor":
             conf = max(prob1, prob2)
             
             st.markdown(f"""<div class="custom-card" style="text-align: center; border-top: 4px solid { 'var(--primary-blue)' if winner == t1_name else 'var(--primary-red)' };">
-<h2 style="margin: 0; color: { 'var(--primary-blue)' if winner == t1_name else 'var(--primary-red)' };">PREDICTION: {winner}</h2>
+<h2 style="margin: 0; color: { 'var(--primary-blue)' if winner == t1_name else 'var(--primary-red)' };">PREDICTION: {html.escape(str(winner))}</h2>
 <div style="font-size: 3rem; font-family: 'Orbitron'; margin: 10px 0;">{conf:.1f}%</div>
 <div style="color: var(--text-dim);">CONFIDENCE LEVEL</div>
 </div>""", unsafe_allow_html=True)
@@ -1343,14 +1553,14 @@ elif page == "Match Predictor":
 <div style="width: {prob2}%; background: var(--primary-red); height: 100%; transition: width 1s ease-in-out;"></div>
 </div>
 <div style="display: flex; justify-content: space-between; font-family: 'Orbitron'; font-size: 0.8rem;">
-<div style="color: var(--primary-blue);">{t1_name} ({prob1:.1f}%)</div>
-<div style="color: var(--primary-red);">{t2_name} ({prob2:.1f}%)</div>
+<div style="color: var(--primary-blue);">{html.escape(str(t1_name))} ({prob1:.1f}%)</div>
+<div style="color: var(--primary-red);">{html.escape(str(t2_name))} ({prob2:.1f}%)</div>
 </div>""", unsafe_allow_html=True)
             
             c1, c2 = st.columns(2)
             with c1:
                 st.markdown(f"""<div class="custom-card">
-<h3 style="color: var(--primary-blue); margin-top: 0;">{t1_name} Analysis</h3>
+<h3 style="color: var(--primary-blue); margin-top: 0;">{html.escape(str(t1_name))} Analysis</h3>
 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
 <div>
 <div style="color: var(--text-dim); font-size: 0.7rem; text-transform: uppercase;">Win Rate</div>
@@ -1368,7 +1578,7 @@ elif page == "Match Predictor":
 </div>""", unsafe_allow_html=True)
             with c2:
                 st.markdown(f"""<div class="custom-card">
-<h3 style="color: var(--primary-red); margin-top: 0;">{t2_name} Analysis</h3>
+<h3 style="color: var(--primary-red); margin-top: 0;">{html.escape(str(t2_name))} Analysis</h3>
 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
 <div>
 <div style="color: var(--text-dim); font-size: 0.7rem; text-transform: uppercase;">Win Rate</div>
@@ -1401,8 +1611,8 @@ elif page == "Player Leaderboard":
             with cols[i]:
                 st.markdown(f"""<div class="custom-card" style="text-align: center; border-bottom: 3px solid {colors[i]};">
 <div style="font-size: 2rem;">{medals[i]}</div>
-<div style="font-weight: bold; color: var(--primary-blue); font-size: 1.2rem; margin: 10px 0;">{row['name']}</div>
-<div style="color: var(--text-dim); font-size: 0.8rem;">{row['team']}</div>
+<div style="font-weight: bold; color: var(--primary-blue); font-size: 1.2rem; margin: 10px 0;">{html.escape(str(row['name']))}</div>
+<div style="color: var(--text-dim); font-size: 0.8rem;">{html.escape(str(row['team']))}</div>
 <div style="font-family: 'Orbitron'; font-size: 1.5rem; color: var(--text-main); margin-top: 10px;">{row['avg_acs']}</div>
 <div style="font-size: 0.6rem; color: var(--text-dim);">AVG ACS</div>
 </div>""", unsafe_allow_html=True)
@@ -1420,8 +1630,8 @@ elif page == "Player Leaderboard":
                 prof = get_player_profile(int(pid_row.iloc[0]['id']))
                 if prof:
                     st.markdown(f"""<div style="margin-top: 2rem; padding: 1rem; border-left: 5px solid var(--primary-blue); background: rgba(63, 209, 255, 0.05);">
-<h2 style="margin: 0;">{prof['info'].get('name')}</h2>
-<div style="color: var(--text-dim); font-family: 'Orbitron';">{prof['info'].get('team') or 'No Team'} • {prof['info'].get('rank') or 'Unranked'}</div>
+<h2 style="margin: 0;">{html.escape(str(prof['info'].get('name')))}</h2>
+<div style="color: var(--text-dim); font-family: 'Orbitron';">{html.escape(str(prof['info'].get('team') or 'No Team'))} • {html.escape(str(prof['info'].get('rank') or 'Unranked'))}</div>
 </div>""", unsafe_allow_html=True)
                     
                     st.write("") # Spacer
@@ -1543,11 +1753,11 @@ elif page == "Teams":
             st.markdown(f"""<div class="custom-card" style="margin-bottom: 10px;">
 <div style="display: flex; align-items: center; gap: 20px;">
 <div style="flex-shrink: 0;">
-{"<img src='data:image/png;base64," + base64.b64encode(open(row['logo_path'], "rb").read()).decode() + "' width='60'/>" if row['logo_path'] and os.path.exists(row['logo_path']) else "<div style='width:60px;height:60px;background:rgba(255,255,255,0.05);border-radius:8px;display:flex;align-items:center;justify-content:center;color:var(--text-dim);'>?</div>"}
+{"<img src='data:image/png;base64," + base64.b64encode(open(row['logo_path'], "rb").read()).decode() + "' width='60'/>" if row['logo_path'] and is_safe_path(row['logo_path']) and os.path.exists(row['logo_path']) else "<div style='width:60px;height:60px;background:rgba(255,255,255,0.05);border-radius:8px;display:flex;align-items:center;justify-content:center;color:var(--text-dim);'>?</div>"}
 </div>
 <div>
-<h3 style="margin: 0; color: var(--primary-blue); font-family: 'Orbitron';">{row['name']} <span style="color: var(--text-dim); font-size: 0.9rem;">[{row['tag'] or ''}]</span></h3>
-<div style="color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">Group {row['group_name']}</div>
+<h3 style="margin: 0; color: var(--primary-blue); font-family: 'Orbitron';">{html.escape(str(row['name']))} <span style="color: var(--text-dim); font-size: 0.9rem;">[{html.escape(str(row['tag'] or ''))}]</span></h3>
+<div style="color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">Group {html.escape(str(row['group_name']))}</div>
 </div>
 </div>
 </div>""", unsafe_allow_html=True)
@@ -1577,12 +1787,16 @@ elif page == "Teams":
                             new_group = st.text_input("Group", value=row['group_name'] or "")
                             new_logo = st.text_input("Logo Path", value=row['logo_path'] or "")
                             if st.form_submit_button("Update Team"):
-                                conn_u = get_conn()
-                                conn_u.execute("UPDATE teams SET name=?, tag=?, group_name=?, logo_path=? WHERE id=?", (new_name, new_tag or None, new_group or None, new_logo or None, int(row['id'])))
-                                conn_u.commit()
-                                conn_u.close()
-                                st.success("Team updated")
-                                st.rerun()
+                                # Use is_safe_path for validation
+                                if new_logo and not is_safe_path(new_logo):
+                                    st.error("Invalid logo path. Path traversal or absolute paths are not allowed.")
+                                else:
+                                    conn_u = get_conn()
+                                    conn_u.execute("UPDATE teams SET name=?, tag=?, group_name=?, logo_path=? WHERE id=?", (new_name, new_tag or None, new_group or None, new_logo or None, int(row['id'])))
+                                    conn_u.commit()
+                                    conn_u.close()
+                                    st.success("Team updated")
+                                    st.rerun()
                     
                     with col2:
                         st.caption("Roster Management")
@@ -1610,6 +1824,174 @@ elif page == "Teams":
                                 st.success("Player removed")
                                 st.rerun()
         st.markdown("<br>", unsafe_allow_html=True)
+
+elif page == "Playoffs":
+    st.markdown('<h1 class="main-header">PLAYOFFS BRACKETS</h1>', unsafe_allow_html=True)
+    
+    if not st.session_state.get('is_admin'):
+        st.warning("Playoffs are currently in staging. Only administrators can view this page.")
+        st.stop()
+        
+    df = get_playoff_matches()
+    
+    # Playoffs Management (Admin Only)
+    with st.expander("🛠️ Manage Playoff Matches"):
+        conn = get_conn()
+        teams_df = pd.read_sql("SELECT id, name FROM teams ORDER BY name", conn)
+        conn.close()
+        tnames = [""] + teams_df['name'].tolist()
+        
+        with st.form("add_playoff_match"):
+            c1, c2, c3 = st.columns(3)
+            round_idx = c1.selectbox("Round", [1, 2, 3], format_func=lambda x: {1: "Quarter-finals", 2: "Semi-finals", 3: "Final"}[x])
+            pos = c2.number_input("Bracket Position", min_value=1, max_value=8, value=1)
+            fmt = c3.selectbox("Format", ["BO1", "BO3", "BO5"], index=1)
+            
+            c4, c5 = st.columns(2)
+            t1 = c4.selectbox("Team 1", tnames)
+            t2 = c5.selectbox("Team 2", tnames)
+            
+            if st.form_submit_button("Add/Update Playoff Match"):
+                conn = get_conn()
+                t1_id = int(teams_df[teams_df['name'] == t1].iloc[0]['id']) if t1 else None
+                t2_id = int(teams_df[teams_df['name'] == t2].iloc[0]['id']) if t2 else None
+                
+                # Check if exists
+                existing = conn.execute("SELECT id FROM matches WHERE match_type='playoff' AND playoff_round=? AND bracket_pos=?", (round_idx, pos)).fetchone()
+                if existing:
+                    conn.execute("UPDATE matches SET team1_id=?, team2_id=?, format=? WHERE id=?", (t1_id, t2_id, fmt, existing[0]))
+                else:
+                    conn.execute("INSERT INTO matches (match_type, playoff_round, bracket_pos, team1_id, team2_id, format, status, score_t1, score_t2) VALUES ('playoff', ?, ?, ?, ?, ?, 'scheduled', 0, 0)", (round_idx, pos, t1_id, t2_id, fmt))
+                conn.commit()
+                conn.close()
+                st.success("Playoff match updated")
+                st.rerun()
+
+    # Match Map Editor for Playoffs (Admin Only)
+    if not df.empty:
+        with st.expander("📝 Edit Playoff Match Scores & Maps"):
+            match_opts = df.apply(lambda r: f"R{r['playoff_round']} P{r['bracket_pos']}: {r['t1_name']} vs {r['t2_name']}", axis=1).tolist()
+            idx = st.selectbox("Select Playoff Match to Edit", list(range(len(match_opts))), format_func=lambda i: match_opts[i], key="po_edit_idx")
+            m = df.iloc[idx]
+            
+            c0, c1, c2 = st.columns([1,1,1])
+            with c0:
+                fmt = st.selectbox("Format", ["BO1","BO3","BO5"], index=["BO1","BO3","BO5"].index(str(m['format'] or "BO3").upper()), key="po_fmt")
+            with c1:
+                s1 = st.number_input(m['t1_name'], min_value=0, value=int(m['score_t1'] or 0), key="po_s1")
+            with c2:
+                s2 = st.number_input(m['t2_name'], min_value=0, value=int(m['score_t2'] or 0), key="po_s2")
+
+            st.caption("Per-Map Scores")
+            maps_catalog = ["Ascent","Bind","Breeze","Corrode","Fracture","Haven","Icebox","Lotus","Pearl","Split","Sunset"]
+            fmt_constraints = {"BO1": (1,1), "BO3": (2,3), "BO5": (3,5)}
+            min_maps, max_maps = fmt_constraints.get(fmt, (1,1))
+            existing_maps_df = get_match_maps(int(m['id']))
+            maps_data = []
+            for i in range(max_maps):
+                with st.expander(f"Map {i+1}"):
+                    pre_name = ""
+                    pre_t1 = 0
+                    pre_t2 = 0
+                    pre_win = None
+                    if not existing_maps_df.empty:
+                        rowx = existing_maps_df[existing_maps_df['map_index'] == i]
+                        if not rowx.empty:
+                            pre_name = rowx.iloc[0]['map_name']
+                            pre_t1 = int(rowx.iloc[0]['team1_rounds'])
+                            pre_t2 = int(rowx.iloc[0]['team2_rounds'])
+                            pre_win = int(rowx.iloc[0]['winner_id']) if pd.notna(rowx.iloc[0]['winner_id']) else None
+                    nsel = st.selectbox(f"Name {i+1}", maps_catalog, index=(maps_catalog.index(pre_name) if pre_name in maps_catalog else 0), key=f"po_mname_{i}")
+                    t1r = st.number_input(f"{m['t1_name']} rounds", min_value=0, value=pre_t1, key=f"po_t1r_{i}")
+                    t2r = st.number_input(f"{m['t2_name']} rounds", min_value=0, value=pre_t2, key=f"po_t2r_{i}")
+                    wsel = st.selectbox("Winner", ["", m['t1_name'], m['t2_name']], index=(1 if pre_win==int(m['t1_id']) else (2 if pre_win==int(m['t2_id']) else 0)), key=f"po_win_{i}")
+                    wid = None
+                    if wsel == m['t1_name']:
+                        wid = int(m['t1_id'])
+                    elif wsel == m['t2_name']:
+                        wid = int(m['t2_id'])
+                    maps_data.append({"map_index": i, "map_name": nsel, "team1_rounds": int(t1r), "team2_rounds": int(t2r), "winner_id": wid})
+            
+            if st.button("Save Playoff Match & Maps"):
+                played = 0
+                for i, md in enumerate(maps_data):
+                    if i < max_maps and (i < min_maps or (md['team1_rounds']+md['team2_rounds']>0)):
+                        played += 1
+                upsert_match_maps(int(m['id']), maps_data[:max_maps])
+                conn_u = get_conn()
+                winner_id = None
+                if s1 > s2:
+                    winner_id = int(m['t1_id'])
+                elif s2 > s1:
+                    winner_id = int(m['t2_id'])
+                conn_u.execute("UPDATE matches SET score_t1=?, score_t2=?, winner_id=?, status=?, format=?, maps_played=? WHERE id=?", (int(s1), int(s2), winner_id, 'completed' if played > 0 else 'scheduled', fmt, int(played), int(m['id'])))
+                conn_u.commit()
+                conn_u.close()
+                st.success("Saved playoff match data")
+                st.rerun()
+
+    # Bracket Visualization
+    if df.empty:
+        st.info("No playoff matches scheduled yet.")
+    else:
+        # Define Rounds
+        rounds = {
+            1: "Quarter-finals",
+            2: "Semi-finals",
+            3: "Final"
+        }
+        
+        cols = st.columns(len(rounds))
+        
+        for r_idx, r_name in rounds.items():
+            with cols[r_idx-1]:
+                st.markdown(f'<h3 style="text-align: center; color: var(--primary-blue); font-family: \'Orbitron\'; font-size: 1rem;">{r_name}</h3>', unsafe_allow_html=True)
+                
+                r_matches = df[df['playoff_round'] == r_idx].sort_values('bracket_pos')
+                
+                # Number of slots for this round
+                slots = 4 if r_idx == 1 else (2 if r_idx == 2 else 1)
+                
+                for p in range(1, slots + 1):
+                    match = r_matches[r_matches['bracket_pos'] == p]
+                    
+                    # Vertical spacing for centering brackets
+                    if r_idx == 2: st.markdown('<div style="height: 60px;"></div>', unsafe_allow_html=True)
+                    if r_idx == 3: st.markdown('<div style="height: 180px;"></div>', unsafe_allow_html=True)
+                    
+                    if not match.empty:
+                        m = match.iloc[0]
+                        t1_name = m['t1_name'] or "TBD"
+                        t2_name = m['t2_name'] or "TBD"
+                        s1 = m['score_t1']
+                        s2 = m['score_t2']
+                        status = m['status']
+                        
+                        # Winner highlighting
+                        t1_style = "color: var(--primary-blue); font-weight: bold;" if status == 'completed' and s1 > s2 else ""
+                        t2_style = "color: var(--primary-blue); font-weight: bold;" if status == 'completed' and s2 > s1 else ""
+                        
+                        st.markdown(f"""
+                        <div style="background: var(--card-bg); border: 1px solid rgba(63, 209, 255, 0.2); border-radius: 8px; padding: 10px; margin-bottom: 20px; box-shadow: 0 4px 10px rgba(0,0,0,0.3);">
+                            <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+                                <span style="{t1_style}">{html.escape(t1_name)}</span>
+                                <span style="font-family: 'Orbitron';">{s1}</span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between;">
+                                <span style="{t2_style}">{html.escape(t2_name)}</span>
+                                <span style="font-family: 'Orbitron';">{s2}</span>
+                            </div>
+                            <div style="font-size: 0.6rem; color: var(--text-dim); text-align: center; margin-top: 5px; border-top: 1px solid rgba(255,255,255,0.05); padding-top: 5px;">
+                                {m['format']} • {status.upper()}
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    else:
+                        st.markdown("""
+                        <div style="background: rgba(255,255,255,0.02); border: 1px dashed rgba(255,255,255,0.1); border-radius: 8px; padding: 10px; margin-bottom: 20px; height: 85px; display: flex; align-items: center; justify-content: center; color: var(--text-dim); font-size: 0.8rem;">
+                            TBD vs TBD
+                        </div>
+                        """, unsafe_allow_html=True)
 
 elif page == "Admin Panel":
     st.markdown('<h1 class="main-header">ADMIN PANEL</h1>', unsafe_allow_html=True)
@@ -1752,6 +2134,8 @@ elif page == "Admin Panel":
                 match_id_input = st.text_input("Enter Match ID to load JSON data", key=f"mid_{m['id']}_{map_idx}")
                 
                 if match_id_input:
+                    # Sanitize input to prevent path traversal
+                    match_id_input = re.sub(r'[^a-zA-Z0-9\-]', '', match_id_input)
                     json_filename = f"match_{match_id_input}.json"
                     json_path = os.path.join("matches", json_filename)
                     
@@ -2046,7 +2430,7 @@ elif page == "Substitutions Log":
             top_team = df.groupby('team').size().idxmax() if not df.empty else "N/A"
             st.markdown(f"""<div class="custom-card" style="text-align: center;">
 <div style="color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">Most Active Team</div>
-<div style="font-size: 1.5rem; font-family: 'Orbitron'; color: var(--primary-red); margin: 10px 0;">{top_team}</div>
+<div style="font-size: 1.5rem; font-family: 'Orbitron'; color: var(--primary-red); margin: 10px 0;">{html.escape(str(top_team))}</div>
 </div>""", unsafe_allow_html=True)
             
         st.markdown("<br>", unsafe_allow_html=True)
@@ -2089,11 +2473,11 @@ elif page == "Player Profile":
             st.markdown(f"""<div class="custom-card" style="margin-bottom: 2rem;">
 <div style="display: flex; align-items: center; gap: 20px;">
 <div style="background: var(--primary-blue); width: 60px; height: 60px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 2rem; color: var(--bg-dark);">
-{prof['info'].get('name')[0].upper() if prof['info'].get('name') else 'P'}
+{html.escape(str(prof['info'].get('name')[0].upper() if prof['info'].get('name') else 'P'))}
 </div>
 <div>
-<h2 style="margin: 0; color: var(--primary-blue); font-family: 'Orbitron';">{prof['info'].get('name')}</h2>
-<div style="color: var(--text-dim); font-size: 1.1rem;">{prof['info'].get('team') or 'Free Agent'}</div>
+<h2 style="margin: 0; color: var(--primary-blue); font-family: 'Orbitron';">{html.escape(str(prof['info'].get('name')))}</h2>
+<div style="color: var(--text-dim); font-size: 1.1rem;">{html.escape(str(prof['info'].get('team') or 'Free Agent'))}</div>
 </div>
 </div>
 </div>""", unsafe_allow_html=True)
