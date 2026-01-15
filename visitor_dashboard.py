@@ -1153,7 +1153,7 @@ elif page == "Admin Panel":
                     s2 = st.number_input(m['t2_name'], min_value=0, value=int(m['score_t2'] or 0))
 
                 st.caption("Per-Map Scores")
-                maps_catalog = ["Ascent","Bind","Breeze","Fracture","Haven","Icebox","Lotus","Pearl","Split","Sunset"]
+                maps_catalog = ["Ascent","Bind","Breeze","Corrode","Fracture","Haven","Icebox","Lotus","Pearl","Split","Sunset"]
                 fmt_constraints = {"BO1": (1,1), "BO3": (2,3), "BO5": (3,5)}
                 min_maps, max_maps = fmt_constraints.get(fmt, (1,1))
                 existing_maps_df = get_match_maps(int(m['id']))
