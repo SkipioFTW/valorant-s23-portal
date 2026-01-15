@@ -17,8 +17,8 @@ def test_parse(match_id, json_match_id, map_idx=0):
     m = pd.read_sql("SELECT * FROM matches WHERE id=?", conn, params=(match_id,)).iloc[0]
     
     # Get team names
-    t1_name = pd.read_sql("SELECT name FROM teams WHERE id=?", conn, params=(int(m['t1_id']),)).iloc[0]['name']
-    t2_name = pd.read_sql("SELECT name FROM teams WHERE id=?", conn, params=(int(m['t2_id']),)).iloc[0]['name']
+    t1_name = pd.read_sql("SELECT name FROM teams WHERE id=?", conn, params=(int(m['team1_id']),)).iloc[0]['name']
+    t2_name = pd.read_sql("SELECT name FROM teams WHERE id=?", conn, params=(int(m['team2_id']),)).iloc[0]['name']
     print(f"Match: {t1_name} vs {t2_name}")
     
     # 2. Load JSON
@@ -38,7 +38,7 @@ def test_parse(match_id, json_match_id, map_idx=0):
     team_segments = [s for s in segments if s.get("type") == "team-summary"]
     if len(team_segments) >= 2:
         # Use Riot IDs to match teams
-        t1_roster = pd.read_sql("SELECT riot_id FROM players WHERE default_team_id=?", conn, params=(int(m['t1_id']),))['riot_id'].dropna().tolist()
+        t1_roster = pd.read_sql("SELECT riot_id FROM players WHERE default_team_id=?", conn, params=(int(m['team1_id']),))['riot_id'].dropna().tolist()
         t1_roster = [str(r).strip() for r in t1_roster]
         
         potential_t1_id = team_segments[0].get("attributes", {}).get("teamId")
@@ -156,7 +156,7 @@ def test_parse(match_id, json_match_id, map_idx=0):
 if __name__ == "__main__":
     # List matches
     conn = get_conn()
-    matches = pd.read_sql("SELECT m.id, t1.name as t1_name, t2.name as t2_name FROM matches m JOIN teams t1 ON m.t1_id=t1.id JOIN teams t2 ON m.t2_id=t2.id LIMIT 10", conn)
+    matches = pd.read_sql("SELECT m.id, t1.name as t1_name, t2.name as t2_name FROM matches m JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id LIMIT 10", conn)
     conn.close()
     
     print("Available Matches:")
