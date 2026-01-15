@@ -1483,9 +1483,9 @@ elif page == "Match Summary":
             
             # Map Score Card
             curr_map = maps_df[maps_df['map_index'] == selected_map_idx].iloc[0]
-                            t1_id_val = int(m.get('t1_id', m.get('team1_id')))
-                            t2_id_val = int(m.get('t2_id', m.get('team2_id')))
-                            st.markdown(f"""<div class="custom-card" style="background: rgba(255,255,255,0.02); margin-bottom: 20px;">
+            t1_id_val = int(m.get('t1_id', m.get('team1_id')))
+            t2_id_val = int(m.get('t2_id', m.get('team2_id')))
+            st.markdown(f"""<div class="custom-card" style="background: rgba(255,255,255,0.02); margin-bottom: 20px;">
 <div style="display: flex; justify-content: center; align-items: center; gap: 40px;">
 <div style="text-align: center;">
 <div style="color: var(--text-dim); font-size: 0.8rem; margin-bottom: 5px;">{html.escape(str(m['t1_name']))}</div>
@@ -2348,7 +2348,7 @@ elif page == "Admin Panel":
                                             for p_seg in player_segments:
                                                 if p_seg.get("metadata", {}).get("teamId") == tracker_team_1_id:
                                                     rid = p_seg.get("metadata", {}).get("platformInfo", {}).get("platformUserIdentifier")
-                                                    if rid and str(rid).strip() in t1_roster:
+                                                    if rid and str(rid).strip().lower() in t1_roster:
                                                         t1_matches += 1
                                             
                                             if t1_matches >= 1: # Found at least one player from our Team 1 in Tracker Team 1
