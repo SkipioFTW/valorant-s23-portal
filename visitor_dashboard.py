@@ -692,82 +692,103 @@ font-family: 'Inter', sans-serif;
 transition: opacity 0.5s ease-in-out;
 }
 .main .block-container {
-padding-top: 150px !important;
+padding-top: 180px !important;
 }
 .portal-container {
 display: flex;
 flex-direction: column;
 align-items: center;
 justify-content: center;
-min-height: 90vh;
-gap: 2rem;
+min-height: 85vh;
+gap: 1.5rem;
 animation: fadeIn 0.8s ease-out;
-padding-top: 2rem;
+padding: 2rem;
 }
 .status-grid {
-display: grid;
-grid-template-columns: repeat(3, 1fr);
-gap: 2rem;
+display: flex;
+justify-content: center;
+gap: 1.5rem;
 width: 100%;
-max-width: 960px;
-margin: 0 auto 1rem auto;
+max-width: 1000px;
+margin: 0 auto 2rem auto;
+flex-wrap: wrap;
 }
 .status-indicator {
-padding: 0.5rem 1rem;
-border-radius: 4px;
+padding: 0.8rem 1.5rem;
+border-radius: 8px;
 font-family: 'Orbitron';
-font-size: 0.7rem;
-letter-spacing: 1px;
+font-size: 0.8rem;
+letter-spacing: 2px;
 text-align: center;
 background: rgba(255, 255, 255, 0.03);
 border: 1px solid rgba(255, 255, 255, 0.1);
+min-width: 220px;
+box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+transition: all 0.3s ease;
 }
-.status-online { color: #00ff88; border-color: rgba(0, 255, 136, 0.2); background: rgba(0, 255, 136, 0.05); }
-.status-offline { color: var(--primary-red); border-color: rgba(255, 70, 85, 0.2); background: rgba(255, 70, 85, 0.05); }
+.status-indicator:hover {
+background: rgba(255, 255, 255, 0.05);
+transform: translateY(-2px);
+}
+.status-online { color: #00ff88; border-color: rgba(0, 255, 136, 0.3); background: rgba(0, 255, 136, 0.08); text-shadow: 0 0 10px rgba(0, 255, 136, 0.3); }
+.status-offline { color: var(--primary-red); border-color: rgba(255, 70, 85, 0.3); background: rgba(255, 70, 85, 0.08); text-shadow: 0 0 10px rgba(255, 70, 85, 0.3); }
 .portal-options {
-display: flex;
-gap: 2rem;
-flex-wrap: wrap;
-justify-content: center;
+display: grid;
+grid-template-columns: repeat(3, 1fr);
+gap: 2.5rem;
+width: 100%;
+max-width: 1100px;
+margin-top: 1rem;
 }
-.portal-card {
+.portal-card-wrapper {
 background: var(--card-bg);
-border: 1px solid rgba(63, 209, 255, 0.1);
-padding: 2.5rem;
-border-radius: 12px;
-width: 300px;
-text-align: center;
+border: 1px solid rgba(63, 209, 255, 0.15);
+padding: 0;
+border-radius: 16px;
 transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-cursor: pointer;
 position: relative;
 overflow: hidden;
+display: flex;
+flex-direction: column;
+height: 100%;
 }
-.portal-card:hover:not(.disabled) {
-transform: translateY(-10px);
+.portal-card-wrapper:hover:not(.disabled) {
+transform: translateY(-12px);
 border-color: var(--primary-blue);
-box-shadow: 0 15px 40px rgba(63, 209, 255, 0.2);
+box-shadow: 0 20px 50px rgba(63, 209, 255, 0.25);
 }
-.portal-card.disabled {
-opacity: 0.6;
+.portal-card-content {
+padding: 2.5rem 2rem;
+text-align: center;
+flex-grow: 1;
+}
+.portal-card-footer {
+padding: 1.5rem;
+background: rgba(0,0,0,0.2);
+border-top: 1px solid rgba(255,255,255,0.05);
+}
+.portal-card-wrapper.disabled {
+opacity: 0.5;
 cursor: not-allowed;
-border-color: rgba(255, 255, 255, 0.05);
+filter: grayscale(0.8);
 }
-.portal-card.disabled:hover::after {
-content: "UNDER DEVELOPMENT";
+.portal-card-wrapper.disabled:hover::after {
+content: "COMING SOON";
 position: absolute;
 top: 0;
 left: 0;
 right: 0;
 bottom: 0;
-background: rgba(15, 25, 35, 0.9);
+background: rgba(15, 25, 35, 0.92);
 display: flex;
 align-items: center;
 justify-content: center;
 color: var(--primary-red);
 font-family: 'Orbitron';
 font-weight: bold;
-font-size: 0.8rem;
-letter-spacing: 1px;
+font-size: 1rem;
+letter-spacing: 2px;
+z-index: 10;
 }
 [data-testid='stSidebarNav'] {display: none;}
 [data-testid='stHeader'] {display: none;}
@@ -782,9 +803,9 @@ color: var(--primary-blue);
 text-shadow: 0 0 20px rgba(63, 209, 255, 0.3);
 border-left: 5px solid var(--primary-red);
 padding-left: 15px;
-margin-top: 1rem !important;
-margin-bottom: 2rem !important;
-font-size: 2.5rem;
+margin-top: 0.5rem !important;
+margin-bottom: 2.5rem !important;
+font-size: 3rem;
 animation: fadeIn 0.8s ease-out;
 }
 h2, h3 { color: var(--primary-blue); }
@@ -820,6 +841,50 @@ font-weight: bold;
 letter-spacing: 2px;
 white-space: nowrap;
 }
+/* Navigation Button Styling */
+.stButton > button {
+background: transparent !important;
+border: 1px solid rgba(255, 255, 255, 0.1) !important;
+color: var(--text-dim) !important;
+font-family: 'Inter', sans-serif !important;
+font-weight: 600 !important;
+transition: all 0.3s ease !important;
+border-radius: 4px !important;
+text-transform: uppercase !important;
+letter-spacing: 1px !important;
+font-size: 0.8rem !important;
+height: 40px !important;
+}
+.stButton > button:hover {
+border-color: var(--primary-blue) !important;
+color: var(--primary-blue) !important;
+background: rgba(63, 209, 255, 0.05) !important;
+}
+.stButton > button[kind="primary"] {
+background: var(--primary-red) !important;
+border-color: var(--primary-red) !important;
+color: white !important;
+}
+.stButton > button[kind="primary"]:hover {
+background: #ff5c6a !important;
+box-shadow: 0 0 20px rgba(255, 70, 85, 0.4) !important;
+}
+/* Active Tab Style */
+div[data-testid="column"] button.active-nav {
+border-bottom: 2px solid var(--primary-red) !important;
+color: white !important;
+background: rgba(255, 255, 255, 0.05) !important;
+border-radius: 4px 4px 0 0 !important;
+}
+/* Exit Button Style */
+.exit-btn button {
+border-color: var(--primary-red) !important;
+color: var(--primary-red) !important;
+}
+.exit-btn button:hover {
+background: rgba(255, 70, 85, 0.1) !important;
+color: white !important;
+}
 </style>""", unsafe_allow_html=True)
 
 ensure_base_schema()
@@ -839,7 +904,7 @@ if st.session_state['app_mode'] == 'portal':
     with main_container.container():
         st.markdown("""<div class="portal-container">
 <h1 style="color: var(--primary-blue); font-size: 3.5rem; text-shadow: 0 0 30px rgba(63, 209, 255, 0.4); margin-bottom: 0;">VALORANT S23 PORTAL</h1>
-<p style="color: var(--text-dim); font-size: 1rem; letter-spacing: 4px; margin-bottom: 2rem;">SYSTEM STATUS & ACCESS</p>
+<p style="color: var(--text-dim); font-size: 0.9rem; letter-spacing: 5px; margin-bottom: 3rem; text-transform: uppercase;">System Status & Access Terminal</p>
 <div class="status-grid">
 <div class="status-indicator status-online">● VISITOR ACCESS: LIVE</div>
 <div class="status-indicator status-offline">● TEAM PANEL: STAGING</div>
@@ -850,23 +915,23 @@ if st.session_state['app_mode'] == 'portal':
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            st.markdown('<div class="portal-card">', unsafe_allow_html=True)
-            if st.button("VISIT WEBSITE", use_container_width=True, type="primary"):
+            st.markdown('<div class="portal-card-wrapper"><div class="portal-card-content"><h3>VISITOR</h3><p style="color: var(--text-dim); font-size: 0.9rem;">Browse tournament statistics, match history, and player standings.</p></div><div class="portal-card-footer">', unsafe_allow_html=True)
+            if st.button("ENTER PORTAL", key="enter_visitor", use_container_width=True, type="primary"):
                 st.session_state['app_mode'] = 'visitor'
                 st.rerun()
-            st.markdown('<p style="color: var(--text-dim); margin-top: 1rem; font-size: 0.9rem;">Browse stats, matches, and standings</p></div>', unsafe_allow_html=True)
+            st.markdown('</div></div>', unsafe_allow_html=True)
             
         with col2:
-            st.markdown('<div class="portal-card disabled">', unsafe_allow_html=True)
-            st.button("TEAM LEADER", use_container_width=True, disabled=True)
-            st.markdown('<p style="color: var(--text-dim); margin-top: 1rem; font-size: 0.9rem;">Manage your team roster and stats</p></div>', unsafe_allow_html=True)
+            st.markdown('<div class="portal-card-wrapper disabled"><div class="portal-card-content"><h3>TEAM LEADER</h3><p style="color: var(--text-dim); font-size: 0.9rem;">Manage your team roster, submit scores, and track performance.</p></div><div class="portal-card-footer">', unsafe_allow_html=True)
+            st.button("LOCKED", key="enter_team", use_container_width=True, disabled=True)
+            st.markdown('</div></div>', unsafe_allow_html=True)
             
         with col3:
-            st.markdown('<div class="portal-card">', unsafe_allow_html=True)
-            if st.button("ADMIN LOGIN", use_container_width=True):
+            st.markdown('<div class="portal-card-wrapper"><div class="portal-card-content"><h3>ADMIN</h3><p style="color: var(--text-dim); font-size: 0.9rem;">Full system administration, data management, and tournament control.</p></div><div class="portal-card-footer">', unsafe_allow_html=True)
+            if st.button("ADMIN LOGIN", key="enter_admin", use_container_width=True):
                 st.session_state['app_mode'] = 'admin'
                 st.rerun()
-            st.markdown('<p style="color: var(--text-dim); margin-top: 1rem; font-size: 0.9rem;">Full system control and data management</p></div>', unsafe_allow_html=True)
+            st.markdown('</div></div>', unsafe_allow_html=True)
             
         st.markdown('</div></div>', unsafe_allow_html=True)
     st.stop()
@@ -935,27 +1000,29 @@ if st.session_state['is_admin']:
 # Top Navigation Bar
 st.markdown('<div class="nav-wrapper"><div class="nav-logo">VALORANT S23 • PORTAL</div></div>', unsafe_allow_html=True)
 
-# Add Home button to the list of pages visually or as a separate button
-col_home, col_nav = st.columns([0.15, 0.85])
-with col_home:
-    if st.button("🏠 EXIT", use_container_width=True, help="Back to selection screen"):
-        st.session_state['app_mode'] = 'portal'
-        st.rerun()
-
-with col_nav:
-    # Navigation Buttons in a horizontal layout
-    nav_cols = st.columns(len(pages))
+# Navigation Layout
+nav_container = st.container()
+with nav_container:
+    # Use a specific ratio to keep the EXIT button small and others balanced
+    cols = st.columns([0.8] + [1] * len(pages))
+    
+    with cols[0]:
+        st.markdown('<div class="exit-btn">', unsafe_allow_html=True)
+        if st.button("🏠 EXIT", key="exit_portal", use_container_width=True):
+            st.session_state['app_mode'] = 'portal'
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+        
     for i, p in enumerate(pages):
-        with nav_cols[i]:
+        with cols[i+1]:
             is_active = st.session_state['page'] == p
             if st.button(p, key=f"nav_{p}", use_container_width=True, 
-                         type="secondary", 
-                         help=f"Go to {p}"):
+                         type="primary" if is_active else "secondary"):
                 st.session_state['page'] = p
                 st.rerun()
             
             if is_active:
-                st.markdown(f'<div class="active-nav-indicator" style="height: 3px; background: var(--primary-red); margin-top: -5px; box-shadow: 0 0 10px var(--primary-red);"></div>', unsafe_allow_html=True)
+                st.markdown('<div style="height: 3px; background: var(--primary-red); margin-top: -8px; box-shadow: 0 0 10px var(--primary-red); border-radius: 2px;"></div>', unsafe_allow_html=True)
 
 page = st.session_state['page']
 
