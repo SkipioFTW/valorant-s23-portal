@@ -1836,6 +1836,16 @@ elif page == "Playoffs":
     
     # Playoffs Management (Admin Only)
     with st.expander("🛠️ Manage Playoff Matches"):
+        # Show current standings for seeding reference
+        st.caption("Current Standings Reference (for seeding)")
+        standings_df = get_standings()
+        if not standings_df.empty:
+            ref_cols = st.columns(4)
+            for i, (_, row) in enumerate(standings_df.head(24).iterrows()):
+                with ref_cols[i % 4]:
+                    st.markdown(f"<small>#{i+1}: {row['name']}</small>", unsafe_allow_html=True)
+        st.divider()
+
         conn = get_conn()
         teams_df = pd.read_sql("SELECT id, name FROM teams ORDER BY name", conn)
         conn.close()
@@ -1843,7 +1853,13 @@ elif page == "Playoffs":
         
         with st.form("add_playoff_match"):
             c1, c2, c3 = st.columns(3)
-            round_idx = c1.selectbox("Round", [1, 2, 3], format_func=lambda x: {1: "Quarter-finals", 2: "Semi-finals", 3: "Final"}[x])
+            round_idx = c1.selectbox("Round", [1, 2, 3, 4, 5], format_func=lambda x: {
+                1: "Round 1 (Play-ins)", 
+                2: "Round of 16", 
+                3: "Quarter-finals", 
+                4: "Semi-finals", 
+                5: "Final"
+            }[x])
             pos = c2.number_input("Bracket Position", min_value=1, max_value=8, value=1)
             fmt = c3.selectbox("Format", ["BO1", "BO3", "BO5"], index=1)
             
@@ -1934,61 +1950,139 @@ elif page == "Playoffs":
     if df.empty:
         st.info("No playoff matches scheduled yet.")
     else:
+        # Team to Rank Map for seeding display
+        standings_df = get_standings()
+        team_to_rank = {}
+        if not standings_df.empty:
+            for i, (_, row) in enumerate(standings_df.iterrows()):
+                team_to_rank[row['name']] = i + 1
+
         # Define Rounds
         rounds = {
-            1: "Quarter-finals",
-            2: "Semi-finals",
-            3: "Final"
+            1: "Round 1",
+            2: "Round of 16",
+            3: "Quarter-finals",
+            4: "Semi-finals",
+            5: "Final"
         }
         
+        # Add some CSS for better bracket look
+        st.markdown("""
+        <style>
+        .bracket-container {
+            display: flex;
+            justify-content: space-between;
+            overflow-x: auto;
+            padding: 20px 0;
+            min-width: 1000px;
+        }
+        .bracket-round {
+            display: flex;
+            flex-direction: column;
+            justify-content: space-around;
+            width: 180px;
+            flex-shrink: 0;
+        }
+        .bracket-match {
+            background: var(--card-bg);
+            border: 1px solid rgba(63, 209, 255, 0.2);
+            border-radius: 8px;
+            padding: 8px;
+            margin: 10px 0;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+            font-size: 0.8rem;
+            min-height: 80px;
+        }
+        .match-team {
+            display: flex;
+            justify-content: space-between;
+            padding: 2px 0;
+        }
+        .team-winner {
+            color: var(--primary-blue);
+            font-weight: bold;
+        }
+        .match-info {
+            font-size: 0.6rem;
+            color: var(--text-dim);
+            text-align: center;
+            margin-top: 4px;
+            border-top: 1px solid rgba(255,255,255,0.05);
+            padding-top: 4px;
+        }
+        .tbd-match {
+            background: rgba(255,255,255,0.02);
+            border: 1px dashed rgba(255,255,255,0.1);
+            color: var(--text-dim);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+
         cols = st.columns(len(rounds))
         
         for r_idx, r_name in rounds.items():
             with cols[r_idx-1]:
-                st.markdown(f'<h3 style="text-align: center; color: var(--primary-blue); font-family: \'Orbitron\'; font-size: 1rem;">{r_name}</h3>', unsafe_allow_html=True)
+                st.markdown(f'<h4 style="text-align: center; color: var(--primary-blue); font-family: \'Orbitron\'; font-size: 0.8rem; margin-bottom: 20px;">{r_name}</h4>', unsafe_allow_html=True)
                 
                 r_matches = df[df['playoff_round'] == r_idx].sort_values('bracket_pos')
                 
                 # Number of slots for this round
-                slots = 4 if r_idx == 1 else (2 if r_idx == 2 else 1)
+                slots = 8 if r_idx in [1, 2] else (4 if r_idx == 3 else (2 if r_idx == 4 else 1))
+                
+                # Calculate offsets for centering
+                # We'll use spacer divs to achieve vertical alignment
                 
                 for p in range(1, slots + 1):
+                    # Vertical Spacing Logic
+                    if r_idx == 3: # QF
+                        if p == 1: st.markdown('<div style="height: 50px;"></div>', unsafe_allow_html=True)
+                        else: st.markdown('<div style="height: 100px;"></div>', unsafe_allow_html=True)
+                    elif r_idx == 4: # SF
+                        if p == 1: st.markdown('<div style="height: 150px;"></div>', unsafe_allow_html=True)
+                        else: st.markdown('<div style="height: 300px;"></div>', unsafe_allow_html=True)
+                    elif r_idx == 5: # Final
+                        st.markdown('<div style="height: 350px;"></div>', unsafe_allow_html=True)
+
                     match = r_matches[r_matches['bracket_pos'] == p]
-                    
-                    # Vertical spacing for centering brackets
-                    if r_idx == 2: st.markdown('<div style="height: 60px;"></div>', unsafe_allow_html=True)
-                    if r_idx == 3: st.markdown('<div style="height: 180px;"></div>', unsafe_allow_html=True)
                     
                     if not match.empty:
                         m = match.iloc[0]
                         t1_name = m['t1_name'] or "TBD"
                         t2_name = m['t2_name'] or "TBD"
+                        
+                        t1_rank = team_to_rank.get(t1_name, "")
+                        t2_rank = team_to_rank.get(t2_name, "")
+                        t1_display = f'<span style="color: var(--text-dim); font-size: 0.6rem; margin-right: 5px;">{t1_rank}</span>{html.escape(t1_name)}' if t1_rank else html.escape(t1_name)
+                        t2_display = f'<span style="color: var(--text-dim); font-size: 0.6rem; margin-right: 5px;">{t2_rank}</span>{html.escape(t2_name)}' if t2_rank else html.escape(t2_name)
+
                         s1 = m['score_t1']
                         s2 = m['score_t2']
                         status = m['status']
                         
-                        # Winner highlighting
-                        t1_style = "color: var(--primary-blue); font-weight: bold;" if status == 'completed' and s1 > s2 else ""
-                        t2_style = "color: var(--primary-blue); font-weight: bold;" if status == 'completed' and s2 > s1 else ""
+                        t1_class = "team-winner" if status == 'completed' and s1 > s2 else ""
+                        t2_class = "team-winner" if status == 'completed' and s2 > s1 else ""
                         
                         st.markdown(f"""
-                        <div style="background: var(--card-bg); border: 1px solid rgba(63, 209, 255, 0.2); border-radius: 8px; padding: 10px; margin-bottom: 20px; box-shadow: 0 4px 10px rgba(0,0,0,0.3);">
-                            <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
-                                <span style="{t1_style}">{html.escape(t1_name)}</span>
+                        <div class="bracket-match">
+                            <div class="match-team">
+                                <span class="{t1_class}">{t1_display}</span>
                                 <span style="font-family: 'Orbitron';">{s1}</span>
                             </div>
-                            <div style="display: flex; justify-content: space-between;">
-                                <span style="{t2_style}">{html.escape(t2_name)}</span>
+                            <div class="match-team">
+                                <span class="{t2_class}">{t2_display}</span>
                                 <span style="font-family: 'Orbitron';">{s2}</span>
                             </div>
-                            <div style="font-size: 0.6rem; color: var(--text-dim); text-align: center; margin-top: 5px; border-top: 1px solid rgba(255,255,255,0.05); padding-top: 5px;">
+                            <div class="match-info">
                                 {m['format']} • {status.upper()}
                             </div>
                         </div>
                         """, unsafe_allow_html=True)
                     else:
                         st.markdown("""
-                        <div style="background: rgba(255,255,255,0.02); border: 1px dashed rgba(255,255,255,0.1); border-radius: 8px; padding: 10px; margin-bottom: 20px; height: 85px; display: flex; align-items: center; justify-content: center; color: var(--text-dim); font-size: 0.8rem;">
+                        <div class="bracket-match tbd-match">
                             TBD vs TBD
                         </div>
                         """, unsafe_allow_html=True)
