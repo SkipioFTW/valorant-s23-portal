@@ -6,12 +6,13 @@ import hashlib
 import hmac
 import secrets
 import tempfile
-import os
 import base64
 import requests
 import re
 import io
 import json
+import plotly.express as px
+import plotly.graph_objects as go
 from PIL import Image, ImageOps
 
 def ocr_extract(image_bytes, crop_box=None):
@@ -639,25 +640,39 @@ def get_match_maps(match_id):
     conn.close()
     return df
 
+def apply_plotly_theme(fig):
+    fig.update_layout(
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        font_color='#ECE8E1',
+        font_family='Inter',
+        title_font_family='Orbitron',
+        title_font_color='#3FD1FF',
+        xaxis=dict(
+            gridcolor='rgba(255,255,255,0.05)', 
+            zerolinecolor='rgba(255,255,255,0.1)',
+            tickfont=dict(color='#8B97A5'),
+            title_font=dict(color='#8B97A5')
+        ),
+        yaxis=dict(
+            gridcolor='rgba(255,255,255,0.05)', 
+            zerolinecolor='rgba(255,255,255,0.1)',
+            tickfont=dict(color='#8B97A5'),
+            title_font=dict(color='#8B97A5')
+        ),
+        margin=dict(l=20, r=20, t=40, b=20),
+        legend=dict(
+            bgcolor='rgba(0,0,0,0)',
+            bordercolor='rgba(255,255,255,0.1)',
+            font=dict(color='#ECE8E1')
+        )
+    )
+    return fig
+
 st.set_page_config(page_title="S23 Portal", layout="wide")
 
-st.title("Valorant S23 • Portal")
-
-st.markdown(
-    """
-    <link href='https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Rajdhani:wght@400;600&display=swap' rel='stylesheet'>
-    <style>
-    .stApp { background: radial-gradient(ellipse at top,#0b1f2a,#08141c); color:#e6f4ff; }
-    h1,h2,h3 { font-family: 'Orbitron', sans-serif; letter-spacing: 0.5px; color: #5bc0ff; }
-    .block-container { padding-top: 1rem; }
-    .stButton>button { background-color:#0d2a3a; border:1px solid #5bc0ff; color:#e6f4ff; }
-    .stDownloadButton>button { background-color:#0d2a3a; border:1px solid #5bc0ff; color:#e6f4ff; }
-    .stFileUploader { color:#e6f4ff; }
-    .stSelectbox, .stTextInput, .stNumberInput { color:#e6f4ff; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+# Hide standard sidebar navigation and other streamlit elements
+st.markdown("<link href='https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Rajdhani:wght@400;600&family=Inter:wght@400;700&display=swap' rel='stylesheet'><style>/* Global Styles */:root {--primary-blue: #3FD1FF;--primary-red: #FF4655;--bg-dark: #0F1923;--card-bg: #1F2933;--text-main: #ECE8E1;--text-dim: #8B97A5;--nav-height: 70px;}.stApp {background-color: var(--bg-dark);background-image: radial-gradient(circle at 20% 30%, rgba(63, 209, 255, 0.05) 0%, transparent 40%), radial-gradient(circle at 80% 70%, rgba(255, 70, 85, 0.05) 0%, transparent 40%);color: var(--text-main);font-family: 'Inter', sans-serif;}[data-testid='stSidebarNav'] {display: none;}[data-testid='stHeader'] {background: rgba(0,0,0,0);}h1, h2, h3 {font-family: 'Orbitron', sans-serif !important;text-transform: uppercase;letter-spacing: 2px;font-weight: 700 !important;}.main-header {color: var(--primary-blue);text-shadow: 0 0 20px rgba(63, 209, 255, 0.3);border-left: 5px solid var(--primary-red);padding-left: 15px;margin-bottom: 2rem !important;font-size: 2.5rem;animation: fadeIn 0.8s ease-out;}h2, h3 {color: var(--primary-blue);}@keyframes fadeIn {from { opacity: 0; transform: translateY(10px); }to { opacity: 1; transform: translateY(0); }}.stMarkdown, .stDataFrame, .stPlotlyChart, .element-container {animation: fadeIn 0.5s ease-out forwards;}.nav-wrapper {position: fixed;top: 0;left: 0;right: 0;height: var(--nav-height);background: rgba(15, 25, 35, 0.95);backdrop-filter: blur(10px);border-bottom: 1px solid rgba(63, 209, 255, 0.1);display: flex;align-items: center;padding: 0 2rem;z-index: 1000;justify-content: space-between;}.nav-logo {font-family: 'Orbitron';color: var(--primary-blue);font-size: 1.5rem;font-weight: bold;letter-spacing: 2px;}section[data-testid='stSidebar'] {background-color: #111B25 !important;border-right: 1px solid rgba(63, 209, 255, 0.1);margin-top: var(--nav-height);}.stButton>button {background-color: transparent !important;border: 2px solid var(--primary-blue) !important;color: var(--primary-blue) !important;font-family: 'Orbitron', sans-serif;font-weight: 600;transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;text-transform: uppercase;border-radius: 0px !important;padding: 0.5rem 1rem !important;}.stButton>button:hover {background-color: var(--primary-blue) !important;color: var(--bg-dark) !important;box-shadow: 0 0 15px rgba(63, 209, 255, 0.4);transform: translateY(-2px);}.active-nav-indicator {transition: all 0.3s ease-in-out;}div[data-testid='stForm'] .stButton>button {border-color: var(--primary-red) !important;color: var(--primary-red) !important;}div[data-testid='stForm'] .stButton>button:hover {background-color: var(--primary-red) !important;color: white !important;box-shadow: 0 0 15px rgba(255, 70, 85, 0.4);}.stTextInput>div>div>input, .stSelectbox>div>div>div {background-color: rgba(255, 255, 255, 0.05) !important;border: 1px solid rgba(255, 255, 255, 0.1) !important;color: var(--text-main) !important;border-radius: 4px !important;}.stTextInput>div>div>input:focus {border-color: var(--primary-blue) !important;box-shadow: 0 0 10px rgba(63, 209, 255, 0.2) !important;}[data-testid='stMetricValue'] {color: var(--primary-blue) !important;font-family: 'Orbitron', sans-serif;}.custom-card {background-color: var(--card-bg);padding: 1.5rem;border-radius: 8px;border: 1px solid rgba(255, 255, 255, 0.05);margin-bottom: 1rem;transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);}.custom-card:hover {transform: translateY(-5px);border-color: rgba(63, 209, 255, 0.3);box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);}::-webkit-scrollbar {width: 8px;}::-webkit-scrollbar-track {background: var(--bg-dark);}::-webkit-scrollbar-thumb {background: #2D3E4F;border-radius: 4px;}::-webkit-scrollbar-thumb:hover {background: var(--primary-blue);}.main .block-container {padding-top: 5rem !important;}</style>", unsafe_allow_html=True)
 
 ensure_base_schema()
 init_admin_table()
@@ -707,6 +722,9 @@ with auth_box:
                 st.session_state['username'] = None
                 st.rerun()
 
+if 'page' not in st.session_state:
+    st.session_state['page'] = "Overview & Standings"
+
 pages = [
     "Overview & Standings",
     "Matches",
@@ -720,9 +738,29 @@ pages = [
 ]
 if st.session_state['is_admin']:
     pages.append("Admin Panel")
-page = st.sidebar.radio("Go to", pages)
+
+# Top Navigation Bar
+st.markdown('<div class="nav-wrapper"><div class="nav-logo">VALORANT S23 • PORTAL</div></div>', unsafe_allow_html=True)
+
+# Navigation Buttons in a horizontal layout
+nav_cols = st.columns(len(pages))
+for i, p in enumerate(pages):
+    with nav_cols[i]:
+        is_active = st.session_state['page'] == p
+        if st.button(p, key=f"nav_{p}", use_container_width=True, 
+                     type="secondary", 
+                     help=f"Go to {p}"):
+            st.session_state['page'] = p
+            st.rerun()
+        
+        if is_active:
+            st.markdown(f'<div class="active-nav-indicator" style="height: 3px; background: var(--primary-red); margin-top: -5px; box-shadow: 0 0 10px var(--primary-red);"></div>', unsafe_allow_html=True)
+
+page = st.session_state['page']
 
 if page == "Overview & Standings":
+    st.markdown('<h1 class="main-header">OVERVIEW & STANDINGS</h1>', unsafe_allow_html=True)
+    
     df = get_standings()
     if not df.empty:
         conn = get_conn()
@@ -734,39 +772,59 @@ if page == "Overview & Standings":
         df = df.merge(hist, left_on='id', right_on='team_id', how='left')
         df['season_count'] = df['season_count'].fillna(1).astype(int)
         df['logo_display'] = df['logo_path'].apply(lambda x: x if x and os.path.exists(x) else None)
-        groups = df['group_name'].unique()
-        cols = st.columns(len(groups))
-        for i, grp in enumerate(groups):
-            with cols[i % len(cols)]:
-                st.subheader(f"Group {grp}")
-                grp_df = df[df['group_name'] == grp]
-                for _, row in grp_df.iterrows():
-                    c1, c2 = st.columns([1, 4])
-                    with c1:
-                        if row['logo_display']:
-                            st.image(row['logo_display'], width=50)
-                    with c2:
-                        st.markdown(f"**{row['name']}**")
-                        st.caption(f"Seasons: {row['season_count']} • W: {row['Wins']} • Pts: {row['Points']}")
-                        with st.expander("Roster"):
-                            conn_r = get_conn()
-                            roster = pd.read_sql_query(
-                                "SELECT name, rank FROM players WHERE default_team_id=? ORDER BY name",
-                                conn_r,
-                                params=(int(row['id']),),
-                            )
-                            conn_r.close()
-                            if roster.empty:
-                                st.write("No players yet")
-                            else:
-                                st.dataframe(roster, hide_index=True, use_container_width=True)
-                st.dataframe(
-                    grp_df[['name', 'season_count', 'Played', 'Wins', 'Losses', 'Points', 'RD']],
-                    hide_index=True,
-                    column_config={"season_count": st.column_config.NumberColumn("Seasons")},
-                )
+        
+        groups = sorted(df['group_name'].unique())
+        
+        for grp in groups:
+            st.markdown(f'<h2 style="color: var(--primary-blue); font-family: \'Orbitron\'; border-left: 4px solid var(--primary-blue); padding-left: 15px; margin: 2rem 0 1rem 0;">GROUP {grp}</h2>', unsafe_allow_html=True)
+            
+            grp_df = df[df['group_name'] == grp]
+            
+            # Team Cards Grid
+            t_cols = st.columns(min(len(grp_df), 3))
+            for idx, (_, row) in enumerate(grp_df.iterrows()):
+                with t_cols[idx % 3]:
+                    logo_html = ""
+                    if row['logo_display']:
+                        with open(row['logo_display'], "rb") as f:
+                            logo_html = f"<img src='data:image/png;base64,{base64.b64encode(f.read()).decode()}' width='40' style='border-radius: 4px;'/>"
+                    else:
+                        logo_html = "<div style='width:40px;height:40px;background:rgba(255,255,255,0.05);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--text-dim);'>?</div>"
+                    
+                    st.markdown(f"""
+                        <div class="custom-card" style="height: 100%;">
+                            <div style="display: flex; align-items: center; gap: 15px; margin-bottom: 10px;">
+                                {logo_html}
+                                <div style="font-weight: bold; color: var(--primary-blue); font-size: 1rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{row['name']}</div>
+                            </div>
+                            <div style="display: flex; justify-content: space-between; color: var(--text-dim); font-size: 0.8rem;">
+                                <span>WINS: <span style="color: var(--text-main); font-family: 'Orbitron';">{row['Wins']}</span></span>
+                                <span>PTS: <span style="color: var(--primary-blue); font-family: 'Orbitron';">{row['Points']}</span></span>
+                            </div>
+                        </div>
+                    """, unsafe_allow_html=True)
+                    
+                    with st.expander("Roster"):
+                        conn_r = get_conn()
+                        roster = pd.read_sql_query("SELECT name, rank FROM players WHERE default_team_id=? ORDER BY name", conn_r, params=(int(row['id']),))
+                        conn_r.close()
+                        if roster.empty: st.caption("No players")
+                        else: st.dataframe(roster, hide_index=True, use_container_width=True)
+            
+            # Standings Table for Group
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.dataframe(
+                grp_df[['name', 'Played', 'Wins', 'Losses', 'Points', 'RD']].sort_values('Points', ascending=False),
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "name": "Team",
+                    "RD": st.column_config.NumberColumn("Round Diff", help="Total Rounds Won - Total Rounds Lost")
+                }
+            )
+            st.markdown("---")
     else:
-        st.info("No standings data yet.")
+        st.info("No standings data available yet.")
 
 elif page == "Matches":
     week = st.sidebar.selectbox("Week", [1, 2, 3, 4, 5], index=0)
@@ -774,76 +832,149 @@ elif page == "Matches":
     if df.empty:
         st.info("No matches for this week.")
     else:
-        st.subheader("Scheduled")
+        st.markdown("### Scheduled")
         sched = df[df['status'] != 'completed']
         if sched.empty:
             st.caption("None")
         else:
             for _, m in sched.iterrows():
-                st.write(f"{m['t1_name']} vs {m['t2_name']} • {m['format']}")
-        st.subheader("Completed")
+                st.markdown(f"""
+                <div class="custom-card">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <div style="flex: 1; text-align: right; font-weight: bold; color: var(--primary-blue);">{m['t1_name']}</div>
+                        <div style="margin: 0 20px; color: var(--text-dim); font-family: 'Orbitron';">VS</div>
+                        <div style="flex: 1; text-align: left; font-weight: bold; color: var(--primary-red);">{m['t2_name']}</div>
+                    </div>
+                    <div style="text-align: center; color: var(--text-dim); font-size: 0.8rem; margin-top: 10px;">{m['format']} • {m['group_name']}</div>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        st.markdown("### Completed")
         comp = df[df['status'] == 'completed']
         for _, m in comp.iterrows():
-            st.markdown(f"**{m['t1_name']} {m['score_t1']}–{m['score_t2']} {m['t2_name']}** • {m['format']}")
-            maps_df = get_match_maps(int(m['id']))
-            if maps_df.empty:
-                st.caption("No map details")
-            else:
-                md = maps_df.copy()
-                md['Winner'] = md.apply(lambda r: m['t1_name'] if r['winner_id'] == m['t1_id'] else (m['t2_name'] if r['winner_id'] == m['t2_id'] else ''), axis=1)
-                md = md.rename(columns={
-                    'map_index': 'Map',
-                    'map_name': 'Name',
-                    'team1_rounds': m['t1_name'],
-                    'team2_rounds': m['t2_name'],
-                })
-                md['Map'] = md['Map'] + 1
-                st.dataframe(md[['Map', 'Name', m['t1_name'], m['t2_name'], 'Winner']], hide_index=True, use_container_width=True)
+            with st.container():
+                winner_color_1 = "var(--primary-blue)" if m['score_t1'] > m['score_t2'] else "var(--text-main)"
+                winner_color_2 = "var(--primary-red)" if m['score_t2'] > m['score_t1'] else "var(--text-main)"
+                
+                st.markdown(f"""
+                <div class="custom-card" style="border-left: 4px solid {'var(--primary-blue)' if m['score_t1'] > m['score_t2'] else 'var(--primary-red)'};">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <div style="flex: 1; text-align: right;">
+                            <span style="font-weight: bold; color: {winner_color_1};">{m['t1_name']}</span>
+                            <span style="font-size: 1.5rem; margin-left: 10px; font-family: 'Orbitron';">{m['score_t1']}</span>
+                        </div>
+                        <div style="margin: 0 20px; color: var(--text-dim); font-family: 'Orbitron';">-</div>
+                        <div style="flex: 1; text-align: left;">
+                            <span style="font-size: 1.5rem; margin-right: 10px; font-family: 'Orbitron';">{m['score_t2']}</span>
+                            <span style="font-weight: bold; color: {winner_color_2};">{m['t2_name']}</span>
+                        </div>
+                    </div>
+                    <div style="text-align: center; color: var(--text-dim); font-size: 0.8rem; margin-top: 10px;">{m['format']} • {m['group_name']}</div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                with st.expander("Match Details"):
+                    maps_df = get_match_maps(int(m['id']))
+                    if maps_df.empty:
+                        st.caption("No map details")
+                    else:
+                        md = maps_df.copy()
+                        md['Winner'] = md.apply(lambda r: m['t1_name'] if r['winner_id'] == m['t1_id'] else (m['t2_name'] if r['winner_id'] == m['t2_id'] else ''), axis=1)
+                        md = md.rename(columns={
+                            'map_index': 'Map',
+                            'map_name': 'Name',
+                            'team1_rounds': m['t1_name'],
+                            'team2_rounds': m['t2_name'],
+                        })
+                        md['Map'] = md['Map'] + 1
+                        st.dataframe(md[['Map', 'Name', m['t1_name'], m['t2_name'], 'Winner']], hide_index=True, use_container_width=True)
 
 elif page == "Match Summary":
+    st.markdown('<h1 class="main-header">MATCH SUMMARY</h1>', unsafe_allow_html=True)
+    
     week = st.sidebar.selectbox("Week", [1, 2, 3, 4, 5], index=0, key="wk_sum")
     df = get_week_matches(week)
+    
     if df.empty:
         st.info("No matches for this week.")
     else:
-        opts = df.apply(lambda r: f"ID {r['id']}: {r['t1_name']} vs {r['t2_name']} ({r['group_name']})", axis=1).tolist()
-        sel = st.selectbox("Match", list(range(len(opts))), format_func=lambda i: opts[i])
+        opts = df.apply(lambda r: f"{r['t1_name']} vs {r['t2_name']} ({r['group_name']})", axis=1).tolist()
+        sel = st.selectbox("Select Match", list(range(len(opts))), format_func=lambda i: opts[i])
         m = df.iloc[sel]
-        st.subheader(f"{m['t1_name']} {m['score_t1']}–{m['score_t2']} {m['t2_name']} • {m['format']}")
+        
+        # Match Score Card
+        st.markdown(f"""
+            <div class="custom-card" style="margin-bottom: 2rem; border-bottom: 4px solid {'var(--primary-blue)' if m['score_t1'] > m['score_t2'] else 'var(--primary-red)'};">
+                <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 0;">
+                    <div style="flex: 1; text-align: right;">
+                        <h2 style="margin: 0; color: {'var(--primary-blue)' if m['score_t1'] > m['score_t2'] else 'var(--text-main)'}; font-family: 'Orbitron';">{m['t1_name']}</h2>
+                    </div>
+                    <div style="margin: 0 30px; display: flex; align-items: center; gap: 15px;">
+                        <span style="font-size: 3rem; font-family: 'Orbitron'; color: var(--text-main);">{m['score_t1']}</span>
+                        <span style="font-size: 1.5rem; color: var(--text-dim); font-family: 'Orbitron';">:</span>
+                        <span style="font-size: 3rem; font-family: 'Orbitron'; color: var(--text-main);">{m['score_t2']}</span>
+                    </div>
+                    <div style="flex: 1; text-align: left;">
+                        <h2 style="margin: 0; color: {'var(--primary-red)' if m['score_t2'] > m['score_t1'] else 'var(--text-main)'}; font-family: 'Orbitron';">{m['t2_name']}</h2>
+                    </div>
+                </div>
+                <div style="text-align: center; color: var(--text-dim); font-size: 0.9rem; margin-top: 10px; letter-spacing: 2px;">{m['format'].upper()} • {m['group_name'].upper()}</div>
+            </div>
+        """, unsafe_allow_html=True)
+        
         maps_df = get_match_maps(int(m['id']))
         if maps_df.empty:
-            st.info("No maps recorded")
+            st.info("No detailed map data recorded for this match.")
         else:
-            md = maps_df.copy()
-            md['Winner'] = md.apply(lambda r: m['t1_name'] if r['winner_id'] == m['t1_id'] else (m['t2_name'] if r['winner_id'] == m['t2_id'] else ''), axis=1)
-            md = md.rename(columns={
-                'map_index': 'Map',
-                'map_name': 'Name',
-                'team1_rounds': m['t1_name'],
-                'team2_rounds': m['t2_name'],
-            })
-            md['Map'] = md['Map'] + 1
-            st.dataframe(md[['Map', 'Name', m['t1_name'], m['t2_name'], 'Winner']], hide_index=True, use_container_width=True)
-            st.divider()
-            for i in sorted(maps_df['map_index'].unique().tolist()):
-                st.caption(f"Map {i+1}")
-                conn_s = get_conn()
-                s1 = pd.read_sql("SELECT p.name, ms.agent, ms.acs, ms.kills, ms.deaths, ms.assists, ms.is_sub FROM match_stats_map ms JOIN players p ON ms.player_id=p.id WHERE ms.match_id=? AND ms.map_index=? AND ms.team_id=?", conn_s, params=(int(m['id']), i, int(m['t1_id'])))
-                s2 = pd.read_sql("SELECT p.name, ms.agent, ms.acs, ms.kills, ms.deaths, ms.assists, ms.is_sub FROM match_stats_map ms JOIN players p ON ms.player_id=p.id WHERE ms.match_id=? AND ms.map_index=? AND ms.team_id=?", conn_s, params=(int(m['id']), i, int(m['t2_id'])))
-                conn_s.close()
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.markdown(f"**{m['t1_name']}**")
-                    if s1.empty:
-                        st.caption("No scoreboard")
-                    else:
-                        st.dataframe(s1.rename(columns={'name':'Player','agent':'Agent','acs':'ACS','kills':'K','deaths':'D','assists':'A','is_sub':'Sub'}), hide_index=True, use_container_width=True)
-                with c2:
-                    st.markdown(f"**{m['t2_name']}**")
-                    if s2.empty:
-                        st.caption("No scoreboard")
-                    else:
-                        st.dataframe(s2.rename(columns={'name':'Player','agent':'Agent','acs':'ACS','kills':'K','deaths':'D','assists':'A','is_sub':'Sub'}), hide_index=True, use_container_width=True)
+            # Map Selection
+            map_indices = sorted(maps_df['map_index'].unique().tolist())
+            map_labels = [f"Map {i+1}: {maps_df[maps_df['map_index'] == i].iloc[0]['map_name']}" for i in map_indices]
+            
+            selected_map_idx = st.radio("Select Map", map_indices, format_func=lambda i: map_labels[i], horizontal=True)
+            
+            st.markdown("<br>", unsafe_allow_html=True)
+            
+            # Map Score Card
+            curr_map = maps_df[maps_df['map_index'] == selected_map_idx].iloc[0]
+            st.markdown(f"""
+                <div class="custom-card" style="background: rgba(255,255,255,0.02); margin-bottom: 20px;">
+                    <div style="display: flex; justify-content: center; align-items: center; gap: 40px;">
+                        <div style="text-align: center;">
+                            <div style="color: var(--text-dim); font-size: 0.8rem; margin-bottom: 5px;">{m['t1_name']}</div>
+                            <div style="font-size: 2rem; font-family: 'Orbitron'; color: {'var(--primary-blue)' if curr_map['team1_rounds'] > curr_map['team2_rounds'] else 'var(--text-main)'};">{curr_map['team1_rounds']}</div>
+                        </div>
+                        <div style="text-align: center;">
+                            <div style="font-family: 'Orbitron'; color: var(--primary-blue); font-size: 1.2rem;">{curr_map['map_name'].upper()}</div>
+                            <div style="color: var(--text-dim); font-size: 0.7rem;">WINNER: {m['t1_name'] if curr_map['winner_id'] == m['t1_id'] else m['t2_name']}</div>
+                        </div>
+                        <div style="text-align: center;">
+                            <div style="color: var(--text-dim); font-size: 0.8rem; margin-bottom: 5px;">{m['t2_name']}</div>
+                            <div style="font-size: 2rem; font-family: 'Orbitron'; color: {'var(--primary-red)' if curr_map['team2_rounds'] > curr_map['team1_rounds'] else 'var(--text-main)'};">{curr_map['team2_rounds']}</div>
+                        </div>
+                    </div>
+                </div>
+            """, unsafe_allow_html=True)
+            
+            # Scoreboards
+            conn_s = get_conn()
+            s1 = pd.read_sql("SELECT p.name, ms.agent, ms.acs, ms.kills, ms.deaths, ms.assists, ms.is_sub FROM match_stats_map ms JOIN players p ON ms.player_id=p.id WHERE ms.match_id=? AND ms.map_index=? AND ms.team_id=?", conn_s, params=(int(m['id']), selected_map_idx, int(m['t1_id'])))
+            s2 = pd.read_sql("SELECT p.name, ms.agent, ms.acs, ms.kills, ms.deaths, ms.assists, ms.is_sub FROM match_stats_map ms JOIN players p ON ms.player_id=p.id WHERE ms.match_id=? AND ms.map_index=? AND ms.team_id=?", conn_s, params=(int(m['id']), selected_map_idx, int(m['t2_id'])))
+            conn_s.close()
+            
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown(f'<h4 style="color: var(--primary-blue); font-family: \'Orbitron\';">{m["t1_name"]} Scoreboard</h4>', unsafe_allow_html=True)
+                if s1.empty:
+                    st.info("No scoreboard data")
+                else:
+                    st.dataframe(s1.rename(columns={'name':'Player','agent':'Agent','acs':'ACS','kills':'K','deaths':'D','assists':'A','is_sub':'Sub'}), hide_index=True, use_container_width=True)
+            
+            with c2:
+                st.markdown(f'<h4 style="color: var(--primary-red); font-family: \'Orbitron\';">{m["t2_name"]} Scoreboard</h4>', unsafe_allow_html=True)
+                if s2.empty:
+                    st.info("No scoreboard data")
+                else:
+                    st.dataframe(s2.rename(columns={'name':'Player','agent':'Agent','acs':'ACS','kills':'K','deaths':'D','assists':'A','is_sub':'Sub'}), hide_index=True, use_container_width=True)
 
 elif page == "Match Predictor":
     st.header("Match Predictor")
@@ -925,29 +1056,112 @@ elif page == "Match Predictor":
             winner = t1_name if prob1 > prob2 else t2_name
             conf = max(prob1, prob2)
             
-            st.subheader(f"Prediction: {winner} wins")
-            st.metric("Confidence", f"{conf:.1f}%")
+            st.markdown(f"""
+            <div class="custom-card" style="text-align: center; border-top: 4px solid { 'var(--primary-blue)' if winner == t1_name else 'var(--primary-red)' };">
+                <h2 style="margin: 0; color: { 'var(--primary-blue)' if winner == t1_name else 'var(--primary-red)' };">PREDICTION: {winner}</h2>
+                <div style="font-size: 3rem; font-family: 'Orbitron'; margin: 10px 0;">{conf:.1f}%</div>
+                <div style="color: var(--text-dim);">CONFIDENCE LEVEL</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # Probability Bar
+            st.markdown(f"""
+            <div style="width: 100%; background: rgba(255,255,255,0.05); height: 20px; border-radius: 10px; overflow: hidden; display: flex; margin: 20px 0;">
+                <div style="width: {prob1}%; background: var(--primary-blue); height: 100%; transition: width 1s ease-in-out;"></div>
+                <div style="width: {prob2}%; background: var(--primary-red); height: 100%; transition: width 1s ease-in-out;"></div>
+            </div>
+            <div style="display: flex; justify-content: space-between; font-family: 'Orbitron'; font-size: 0.8rem;">
+                <div style="color: var(--primary-blue);">{t1_name} ({prob1:.1f}%)</div>
+                <div style="color: var(--primary-red);">{t2_name} ({prob2:.1f}%)</div>
+            </div>
+            """, unsafe_allow_html=True)
             
             c1, c2 = st.columns(2)
-            c1.info(f"**{t1_name} Stats**\n\nWin Rate: {s1['win_rate']:.0%}\nAvg Score: {s1['avg_score']:.1f}\nH2H Wins: {h2h_wins_t1}")
-            c2.info(f"**{t2_name} Stats**\n\nWin Rate: {s2['win_rate']:.0%}\nAvg Score: {s2['avg_score']:.1f}\nH2H Wins: {h2h_wins_t2}")
+            with c1:
+                st.markdown(f"""
+                <div class="custom-card">
+                    <h3 style="color: var(--primary-blue); margin-top: 0;">{t1_name} Analysis</h3>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                        <div>
+                            <div style="color: var(--text-dim); font-size: 0.7rem; text-transform: uppercase;">Win Rate</div>
+                            <div style="font-size: 1.2rem; font-family: 'Orbitron';">{s1['win_rate']:.0%}</div>
+                        </div>
+                        <div>
+                            <div style="color: var(--text-dim); font-size: 0.7rem; text-transform: uppercase;">Avg Score</div>
+                            <div style="font-size: 1.2rem; font-family: 'Orbitron';">{s1['avg_score']:.1f}</div>
+                        </div>
+                        <div>
+                            <div style="color: var(--text-dim); font-size: 0.7rem; text-transform: uppercase;">H2H Wins</div>
+                            <div style="font-size: 1.2rem; font-family: 'Orbitron';">{h2h_wins_t1}</div>
+                        </div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            with c2:
+                st.markdown(f"""
+                <div class="custom-card">
+                    <h3 style="color: var(--primary-red); margin-top: 0;">{t2_name} Analysis</h3>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                        <div>
+                            <div style="color: var(--text-dim); font-size: 0.7rem; text-transform: uppercase;">Win Rate</div>
+                            <div style="font-size: 1.2rem; font-family: 'Orbitron';">{s2['win_rate']:.0%}</div>
+                        </div>
+                        <div>
+                            <div style="color: var(--text-dim); font-size: 0.7rem; text-transform: uppercase;">Avg Score</div>
+                            <div style="font-size: 1.2rem; font-family: 'Orbitron';">{s2['avg_score']:.1f}</div>
+                        </div>
+                        <div>
+                            <div style="color: var(--text-dim); font-size: 0.7rem; text-transform: uppercase;">H2H Wins</div>
+                            <div style="font-size: 1.2rem; font-family: 'Orbitron';">{h2h_wins_t2}</div>
+                        </div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
 
 elif page == "Player Leaderboard":
     df = get_player_leaderboard()
     if df.empty:
         st.info("No player stats yet.")
     else:
+        st.markdown("### Top Performers")
+        # Show top 3 in special cards
+        top3 = df.head(3)
+        cols = st.columns(3)
+        medals = ["🥇", "🥈", "🥉"]
+        colors = ["#FFD700", "#C0C0C0", "#CD7132"]
+        
+        for i, (_, row) in enumerate(top3.iterrows()):
+            with cols[i]:
+                st.markdown(f"""
+                <div class="custom-card" style="text-align: center; border-bottom: 3px solid {colors[i]};">
+                    <div style="font-size: 2rem;">{medals[i]}</div>
+                    <div style="font-weight: bold; color: var(--primary-blue); font-size: 1.2rem; margin: 10px 0;">{row['name']}</div>
+                    <div style="color: var(--text-dim); font-size: 0.8rem;">{row['team']}</div>
+                    <div style="font-family: 'Orbitron'; font-size: 1.5rem; color: var(--text-main); margin-top: 10px;">{row['avg_acs']}</div>
+                    <div style="font-size: 0.6rem; color: var(--text-dim);">AVG ACS</div>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        st.divider()
         st.dataframe(df, use_container_width=True, hide_index=True)
+        
         names = df['name'].tolist()
-        sel = st.selectbox("View player profile", names) if names else None
-        if sel:
+        sel = st.selectbox("Detailed Profile", ["Select a player..."] + names)
+        if sel != "Select a player...":
             conn_pp = get_conn()
             pid_row = pd.read_sql("SELECT id FROM players WHERE name=?", conn_pp, params=(sel,))
             conn_pp.close()
             if not pid_row.empty:
                 prof = get_player_profile(int(pid_row.iloc[0]['id']))
                 if prof:
-                    st.subheader(f"{prof['info'].get('name')} • {prof['info'].get('team') or ''}")
+                    st.markdown(f"""
+                    <div style="margin-top: 2rem; padding: 1rem; border-left: 5px solid var(--primary-blue); background: rgba(63, 209, 255, 0.05);">
+                        <h2 style="margin: 0;">{prof['info'].get('name')}</h2>
+                        <div style="color: var(--text-dim); font-family: 'Orbitron';">{prof['info'].get('team') or 'No Team'} • {prof['info'].get('rank') or 'Unranked'}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    st.write("") # Spacer
                     c1,c2,c3,c4 = st.columns(4)
                     c1.metric("Games", prof['games'])
                     c2.metric("Avg ACS", prof['avg_acs'])
@@ -962,9 +1176,17 @@ elif page == "Player Leaderboard":
                     st.dataframe(cmp_df, hide_index=True, use_container_width=True)
                     if 'trend' in prof and not prof['trend'].empty:
                         st.caption("ACS trend")
-                        st.line_chart(prof['trend'].set_index('label')[['avg_acs']])
+                        fig_acs = px.line(prof['trend'], x='label', y='avg_acs', 
+                                          title="ACS Trend", markers=True,
+                                          color_discrete_sequence=['#3FD1FF'])
+                        st.plotly_chart(apply_plotly_theme(fig_acs), use_container_width=True)
+                        
                         st.caption("KDA trend")
-                        st.line_chart(prof['trend'].set_index('label')[['kda']])
+                        fig_kda = px.line(prof['trend'], x='label', y='kda', 
+                                          title="KDA Trend", markers=True,
+                                          color_discrete_sequence=['#FF4655'])
+                        st.plotly_chart(apply_plotly_theme(fig_kda), use_container_width=True)
+
                     if 'sub_impact' in prof:
                         sid = prof['sub_impact']
                         sidf = pd.DataFrame({
@@ -973,12 +1195,16 @@ elif page == "Player Leaderboard":
                             'KDA': [sid['starter_kda'], sid['sub_kda']],
                         })
                         st.caption("Substitution impact")
-                        st.bar_chart(sidf.set_index('Role'))
+                        fig_sub = px.bar(sidf, x='Role', y=['ACS', 'KDA'], barmode='group',
+                                         color_discrete_map={'ACS': '#3FD1FF', 'KDA': '#FF4655'})
+                        st.plotly_chart(apply_plotly_theme(fig_sub), use_container_width=True)
                     if not prof['maps'].empty:
                         st.caption("Maps played")
                         st.dataframe(prof['maps'][['match_id','map_index','agent','acs','kills','deaths','assists','is_sub']], hide_index=True, use_container_width=True)
 
 elif page == "Players Directory":
+    st.markdown('<h1 class="main-header">PLAYERS DIRECTORY</h1>', unsafe_allow_html=True)
+    
     conn = get_conn()
     try:
         players_df = pd.read_sql(
@@ -993,88 +1219,136 @@ elif page == "Players Directory":
     except Exception:
         players_df = pd.DataFrame(columns=['id','name','riot_id','rank','team'])
     conn.close()
+    
     ranks_base = ["Unranked", "Iron", "Bronze", "Silver", "Gold", "Platinum", "Diamond", "Ascendant", "Immortal", "Radiant"]
     dynamic_ranks = sorted(list(set(players_df['rank'].dropna().unique().tolist() + ranks_base)))
-    c1, c2 = st.columns([2, 1])
-    with c1:
-        rf = st.multiselect("Rank", dynamic_ranks, default=dynamic_ranks)
-    with c2:
-        q = st.text_input("Search name or Riot ID")
+    
+    with st.container():
+        st.markdown('<div class="custom-card">', unsafe_allow_html=True)
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            rf = st.multiselect("Filter by Rank", dynamic_ranks, default=dynamic_ranks)
+        with c2:
+            q = st.text_input("Search Name or Riot ID", placeholder="Search...")
+        st.markdown('</div>', unsafe_allow_html=True)
+    
     out = players_df.copy()
     out['rank'] = out['rank'].fillna("Unranked")
     out = out[out['rank'].isin(rf)]
     if q:
         s = q.lower()
         out = out[out.apply(lambda r: s in str(r['name']).lower() or s in str(r['riot_id']).lower(), axis=1)]
-    st.dataframe(out, use_container_width=True, hide_index=True)
+    
+    # Display as a clean table with the brand theme
+    st.markdown("<br>", unsafe_allow_html=True)
+    if out.empty:
+        st.info("No players found matching your criteria.")
+    else:
+        st.dataframe(
+            out[['name', 'riot_id', 'rank', 'team']], 
+            use_container_width=True, 
+            hide_index=True,
+            column_config={
+                "name": st.column_config.TextColumn("Name", width="medium"),
+                "riot_id": st.column_config.TextColumn("Riot ID", width="medium"),
+                "rank": st.column_config.TextColumn("Rank", width="small"),
+                "team": st.column_config.TextColumn("Team", width="medium"),
+            }
+        )
 
 elif page == "Teams":
+    st.markdown('<h1 class="main-header">TEAMS</h1>', unsafe_allow_html=True)
+    
     conn = get_conn()
     teams = pd.read_sql("SELECT id, name, tag, group_name, logo_path FROM teams ORDER BY name", conn)
     all_players = pd.read_sql("SELECT id, name, default_team_id FROM players ORDER BY name", conn)
     conn.close()
+    
     groups = ["All"] + sorted(teams['group_name'].dropna().unique().tolist())
-    g = st.selectbox("Group", groups)
+    
+    with st.container():
+        st.markdown('<div class="custom-card">', unsafe_allow_html=True)
+        g = st.selectbox("Filter by Group", groups)
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+    st.markdown("<br>", unsafe_allow_html=True)
+    
     show = teams if g == "All" else teams[teams['group_name'] == g]
     for _, row in show.iterrows():
-        c1, c2 = st.columns([1, 3])
-        with c1:
-            lp = row['logo_path'] if row['logo_path'] and os.path.exists(row['logo_path']) else None
-            if lp:
-                st.image(lp, width=80)
-        with c2:
-            st.markdown(f"**{row['name']}**" + (f" • {row['tag']}" if pd.notna(row['tag']) else ""))
-            st.caption(f"Group {row['group_name']}")
-            conn_r = get_conn()
-            roster = pd.read_sql_query(
-                "SELECT id, name, rank FROM players WHERE default_team_id=? ORDER BY name",
-                conn_r,
-                params=(int(row['id']),),
-            )
-            conn_r.close()
-            if roster.empty:
-                st.write("No players yet")
-            else:
-                st.dataframe(roster[['name','rank']], hide_index=True, use_container_width=True)
-            if st.session_state.get('is_admin'):
-                st.divider()
-                st.caption("Edit Team")
-                with st.form(f"edit_team_{row['id']}"):
-                    new_name = st.text_input("Name", value=row['name'])
-                    new_tag = st.text_input("Tag", value=row['tag'] or "")
-                    new_group = st.text_input("Group", value=row['group_name'] or "")
-                    new_logo = st.text_input("Logo Path", value=row['logo_path'] or "")
-                    save_team = st.form_submit_button("Save Team")
-                    if save_team:
-                        conn_u = get_conn()
-                        conn_u.execute("UPDATE teams SET name=?, tag=?, group_name=?, logo_path=? WHERE id=?", (new_name, new_tag or None, new_group or None, new_logo or None, int(row['id'])))
-                        conn_u.commit()
-                        conn_u.close()
-                        st.success("Team updated")
-                        st.rerun()
-                st.caption("Manage Roster")
-                # Add player to roster
-                unassigned = all_players[all_players['default_team_id'].isna()]
-                add_sel = st.selectbox(f"Add Player to {row['name']}", [p for p in unassigned['name'].tolist()] + [""], index=len(unassigned['name'].tolist()))
-                if add_sel:
-                    pid = int(all_players[all_players['name'] == add_sel].iloc[0]['id'])
-                    conn_a = get_conn()
-                    conn_a.execute("UPDATE players SET default_team_id=? WHERE id=?", (int(row['id']), pid))
-                    conn_a.commit()
-                    conn_a.close()
-                    st.success("Player added")
-                    st.rerun()
-                # Remove player from roster
-                if not roster.empty:
-                    rem_sel = st.selectbox(f"Remove Player from {row['name']}", [p for p in roster['name'].tolist()] + [""], index=len(roster['name'].tolist()))
-                    if rem_sel:
-                        pid = int(roster[roster['name'] == rem_sel].iloc[0]['id'])
-                        conn_d = get_conn()
-                        conn_d.execute("UPDATE players SET default_team_id=NULL WHERE id=?", (pid,))
-                        conn_d.commit()
-                        conn_d.close()
-                        st.success("Player removed")
-                        st.rerun()
+        with st.container():
+            # Team Header Card
+            st.markdown(f"""
+                <div class="custom-card" style="margin-bottom: 10px;">
+                    <div style="display: flex; align-items: center; gap: 20px;">
+                        <div style="flex-shrink: 0;">
+                            {"<img src='data:image/png;base64," + base64.b64encode(open(row['logo_path'], "rb").read()).decode() + "' width='60'/>" if row['logo_path'] and os.path.exists(row['logo_path']) else "<div style='width:60px;height:60px;background:rgba(255,255,255,0.05);border-radius:8px;display:flex;align-items:center;justify-content:center;color:var(--text-dim);'>?</div>"}
+                        </div>
+                        <div>
+                            <h3 style="margin: 0; color: var(--primary-blue); font-family: 'Orbitron';">{row['name']} <span style="color: var(--text-dim); font-size: 0.9rem;">[{row['tag'] or ''}]</span></h3>
+                            <div style="color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">Group {row['group_name']}</div>
+                        </div>
+                    </div>
+                </div>
+            """, unsafe_allow_html=True)
+            
+            with st.expander("Manage Roster & Details"):
+                conn_r = get_conn()
+                roster = pd.read_sql_query(
+                    "SELECT id, name, rank FROM players WHERE default_team_id=? ORDER BY name",
+                    conn_r,
+                    params=(int(row['id']),),
+                )
+                conn_r.close()
+                
+                if roster.empty:
+                    st.info("No players yet")
+                else:
+                    st.dataframe(roster[['name','rank']], hide_index=True, use_container_width=True)
+                
+                if st.session_state.get('is_admin'):
+                    st.markdown("---")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.caption("Edit Team Details")
+                        with st.form(f"edit_team_{row['id']}"):
+                            new_name = st.text_input("Name", value=row['name'])
+                            new_tag = st.text_input("Tag", value=row['tag'] or "")
+                            new_group = st.text_input("Group", value=row['group_name'] or "")
+                            new_logo = st.text_input("Logo Path", value=row['logo_path'] or "")
+                            if st.form_submit_button("Update Team"):
+                                conn_u = get_conn()
+                                conn_u.execute("UPDATE teams SET name=?, tag=?, group_name=?, logo_path=? WHERE id=?", (new_name, new_tag or None, new_group or None, new_logo or None, int(row['id'])))
+                                conn_u.commit()
+                                conn_u.close()
+                                st.success("Team updated")
+                                st.rerun()
+                    
+                    with col2:
+                        st.caption("Roster Management")
+                        # Add player
+                        unassigned = all_players[all_players['default_team_id'].isna()]
+                        add_sel = st.selectbox(f"Add Player", [""] + unassigned['name'].tolist(), key=f"add_{row['id']}")
+                        if add_sel:
+                            pid = int(all_players[all_players['name'] == add_sel].iloc[0]['id'])
+                            conn_a = get_conn()
+                            conn_a.execute("UPDATE players SET default_team_id=? WHERE id=?", (int(row['id']), pid))
+                            conn_a.commit()
+                            conn_a.close()
+                            st.success("Player added")
+                            st.rerun()
+                        
+                        # Remove player
+                        if not roster.empty:
+                            rem_sel = st.selectbox(f"Remove Player", [""] + roster['name'].tolist(), key=f"rem_{row['id']}")
+                            if rem_sel:
+                                pid = int(roster[roster['name'] == rem_sel].iloc[0]['id'])
+                                conn_d = get_conn()
+                                conn_d.execute("UPDATE players SET default_team_id=NULL WHERE id=?", (pid,))
+                                conn_d.commit()
+                                conn_d.close()
+                                st.success("Player removed")
+                                st.rerun()
+        st.markdown("<br>", unsafe_allow_html=True)
 
 elif page == "Admin Panel":
     if not st.session_state.get('is_admin'):
@@ -1493,43 +1767,135 @@ elif page == "Admin Panel":
             st.rerun()
 
 elif page == "Substitutions Log":
+    st.markdown('<h1 class="main-header">SUBSTITUTIONS LOG</h1>', unsafe_allow_html=True)
+    
     df = get_substitutions_log()
     if df.empty:
         st.info("No substitutions recorded.")
     else:
+        # Summary Metrics
+        m1, m2 = st.columns(2)
+        with m1:
+            st.markdown(f"""
+                <div class="custom-card" style="text-align: center;">
+                    <div style="color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">Total Subs</div>
+                    <div style="font-size: 2.5rem; font-family: 'Orbitron'; color: var(--primary-blue); margin: 10px 0;">{len(df)}</div>
+                </div>
+            """, unsafe_allow_html=True)
+        with m2:
+            top_team = df.groupby('team').size().idxmax() if not df.empty else "N/A"
+            st.markdown(f"""
+                <div class="custom-card" style="text-align: center;">
+                    <div style="color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">Most Active Team</div>
+                    <div style="font-size: 1.5rem; font-family: 'Orbitron'; color: var(--primary-red); margin: 10px 0;">{top_team}</div>
+                </div>
+            """, unsafe_allow_html=True)
+            
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        # Charts Section
+        c1, c2 = st.columns(2)
+        with c1:
+            tcount = df.groupby('team').size().reset_index(name='subs').sort_values('subs', ascending=False)
+            fig_sub_team = px.bar(tcount, x='team', y='subs', title="Subs by Team",
+                                  color_discrete_sequence=['#3FD1FF'], labels={'team': 'Team', 'subs': 'Substitutions'})
+            st.plotly_chart(apply_plotly_theme(fig_sub_team), use_container_width=True)
+        
+        with c2:
+            if 'week' in df.columns:
+                wcount = df.groupby('week').size().reset_index(name='subs')
+                fig_sub_week = px.line(wcount, x='week', y='subs', title="Subs per Week", markers=True,
+                                       color_discrete_sequence=['#FF4655'], labels={'week': 'Week', 'subs': 'Substitutions'})
+                st.plotly_chart(apply_plotly_theme(fig_sub_week), use_container_width=True)
+        
+        # Detailed Log
+        st.markdown('<h3 style="color: var(--primary-blue); font-family: \'Orbitron\';">DETAILED LOG</h3>', unsafe_allow_html=True)
         st.dataframe(df, use_container_width=True, hide_index=True)
-        tcount = df.groupby('team').size().reset_index(name='subs')
-        tcount = tcount.sort_values('subs', ascending=False)
-        st.caption("Substitutions by team")
-        st.bar_chart(tcount.set_index('team'))
-        if 'week' in df.columns:
-            wcount = df.groupby('week').size().reset_index(name='subs')
-            st.caption("Substitutions per week")
-            st.line_chart(wcount.set_index('week'))
 
 elif page == "Player Profile":
     conn_pl = get_conn()
     players_df = pd.read_sql("SELECT id, name FROM players ORDER BY name", conn_pl)
     conn_pl.close()
+    
+    st.markdown('<h1 class="main-header">PLAYER PROFILE</h1>', unsafe_allow_html=True)
+    
     opts = players_df['name'].tolist()
-    sel = st.selectbox("Player", opts) if opts else None
+    sel = st.selectbox("Select a Player", opts) if opts else None
+    
     if sel:
         pid = int(players_df[players_df['name'] == sel].iloc[0]['id'])
         prof = get_player_profile(pid)
+        
         if prof:
-            st.subheader(f"{prof['info'].get('name')} • {prof['info'].get('team') or ''}")
-            c1,c2,c3,c4 = st.columns(4)
-            c1.metric("Games", prof['games'])
-            c2.metric("Avg ACS", prof['avg_acs'])
-            c3.metric("KD", prof['kd_ratio'])
-            c4.metric("Assists", prof['total_assists'])
+            # Header Card
+            st.markdown(f"""
+                <div class="custom-card" style="margin-bottom: 2rem;">
+                    <div style="display: flex; align-items: center; gap: 20px;">
+                        <div style="background: var(--primary-blue); width: 60px; height: 60px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 2rem; color: var(--bg-dark);">
+                            {prof['info'].get('name')[0].upper() if prof['info'].get('name') else 'P'}
+                        </div>
+                        <div>
+                            <h2 style="margin: 0; color: var(--primary-blue); font-family: 'Orbitron';">{prof['info'].get('name')}</h2>
+                            <div style="color: var(--text-dim); font-size: 1.1rem;">{prof['info'].get('team') or 'Free Agent'}</div>
+                        </div>
+                    </div>
+                </div>
+            """, unsafe_allow_html=True)
+            
+            # Metrics Grid
+            m1, m2, m3, m4 = st.columns(4)
+            with m1:
+                st.markdown(f"""
+                    <div class="custom-card" style="text-align: center;">
+                        <div style="color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">Games</div>
+                        <div style="font-size: 2rem; font-family: 'Orbitron'; color: var(--text-main); margin: 10px 0;">{prof['games']}</div>
+                    </div>
+                """, unsafe_allow_html=True)
+            with m2:
+                st.markdown(f"""
+                    <div class="custom-card" style="text-align: center;">
+                        <div style="color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">Avg ACS</div>
+                        <div style="font-size: 2rem; font-family: 'Orbitron'; color: var(--primary-blue); margin: 10px 0;">{prof['avg_acs']}</div>
+                    </div>
+                """, unsafe_allow_html=True)
+            with m3:
+                st.markdown(f"""
+                    <div class="custom-card" style="text-align: center;">
+                        <div style="color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">KD Ratio</div>
+                        <div style="font-size: 2rem; font-family: 'Orbitron'; color: var(--primary-red); margin: 10px 0;">{prof['kd_ratio']}</div>
+                    </div>
+                """, unsafe_allow_html=True)
+            with m4:
+                st.markdown(f"""
+                    <div class="custom-card" style="text-align: center;">
+                        <div style="color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">Assists</div>
+                        <div style="font-size: 2rem; font-family: 'Orbitron'; color: var(--text-main); margin: 10px 0;">{prof['total_assists']}</div>
+                    </div>
+                """, unsafe_allow_html=True)
+            
+            st.markdown("<br>", unsafe_allow_html=True)
+            
+            # Comparison Radar or Bar Chart
+            st.markdown('<h3 style="color: var(--primary-blue); font-family: \'Orbitron\';">PERFORMANCE BENCHMARKS</h3>', unsafe_allow_html=True)
+            
             cmp_df = pd.DataFrame({
-                'Metric': ['ACS','Kills','Deaths','Assists'],
+                'Metric': ['ACS','Kills/Match','Deaths/Match','Assists/Match'],
                 'Player': [prof['avg_acs'], prof['total_kills']/max(prof['games'],1), prof['total_deaths']/max(prof['games'],1), prof['total_assists']/max(prof['games'],1)],
                 'Rank Avg': [prof['sr_avg_acs'], prof['sr_k'], prof['sr_d'], prof['sr_a']],
                 'League Avg': [prof['lg_avg_acs'], prof['lg_k'], prof['lg_d'], prof['lg_a']],
             })
-            st.dataframe(cmp_df, hide_index=True, use_container_width=True)
+            
+            # Plotly Bar Chart for comparison
+            fig_cmp = go.Figure()
+            fig_cmp.add_trace(go.Bar(name='Player', x=cmp_df['Metric'], y=cmp_df['Player'], marker_color='#3FD1FF'))
+            fig_cmp.add_trace(go.Bar(name='Rank Avg', x=cmp_df['Metric'], y=cmp_df['Rank Avg'], marker_color='#FF4655', opacity=0.7))
+            fig_cmp.add_trace(go.Bar(name='League Avg', x=cmp_df['Metric'], y=cmp_df['League Avg'], marker_color='#ECE8E1', opacity=0.5))
+            
+            fig_cmp.update_layout(barmode='group', height=400)
+            st.plotly_chart(apply_plotly_theme(fig_cmp), use_container_width=True)
+            
             if not prof['maps'].empty:
-                st.caption("Maps played")
-                st.dataframe(prof['maps'][['match_id','map_index','agent','acs','kills','deaths','assists','is_sub']], hide_index=True, use_container_width=True)
+                st.markdown('<h3 style="color: var(--primary-blue); font-family: \'Orbitron\';">RECENT MATCHES</h3>', unsafe_allow_html=True)
+                maps_display = prof['maps'][['match_id','map_index','agent','acs','kills','deaths','assists','is_sub']].copy()
+                maps_display.columns = ['Match ID', 'Map', 'Agent', 'ACS', 'K', 'D', 'A', 'Sub']
+                st.dataframe(maps_display, hide_index=True, use_container_width=True)
