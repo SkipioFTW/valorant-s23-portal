@@ -2442,16 +2442,18 @@ elif page == "Admin Panel":
                             if len(team_segments) >= 2:
                                 # Use Riot IDs to match teams
                                 conn_roster = get_conn()
-                                t1_roster = pd.read_sql("SELECT riot_id FROM players WHERE default_team_id=?", conn_roster, params=(int(m['t1_id']),))['riot_id'].dropna().tolist()
+                                # Safely get team ID from m
+                                cur_t1_id = int(m.get('t1_id', m.get('team1_id')))
+                                t1_roster = pd.read_sql("SELECT riot_id FROM players WHERE default_team_id=?", conn_roster, params=(cur_t1_id,))['riot_id'].dropna().tolist()
                                 conn_roster.close()
-                                t1_roster = [str(r).strip() for r in t1_roster]
+                                t1_roster = [str(r).strip().lower() for r in t1_roster]
                                 
                                 potential_t1_id = team_segments[0].get("attributes", {}).get("teamId")
                                 t1_matches = 0
                                 for p_seg in [s for s in segments if s.get("type") == "player-summary"]:
                                     if p_seg.get("metadata", {}).get("teamId") == potential_t1_id:
                                         rid = p_seg.get("metadata", {}).get("platformInfo", {}).get("platformUserIdentifier")
-                                        if rid and str(rid).strip() in t1_roster:
+                                        if rid and str(rid).strip().lower() in t1_roster:
                                             t1_matches += 1
                                 
                                 if t1_matches >= 1:
@@ -2493,7 +2495,7 @@ elif page == "Admin Panel":
                     else:
                         st.warning(f"File '{json_filename}' not found in 'matches' folder.")
 
-                for team_key, team_id, team_name in [("t1", int(m['t1_id']), m['t1_name']), ("t2", int(m['t2_id']), m['t2_name'])]:
+                for team_key, team_id, team_name in [("t1", int(m.get('t1_id', m.get('team1_id'))), m['t1_name']), ("t2", int(m.get('t2_id', m.get('team2_id'))), m['t2_name'])]:
                     st.caption(f"{team_name} players")
                     conn_p = get_conn()
                     roster_df = pd.read_sql("SELECT id, name, riot_id FROM players WHERE default_team_id=? ORDER BY name", conn_p, params=(team_id,))
@@ -2507,8 +2509,8 @@ elif page == "Admin Panel":
                     roster_map = dict(zip(roster_list, roster_df['id']))
                     global_list = all_df.apply(lambda r: (f"{str(r['riot_id'])} ({r['name']})" if pd.notna(r['riot_id']) and str(r['riot_id']).strip() else r['name']), axis=1).tolist()
                     global_map = dict(zip(global_list, all_df['id']))
-                    # Improved label_to_riot to handle NaN correctly
-                    label_to_riot = {label: str(rid).strip() for label, rid in zip(global_list, all_df['riot_id']) if pd.notna(rid) and str(rid).strip()}
+                    # Improved label_to_riot to handle NaN correctly and normalize to lowercase
+                    label_to_riot = {label: str(rid).strip().lower() for label, rid in zip(global_list, all_df['riot_id']) if pd.notna(rid) and str(rid).strip()}
                     riot_to_label = {v: k for k, v in label_to_riot.items()}
                     agents_list = agents_df['name'].tolist()
                     rows = []
@@ -2562,7 +2564,8 @@ elif page == "Admin Panel":
                         
                         for rid in team_sug_rids:
                             s = sug[rid]
-                            db_label = riot_to_label.get(rid)
+                            # Use lowercase for matching against our normalized riot_to_label keys
+                            db_label = riot_to_label.get(rid.lower())
                             
                             if db_label:
                                 is_sub = False

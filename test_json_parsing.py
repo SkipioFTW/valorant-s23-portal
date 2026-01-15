@@ -22,9 +22,13 @@ def test_parse(match_id, json_match_id, map_idx=0):
     conn = get_conn()
     m = pd.read_sql("SELECT * FROM matches WHERE id=?", conn, params=(match_id,)).iloc[0]
     
+    # Safely get team IDs regardless of column name (team1_id vs t1_id alias)
+    t1_id = int(m.get('team1_id', m.get('t1_id')))
+    t2_id = int(m.get('team2_id', m.get('t2_id')))
+    
     # Get team names
-    t1_name = pd.read_sql("SELECT name FROM teams WHERE id=?", conn, params=(int(m['team1_id']),)).iloc[0]['name']
-    t2_name = pd.read_sql("SELECT name FROM teams WHERE id=?", conn, params=(int(m['team2_id']),)).iloc[0]['name']
+    t1_name = pd.read_sql("SELECT name FROM teams WHERE id=?", conn, params=(t1_id,)).iloc[0]['name']
+    t2_name = pd.read_sql("SELECT name FROM teams WHERE id=?", conn, params=(t2_id,)).iloc[0]['name']
     print(f"Match: {t1_name} vs {t2_name}")
     
     # 2. Load JSON
@@ -44,20 +48,20 @@ def test_parse(match_id, json_match_id, map_idx=0):
     team_segments = [s for s in segments if s.get("type") == "team-summary"]
     if len(team_segments) >= 2:
         # Use Riot IDs to match teams
-        t1_roster = pd.read_sql("SELECT riot_id FROM players WHERE default_team_id=?", conn, params=(int(m['team1_id']),))['riot_id'].dropna().tolist()
-        t1_roster = [str(r).strip() for r in t1_roster]
+        t1_roster = pd.read_sql("SELECT riot_id FROM players WHERE default_team_id=?", conn, params=(t1_id,))['riot_id'].dropna().tolist()
+        t1_roster = [str(r).strip().lower() for r in t1_roster]
         
         potential_t1_id = team_segments[0].get("attributes", {}).get("teamId")
         t1_matches = 0
         for p_seg in [s for s in segments if s.get("type") == "player-summary"]:
             if p_seg.get("metadata", {}).get("teamId") == potential_t1_id:
                 rid = p_seg.get("metadata", {}).get("platformInfo", {}).get("platformUserIdentifier")
-                if rid and str(rid).strip() in t1_roster:
+                if rid and str(rid).strip().lower() in t1_roster:
                     t1_matches += 1
         
         if t1_matches >= 1:
             tracker_team_1_id = potential_t1_id
-            print(f"Matched Tracker Team 0 to {t1_name}")
+            print(f"Matched Tracker Team 0 to {t1_name} ({t1_matches} players found)")
         else:
             tracker_team_1_id = team_segments[1].get("attributes", {}).get("teamId")
             print(f"Matched Tracker Team 1 to {t1_name}")
@@ -92,24 +96,26 @@ def test_parse(match_id, json_match_id, map_idx=0):
     # 3. Simulate Scoreboard Generation for Team 1 and Team 2
     all_df = pd.read_sql("SELECT id, name, riot_id FROM players ORDER BY name", conn)
     global_list = all_df.apply(lambda r: (f"{str(r['riot_id'])} ({r['name']})" if pd.notna(r['riot_id']) and str(r['riot_id']).strip() else r['name']), axis=1).tolist()
-    label_to_riot = {label: str(rid).strip() for label, rid in zip(global_list, all_df['riot_id']) if pd.notna(rid) and str(rid).strip()}
+    # Normalize keys in label_to_riot for better matching
+    label_to_riot = {label: str(rid).strip().lower() for label, rid in zip(global_list, all_df['riot_id']) if pd.notna(rid) and str(rid).strip()}
     riot_to_label = {v: k for k, v in label_to_riot.items()}
 
-    for team_key, team_id, team_name in [("t1", int(m['t1_id']), t1_name), ("t2", int(m['t2_id']), t2_name)]:
+    for team_key, team_id_val, team_name in [("t1", t1_id, t1_name), ("t2", t2_id, t2_name)]:
         print(f"\n--- {team_name} Scoreboard ---")
-        roster_df = pd.read_sql("SELECT id, name, riot_id FROM players WHERE default_team_id=? ORDER BY name", conn, params=(team_id,))
+        roster_df = pd.read_sql("SELECT id, name, riot_id FROM players WHERE default_team_id=? ORDER BY name", conn, params=(team_id_val,))
         roster_list = roster_df.apply(lambda r: (f"{str(r['riot_id'])} ({r['name']})" if pd.notna(r['riot_id']) and str(r['riot_id']).strip() else r['name']), axis=1).tolist()
         
         our_team_num = 1 if team_key == "t1" else 2
         sug = json_suggestions
         
         rows = []
+        # Match using lowercase RIDs
         team_sug_rids = [rid for rid, s in sug.items() if s.get('team_num') == our_team_num]
         
         used_roster_indices = set()
         for rid in team_sug_rids:
             s = sug[rid]
-            db_label = riot_to_label.get(rid)
+            db_label = riot_to_label.get(rid.lower())
             if db_label:
                 is_sub = False
                 subbed_for = ""
@@ -127,6 +133,8 @@ def test_parse(match_id, json_match_id, map_idx=0):
                     'agent': s.get('agent'),
                     'acs': s['acs'], 'k': s['k'], 'd': s['d'], 'a': s['a']
                 })
+            else:
+                print(f"⚠️ Warning: Could not find player in DB with Riot ID: {rid}")
 
         # Fill remaining with roster
         remaining_slots = 5 - len(rows)
