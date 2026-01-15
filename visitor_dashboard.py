@@ -626,8 +626,8 @@ def get_player_leaderboard():
                    SUM(msm.assists) as total_assists
             FROM match_stats_map msm
             JOIN players p ON msm.player_id = p.id
-            LEFT JOIN teams t ON msm.team_id = t.id
-            GROUP BY p.id, p.name, t.tag
+            LEFT JOIN teams t ON p.default_team_id = t.id
+            GROUP BY p.id, p.name
             HAVING games > 0
             """,
             conn,
