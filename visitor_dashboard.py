@@ -827,7 +827,8 @@ if page == "Overview & Standings":
         st.info("No standings data available yet.")
 
 elif page == "Matches":
-    week = st.sidebar.selectbox("Week", [1, 2, 3, 4, 5], index=0)
+    st.markdown('<h1 class="main-header">MATCH SCHEDULE</h1>', unsafe_allow_html=True)
+    week = st.selectbox("Select Week", [1, 2, 3, 4, 5], index=0)
     df = get_week_matches(week)
     if df.empty:
         st.info("No matches for this week.")
@@ -977,7 +978,7 @@ elif page == "Match Summary":
                     st.dataframe(s2.rename(columns={'name':'Player','agent':'Agent','acs':'ACS','kills':'K','deaths':'D','assists':'A','is_sub':'Sub'}), hide_index=True, use_container_width=True)
 
 elif page == "Match Predictor":
-    st.header("Match Predictor")
+    st.markdown('<h1 class="main-header">MATCH PREDICTOR</h1>', unsafe_allow_html=True)
     st.write("Predict the outcome of a match based on team history and stats.")
     
     conn = get_conn()
@@ -1351,6 +1352,7 @@ elif page == "Teams":
         st.markdown("<br>", unsafe_allow_html=True)
 
 elif page == "Admin Panel":
+    st.markdown('<h1 class="main-header">ADMIN PANEL</h1>', unsafe_allow_html=True)
     if not st.session_state.get('is_admin'):
         st.warning("Admin only")
     else:
