@@ -1,7 +1,13 @@
-import sqlite3
-import pandas as pd
-import json
 import os
+import sys
+
+print("🚀 Starting JSON Parsing Test Script...")
+print("⏳ Loading libraries (this may take a few seconds)...")
+
+import json
+import pandas as pd
+import sqlite3
+from difflib import SequenceMatcher
 import re
 
 DB_PATH = "valorant_s23.db"
@@ -154,6 +160,18 @@ def test_parse(match_id, json_match_id, map_idx=0):
     conn.close()
 
 if __name__ == "__main__":
+    # Check if matches folder exists
+    if not os.path.exists("matches"):
+        os.makedirs("matches")
+        print("📁 Created 'matches' folder.")
+    
+    # Check for JSON files
+    json_files = [f for f in os.listdir("matches") if f.endswith(".json")]
+    if not json_files:
+        print("❌ No JSON files found in 'matches/' folder.")
+        print("👉 Please run 'python get_tracker_json.py' first to download a match JSON.")
+        sys.exit(0)
+    
     # List matches
     conn = get_conn()
     matches = pd.read_sql("SELECT m.id, t1.name as t1_name, t2.name as t2_name FROM matches m JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id LIMIT 10", conn)
