@@ -856,10 +856,14 @@ elif page == "Match Predictor":
     
     tnames = teams_df['name'].tolist()
     c1, c2 = st.columns(2)
-    t1_name = c1.selectbox("Team 1", tnames, index=0)
-    t2_name = c2.selectbox("Team 2", tnames, index=(1 if len(tnames)>1 else 0))
     
-    if st.button("Predict Result"):
+    # Check if user is admin or dev
+    is_privileged = st.session_state.get('is_admin', False) or st.session_state.get('role') in ['admin', 'dev']
+    
+    t1_name = c1.selectbox("Team 1", tnames, index=0, disabled=not is_privileged)
+    t2_name = c2.selectbox("Team 2", tnames, index=(1 if len(tnames)>1 else 0), disabled=not is_privileged)
+    
+    if st.button("Predict Result", disabled=not is_privileged):
         if t1_name == t2_name:
             st.error("Select two different teams.")
         else:
@@ -1208,39 +1212,46 @@ elif page == "Admin Panel":
                 conn_all0.close()
                 name_to_riot = dict(zip(all_df0['name'].astype(str), all_df0['riot_id'].astype(str)))
                 
-                # File uploaders for automatic pre-filling
-                upjson0 = st.file_uploader("Upload Tracker.gg JSON", type=["json"], key=f"json_{m['id']}_{map_idx}")
+                # Match ID input for automatic pre-filling from folder
+                match_id_input = st.text_input("Enter Match ID to load JSON data", key=f"mid_{m['id']}_{map_idx}")
                 
-                if upjson0 is not None:
-                    try:
-                        jsdata = json.load(upjson0)
-                        json_suggestions = {}
-                        segments = jsdata.get("data", {}).get("segments", [])
-                        for seg in segments:
-                            if seg.get("type") == "player-summary":
-                                rid = seg.get("metadata", {}).get("platformInfo", {}).get("platformUserIdentifier")
-                                if rid:
-                                    rid = str(rid).strip()
-                                agent = seg.get("metadata", {}).get("agentName")
-                                st_map = seg.get("stats", {})
-                                # In Tracker JSON, scorePerRound value is usually ACS
-                                acs = st_map.get("scorePerRound", {}).get("value", 0)
-                                k = st_map.get("kills", {}).get("value", 0)
-                                d = st_map.get("deaths", {}).get("value", 0)
-                                a = st_map.get("assists", {}).get("value", 0)
-                                if rid:
-                                    json_suggestions[rid] = {
-                                        'acs': int(acs) if acs is not None else 0, 
-                                        'k': int(k) if k is not None else 0, 
-                                        'd': int(d) if d is not None else 0, 
-                                        'a': int(a) if a is not None else 0, 
-                                        'agent': agent,
-                                        'conf': 100.0
-                                    }
-                        st.session_state[f"ocr_{m['id']}_{map_idx}"] = json_suggestions
-                        st.success(f"JSON parsed {len(json_suggestions)} players.")
-                    except Exception as e:
-                        st.error(f"JSON Error: {str(e)}")
+                if match_id_input:
+                    json_filename = f"match_{match_id_input}.json"
+                    json_path = os.path.join("matches", json_filename)
+                    
+                    if os.path.exists(json_path):
+                        try:
+                            with open(json_path, 'r', encoding='utf-8') as f:
+                                jsdata = json.load(f)
+                            json_suggestions = {}
+                            segments = jsdata.get("data", {}).get("segments", [])
+                            for seg in segments:
+                                if seg.get("type") == "player-summary":
+                                    rid = seg.get("metadata", {}).get("platformInfo", {}).get("platformUserIdentifier")
+                                    if rid:
+                                        rid = str(rid).strip()
+                                    agent = seg.get("metadata", {}).get("agentName")
+                                    st_map = seg.get("stats", {})
+                                    # In Tracker JSON, scorePerRound value is usually ACS
+                                    acs = st_map.get("scorePerRound", {}).get("value", 0)
+                                    k = st_map.get("kills", {}).get("value", 0)
+                                    d = st_map.get("deaths", {}).get("value", 0)
+                                    a = st_map.get("assists", {}).get("value", 0)
+                                    if rid:
+                                        json_suggestions[rid] = {
+                                            'acs': int(acs) if acs is not None else 0, 
+                                            'k': int(k) if k is not None else 0, 
+                                            'd': int(d) if d is not None else 0, 
+                                            'a': int(a) if a is not None else 0, 
+                                            'agent': agent,
+                                            'conf': 100.0
+                                        }
+                            st.session_state[f"ocr_{m['id']}_{map_idx}"] = json_suggestions
+                            st.success(f"JSON file '{json_filename}' loaded and parsed.")
+                        except Exception as e:
+                            st.error(f"JSON Error: {str(e)}")
+                    else:
+                        st.warning(f"File '{json_filename}' not found in 'matches' folder.")
 
                 for team_key, team_id, team_name in [("t1", int(m['t1_id']), m['t1_name']), ("t2", int(m['t2_id']), m['t2_name'])]:
                     st.caption(f"{team_name} players")
