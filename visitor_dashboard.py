@@ -2550,51 +2550,65 @@ elif page == "Admin Panel":
                 with col_json1:
                     match_input = st.text_input("Enter Match ID", key=f"mid_{m['id']}_{map_idx}", placeholder="e.g. fef14b8b-ddc7-4b91-b91c-905327c74325")
                 with col_json2:
-                    if st.button("Scrape & Apply", key=f"force_json_{m['id']}_{map_idx}", use_container_width=True):
+                    if st.button("Apply Match Data", key=f"force_json_{m['id']}_{map_idx}", use_container_width=True):
                         if match_input:
-                            with st.spinner("Fetching data from Tracker.gg..."):
-                                # Clean Match ID if it's a URL
-                                match_id_to_scrape = match_input
-                                if "tracker.gg" in match_input:
-                                    mid_match = re.search(r'match/([a-zA-Z0-9\-]+)', match_input)
-                                    if mid_match: match_id_to_scrape = mid_match.group(1)
-                                
-                                jsdata, err = scrape_tracker_match(match_id_to_scrape)
-                                if err:
-                                    st.error(err)
-                                else:
-                                    # 1. Save locally
-                                    match_id_clean = re.sub(r'[^a-zA-Z0-9\-]', '', match_id_to_scrape)
-                                    
-                                    if not os.path.exists("matches"): os.makedirs("matches")
-                                    with open(os.path.join("matches", f"match_{match_id_clean}.json"), 'w', encoding='utf-8') as f:
-                                        json.dump(jsdata, f, indent=4)
-                                    
-                                    # 2. Upload to GitHub
-                                    scraper = TrackerScraper()
-                                    ok, gmsg = scraper.upload_match_to_github(match_id_clean, jsdata, get_secret)
-                                    if ok:
-                                        st.toast(gmsg, icon="✅")
+                            # Clean Match ID
+                            match_id_clean = match_input
+                            if "tracker.gg" in match_input:
+                                mid_match = re.search(r'match/([a-zA-Z0-9\-]+)', match_input)
+                                if mid_match: match_id_clean = mid_match.group(1)
+                            match_id_clean = re.sub(r'[^a-zA-Z0-9\-]', '', match_id_clean)
+                            
+                            json_path = os.path.join("matches", f"match_{match_id_clean}.json")
+                            jsdata = None
+                            source = ""
+                            
+                            # 1. Try local file first (Prevents 403 errors in Cloud)
+                            if os.path.exists(json_path):
+                                try:
+                                    with open(json_path, 'r', encoding='utf-8') as f:
+                                        jsdata = json.load(f)
+                                    source = "Local Cache"
+                                except Exception as e:
+                                    st.error(f"Error reading local file: {e}")
+                            
+                            # 2. If not found locally, attempt live scrape
+                            if not jsdata:
+                                with st.spinner("Fetching data from Tracker.gg..."):
+                                    jsdata, err = scrape_tracker_match(match_id_clean)
+                                    if err:
+                                        st.error(f"Scrape failed: {err}")
+                                        st.info("💡 **Tip:** If scraping is blocked (403), ensure the JSON file is in the 'matches/' folder.")
                                     else:
-                                        st.toast(gmsg, icon="⚠️")
-
-                                    # 3. Process and apply
-                                    cur_t1_id = int(m.get('t1_id', m.get('team1_id')))
-                                    json_suggestions, map_name, t1_r, t2_r = parse_tracker_json(jsdata, cur_t1_id)
-                                    
-                                    st.session_state[f"ocr_{m['id']}_{map_idx}"] = json_suggestions
-                                    st.session_state[f"scraped_data_{m['id']}_{map_idx}"] = {
-                                        'map_name': map_name,
-                                        't1_rounds': int(t1_r),
-                                        't2_rounds': int(t2_r)
-                                    }
-                                    st.session_state[f"force_apply_{m['id']}_{map_idx}"] = st.session_state.get(f"force_apply_{m['id']}_{map_idx}", 0) + 1
-                                    st.success(f"Data for {map_name} loaded and uploaded!")
-                                    st.rerun()
+                                        source = "Tracker.gg"
+                                        # Save locally for future use
+                                        if not os.path.exists("matches"): os.makedirs("matches")
+                                        with open(json_path, 'w', encoding='utf-8') as f:
+                                            json.dump(jsdata, f, indent=4)
+                                        
+                                        # Upload to GitHub so others can use it
+                                        scraper = TrackerScraper()
+                                        ok, gmsg = scraper.upload_match_to_github(match_id_clean, jsdata, get_secret)
+                                        if ok: st.toast(gmsg, icon="✅")
+                            
+                            # 3. Process and apply if we have data
+                            if jsdata:
+                                cur_t1_id = int(m.get('t1_id', m.get('team1_id')))
+                                json_suggestions, map_name, t1_r, t2_r = parse_tracker_json(jsdata, cur_t1_id)
+                                
+                                st.session_state[f"ocr_{m['id']}_{map_idx}"] = json_suggestions
+                                st.session_state[f"scraped_data_{m['id']}_{map_idx}"] = {
+                                    'map_name': map_name,
+                                    't1_rounds': int(t1_r),
+                                    't2_rounds': int(t2_r)
+                                }
+                                st.session_state[f"force_apply_{m['id']}_{map_idx}"] = st.session_state.get(f"force_apply_{m['id']}_{map_idx}", 0) + 1
+                                st.success(f"Loaded {map_name} from {source}!")
+                                st.rerun()
                         else:
                             st.warning("Please enter a Match ID first.")
                 with col_json3:
-                    st.info("💡 **Tip:** Paste a Match ID to automatically fetch stats and sync with GitHub!")
+                    st.info("💡 **Tip:** Enter a Match ID. We'll check for a local JSON first to avoid connection errors!")
 
                 # Auto-load if file exists but not in session
                 if match_input and f"ocr_{m['id']}_{map_idx}" not in st.session_state:
