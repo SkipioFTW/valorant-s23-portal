@@ -1,6 +1,7 @@
 import streamlit as st
 import sqlite3
 import os
+import sys
 import html
 import json
 import re
@@ -9,6 +10,13 @@ import hmac
 import time
 import base64
 import requests
+
+# Path management for production/staging structure
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(CURRENT_DIR)
+if CURRENT_DIR not in sys.path:
+    sys.path.insert(0, CURRENT_DIR)
+
 from tracker_scraper import TrackerScraper
 
 def get_secret(key, default=None):
@@ -17,7 +25,9 @@ def get_secret(key, default=None):
     except Exception:
         return os.getenv(key, default)
 
-DB_PATH = get_secret("DB_PATH", "valorant_s23.db")
+# Use data folder for database
+DEFAULT_DB_PATH = os.path.join(ROOT_DIR, "data", "valorant_s23.db")
+DB_PATH = get_secret("DB_PATH", DEFAULT_DB_PATH)
 
 # Valorant Map Catalog
 maps_catalog = ["Abyss", "Ascent", "Bind", "Breeze", "Fracture", "Haven", "Icebox", "Lotus", "Pearl", "Split", "Sunset", "Corrode"]
@@ -633,8 +643,9 @@ else:
 def is_safe_path(path):
     if not path:
         return False
-    # Prevent path traversal, absolute paths, and alternate data streams (Windows)
-    if ".." in path or os.path.isabs(path) or ":" in path:
+    # Allow relative paths that might contain 'assets' but prevent escaping project root
+    clean_path = path.replace('\\', '/')
+    if ".." in clean_path or clean_path.startswith('/') or ":" in clean_path:
         return False
     return True
 
@@ -894,10 +905,20 @@ def parse_tracker_json(jsdata, team1_id, team2_id):
 
 @st.cache_data(ttl=3600)
 def get_base64_image(image_path):
-    if not image_path or not is_safe_path(image_path) or not os.path.exists(image_path):
+    if not image_path:
         return None
+    
+    # Resolve relative path against ROOT_DIR
+    if not os.path.isabs(image_path):
+        full_path = os.path.join(ROOT_DIR, image_path)
+    else:
+        full_path = image_path
+
+    if not os.path.exists(full_path):
+        return None
+        
     try:
-        with open(image_path, "rb") as f:
+        with open(full_path, "rb") as f:
             return base64.b64encode(f.read()).decode()
     except Exception:
         return None

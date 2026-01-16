@@ -1,7 +1,9 @@
 import sqlite3
 import pandas as pd
 
-DB_PATH = "valorant_s23.db"
+import os
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DB_PATH = os.path.join(ROOT_DIR, "data", "valorant_s23.db")
 
 def merge_players(keep_id, remove_id, conn):
     print(f"  Merging ID {remove_id} into {keep_id}...")

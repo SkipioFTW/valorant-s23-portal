@@ -6,6 +6,13 @@ import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Path management
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PRODUCTION_DIR = os.path.join(ROOT_DIR, "production")
+if PRODUCTION_DIR not in sys.path:
+    sys.path.insert(0, PRODUCTION_DIR)
+
 from tracker_scraper import TrackerScraper
 
 # Configure Streamlit page

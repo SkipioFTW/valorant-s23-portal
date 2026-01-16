@@ -2,7 +2,9 @@ import sqlite3
 import pandas as pd
 from difflib import SequenceMatcher
 
-DB_PATH = "valorant_s23.db"
+import os
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DB_PATH = os.path.join(ROOT_DIR, "data", "valorant_s23.db")
 
 def fuzzy_match(a, b):
     return SequenceMatcher(None, a.lower(), b.lower()).ratio()

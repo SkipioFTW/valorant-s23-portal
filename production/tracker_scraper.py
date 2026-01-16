@@ -6,6 +6,10 @@ import os
 import sys
 import time
 
+# Path management for production/staging structure
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(CURRENT_DIR)
+
 class TrackerScraper:
     def __init__(self):
         # Using a more specific browser profile to better mimic a real user
@@ -169,29 +173,33 @@ class TrackerScraper:
                 return None, f"Scraping error: {str(e)}"
         return None, "Scraping failed after multiple attempts."
 
-    def save_match(self, data, folder="matches"):
+    def save_match(self, data, folder="assets/matches"):
         if not data or 'data' not in data:
             return None
         
         match_id = data['data']['attributes']['id']
-        if not os.path.exists(folder):
-            os.makedirs(folder)
+        # Ensure path is relative to ROOT_DIR
+        full_folder_path = os.path.join(ROOT_DIR, folder)
+        if not os.path.exists(full_folder_path):
+            os.makedirs(full_folder_path)
         
-        filepath = os.path.join(folder, f"match_{match_id}.json")
+        filepath = os.path.join(full_folder_path, f"match_{match_id}.json")
         with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=4)
         return filepath
 
-    def save_profile(self, data, folder="profiles"):
+    def save_profile(self, data, folder="assets/profiles"):
         if not data or 'data' not in data:
             return None
         
         platform_info = data['data']['platformInfo']
         username = platform_info['platformUserHandle'].replace('#', '_')
-        if not os.path.exists(folder):
-            os.makedirs(folder)
+        # Ensure path is relative to ROOT_DIR
+        full_folder_path = os.path.join(ROOT_DIR, folder)
+        if not os.path.exists(full_folder_path):
+            os.makedirs(full_folder_path)
         
-        filepath = os.path.join(folder, f"profile_{username}.json")
+        filepath = os.path.join(full_folder_path, f"profile_{username}.json")
         with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=4)
         return filepath

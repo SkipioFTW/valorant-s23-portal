@@ -4,11 +4,13 @@ import numpy as np
 import os
 import joblib
 
-MODEL_PATH = 'match_predictor_model.pkl'
+MODEL_PATH = os.path.join(os.path.dirname(__file__), 'match_predictor_model.pkl')
 
 def get_db_connection():
-    # Use absolute path if necessary, but assuming same dir for now
-    return sqlite3.connect('valorant_s23.db')
+    # Database is in ../data/ relative to this script
+    root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    db_path = os.path.join(root_dir, 'data', 'valorant_s23.db')
+    return sqlite3.connect(db_path)
 
 def extract_features(t1_id, t2_id, current_week=None):
     """

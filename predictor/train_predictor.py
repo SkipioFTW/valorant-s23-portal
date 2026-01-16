@@ -6,7 +6,10 @@ import joblib
 import os
 
 def get_db_connection():
-    return sqlite3.connect('valorant_s23.db')
+    # Database is in ../data/ relative to this script
+    root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    db_path = os.path.join(root_dir, 'data', 'valorant_s23.db')
+    return sqlite3.connect(db_path)
 
 def prepare_training_data():
     conn = get_db_connection()
@@ -89,8 +92,9 @@ def train_model():
     
     # Save model
     import joblib
-    joblib.dump(model, 'match_predictor_model.pkl')
-    print("Model trained and saved as match_predictor_model.pkl")
+    model_path = os.path.join(os.path.dirname(__file__), 'match_predictor_model.pkl')
+    joblib.dump(model, model_path)
+    print(f"Model trained and saved as {model_path}")
     return model
 
 if __name__ == "__main__":

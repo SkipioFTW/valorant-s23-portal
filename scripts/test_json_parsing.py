@@ -4,7 +4,9 @@ import pandas as pd
 import sqlite3
 import re
 
-DB_PATH = "valorant_s23.db"
+import os
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DB_PATH = os.path.join(ROOT_DIR, "data", "valorant_s23.db")
 
 def get_conn():
     return sqlite3.connect(DB_PATH)
