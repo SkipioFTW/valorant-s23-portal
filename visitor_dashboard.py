@@ -69,18 +69,36 @@ def init_session_activity_table(conn=None):
         conn.close()
 
 def get_visitor_ip():
+    # Try the modern Streamlit 1.34+ context first
+    try:
+        if hasattr(st, "context") and hasattr(st.context, "headers"):
+            headers = st.context.headers
+            # Check standard proxy headers
+            for header in ["X-Forwarded-For", "X-Real-IP", "Forwarded"]:
+                val = headers.get(header)
+                if val:
+                    return val.split(",")[0].strip()
+    except Exception:
+        pass
+
+    # Fallback to internal websocket headers
     try:
         from streamlit.web.server.websocket_headers import _get_websocket_headers
         headers = _get_websocket_headers()
         if headers:
-            # Check common proxy headers
-            ip = headers.get("X-Forwarded-For")
-            if ip:
-                return ip.split(",")[0].strip()
-            return headers.get("Remote-Addr", "unknown")
+            for header in ["X-Forwarded-For", "X-Real-IP", "Remote-Addr"]:
+                val = headers.get(header)
+                if val:
+                    return val.split(",")[0].strip()
     except Exception:
         pass
-    return "unknown"
+    
+    # Final fallback: use a session-based pseudo-IP if real IP is blocked/missing
+    # This ensures that even if IP is unknown, the same browser session can be tracked
+    if 'pseudo_ip' not in st.session_state:
+        import uuid
+        st.session_state['pseudo_ip'] = f"session_{uuid.uuid4().hex[:8]}"
+    return st.session_state['pseudo_ip']
 
 def track_user_activity():
     try:
@@ -103,16 +121,13 @@ def track_user_activity():
         ip_address = get_visitor_ip()
         conn = get_conn()
         
-        # IMPROVED LOGIC: If this is a fresh session (just refreshed/opened),
-        # and it's NOT yet marked as admin, clear any old admin sessions for this IP.
-        # We use a session-specific flag to ensure we only clear ONCE per refresh.
-        if 'session_initialized' not in st.session_state:
-            if not is_admin:
-                conn.execute(
-                    "DELETE FROM session_activity WHERE ip_address = ? AND (role = 'admin' OR role = 'dev')",
-                    (ip_address,)
-                )
-            st.session_state['session_initialized'] = True
+        # LOGIC: If this is a fresh refresh (no is_admin in session state),
+        # clear any admin locks for this IP. This is the "logout on refresh" fix.
+        if not is_admin:
+            conn.execute(
+                "DELETE FROM session_activity WHERE ip_address = ? AND (role = 'admin' OR role = 'dev')",
+                (ip_address,)
+            )
             
         conn.execute(
             "INSERT OR REPLACE INTO session_activity (session_id, username, role, last_activity, ip_address) VALUES (?, ?, ?, ?, ?)",
@@ -127,21 +142,21 @@ def track_user_activity():
 
 def get_active_user_count():
     conn = get_conn()
-    # Count distinct IPs active in last 5 minutes to avoid double-counting refreshes
+    # Count distinct IPs active in last 5 minutes
     res = conn.execute("SELECT COUNT(DISTINCT ip_address) FROM session_activity WHERE last_activity > ?", (time.time() - 300,)).fetchone()
     conn.close()
     return res[0] if res else 0
 
 def get_active_admin_session():
     conn = get_conn()
-    # Check for active admin/dev sessions in last 2 minutes
-    # Exclude current IP (to allow refreshes/multiple tabs for same user)
+    # Check for active admin/dev sessions in last 60 seconds (shorter for faster recovery)
     curr_ip = get_visitor_ip()
     
     # We block ONLY if there's an active admin from a DIFFERENT IP address.
+    # This allows the same user to reconnect immediately after refresh.
     res = conn.execute(
         "SELECT username, role FROM session_activity WHERE (role='admin' OR role='dev') AND last_activity > ? AND ip_address != ?", 
-        (time.time() - 120, curr_ip)
+        (time.time() - 60, curr_ip)
     ).fetchone()
     conn.close()
     return res
@@ -1513,6 +1528,20 @@ if st.session_state['app_mode'] == 'admin' and not st.session_state.get('is_admi
     with col1:
         st.info("Please enter your administrator credentials to proceed.")
         
+        # EMERGENCY CLEAR: If the user is stuck after a refresh, let them clear their own IP's locks
+        if st.button("⚠️ UNLOCK MY ACCESS", help="Use this if you refreshed and are blocked by your own session."):
+            try:
+                ip = get_visitor_ip()
+                conn = get_conn()
+                conn.execute("DELETE FROM session_activity WHERE ip_address = ? AND (role = 'admin' OR role = 'dev')", (ip,))
+                conn.commit()
+                conn.close()
+                st.success("Your previous session locks have been cleared. You can now login.")
+                time.sleep(1)
+                st.rerun()
+            except Exception:
+                pass
+
         # Simple rate limiting
         if st.session_state['login_attempts'] >= 5:
             time_since_last = time.time() - st.session_state['last_login_attempt']
