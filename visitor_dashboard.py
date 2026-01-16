@@ -189,6 +189,174 @@ def get_active_admin_session():
 # Set page config immediately as the first streamlit command
 st.set_page_config(page_title="S23 Portal", layout="wide", initial_sidebar_state="collapsed")
 
+def ensure_base_schema(conn=None):
+    should_close = False
+    if conn is None:
+        conn = get_conn()
+        should_close = True
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS teams (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tag TEXT,
+        name TEXT UNIQUE,
+        group_name TEXT,
+        captain TEXT,
+        co_captain TEXT
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS players (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT UNIQUE,
+        riot_id TEXT,
+        rank TEXT,
+        default_team_id INTEGER,
+        FOREIGN KEY(default_team_id) REFERENCES teams(id)
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS matches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        week INTEGER,
+        group_name TEXT,
+        team1_id INTEGER,
+        team2_id INTEGER,
+        winner_id INTEGER,
+        score_t1 INTEGER DEFAULT 0,
+        score_t2 INTEGER DEFAULT 0,
+        status TEXT DEFAULT 'scheduled',
+        format TEXT,
+        maps_played INTEGER DEFAULT 0,
+        FOREIGN KEY(team1_id) REFERENCES teams(id),
+        FOREIGN KEY(team2_id) REFERENCES teams(id),
+        FOREIGN KEY(winner_id) REFERENCES teams(id)
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS match_maps (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        match_id INTEGER NOT NULL,
+        map_index INTEGER NOT NULL,
+        map_name TEXT,
+        team1_rounds INTEGER,
+        team2_rounds INTEGER,
+        winner_id INTEGER
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS match_stats (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        match_id INTEGER NOT NULL,
+        player_id INTEGER NOT NULL,
+        team_id INTEGER,
+        acs INTEGER,
+        kills INTEGER,
+        deaths INTEGER,
+        assists INTEGER
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS agents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT UNIQUE
+    )''')
+    if should_close:
+        conn.commit()
+        conn.close()
+
+def ensure_column(table, column_name, column_def_sql, conn=None):
+    # Allowed tables for security validation
+    ALLOWED_TABLES = {"teams", "players", "matches", "match_maps", "match_stats_map", "match_stats", "agents", "seasons", "team_history", "admins"}
+    if table not in ALLOWED_TABLES:
+        return # Skip if table is not allowed
+    
+    should_close = False
+    if conn is None:
+        conn = get_conn()
+        should_close = True
+    
+    c = conn.cursor()
+    # Use string interpolation only for table names which are now validated against ALLOWED_TABLES
+    cols = [r[1] for r in c.execute(f"PRAGMA table_info({table})").fetchall()]
+    if column_name not in cols:
+        try:
+            # Validate column_def_sql basic structure to prevent injection if it comes from untrusted source
+            # In this app, it is hardcoded, but good practice to validate
+            c.execute(f"ALTER TABLE {table} ADD COLUMN {column_def_sql}")
+        except sqlite3.OperationalError:
+            pass
+    
+    if should_close:
+        conn.commit()
+        conn.close()
+
+def ensure_upgrade_schema(conn=None):
+    should_close = False
+    if conn is None:
+        conn = get_conn()
+        should_close = True
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS seasons (
+        id INTEGER PRIMARY KEY,
+        name TEXT UNIQUE,
+        start_date TEXT,
+        end_date TEXT,
+        is_active BOOLEAN DEFAULT 0
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS team_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        team_id INTEGER,
+        season_id INTEGER,
+        final_rank INTEGER,
+        group_name TEXT,
+        FOREIGN KEY(team_id) REFERENCES teams(id),
+        FOREIGN KEY(season_id) REFERENCES seasons(id)
+    )''')
+    
+    ensure_column("teams", "logo_path", "logo_path TEXT", conn=conn)
+    ensure_column("players", "rank", "rank TEXT", conn=conn)
+    ensure_column("matches", "format", "format TEXT", conn=conn)
+    ensure_column("matches", "maps_played", "maps_played INTEGER DEFAULT 0", conn=conn)
+    ensure_column("seasons", "is_active", "is_active BOOLEAN DEFAULT 0", conn=conn)
+    ensure_column("admins", "role", "role TEXT DEFAULT 'admin'", conn=conn)
+    ensure_column("matches", "match_type", "match_type TEXT DEFAULT 'regular'", conn=conn)
+    ensure_column("matches", "playoff_round", "playoff_round INTEGER", conn=conn)
+    ensure_column("matches", "bracket_pos", "bracket_pos INTEGER", conn=conn)
+    ensure_column("matches", "is_forfeit", "is_forfeit BOOLEAN DEFAULT 0", conn=conn)
+    ensure_column("matches", "bracket_label", "bracket_label TEXT", conn=conn)
+    ensure_column("match_maps", "is_forfeit", "is_forfeit INTEGER DEFAULT 0", conn=conn)
+    
+    try:
+        c.execute("INSERT OR IGNORE INTO seasons (id, name, is_active) VALUES (22, 'Season 22', 0)")
+        c.execute("INSERT OR IGNORE INTO seasons (id, name, is_active) VALUES (23, 'Season 23', 1)")
+    except Exception:
+        pass
+    try:
+        c.execute("INSERT OR IGNORE INTO team_history (team_id, season_id, group_name) SELECT id, 23, group_name FROM teams")
+    except Exception:
+        pass
+    
+    if should_close:
+        conn.commit()
+        conn.close()
+
+def init_match_stats_map_table(conn=None):
+    should_close = False
+    if conn is None:
+        conn = get_conn()
+        should_close = True
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS match_stats_map (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            match_id INTEGER NOT NULL,
+            map_index INTEGER NOT NULL,
+            team_id INTEGER NOT NULL,
+            player_id INTEGER,
+            is_sub INTEGER DEFAULT 0,
+            subbed_for_id INTEGER,
+            agent TEXT,
+            acs INTEGER,
+            kills INTEGER,
+            deaths INTEGER,
+            assists INTEGER
+        )
+        """
+    )
+    if should_close:
+        conn.commit()
+        conn.close()
+
 # App Mode Logic
 if 'app_mode' not in st.session_state:
     st.session_state['app_mode'] = 'portal'
@@ -734,146 +902,6 @@ def get_base64_image(image_path):
     except Exception:
         return None
 
-def ensure_base_schema(conn=None):
-    should_close = False
-    if conn is None:
-        conn = get_conn()
-        should_close = True
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS teams (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        tag TEXT,
-        name TEXT UNIQUE,
-        group_name TEXT,
-        captain TEXT,
-        co_captain TEXT
-    )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS players (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT UNIQUE,
-        riot_id TEXT,
-        rank TEXT,
-        default_team_id INTEGER,
-        FOREIGN KEY(default_team_id) REFERENCES teams(id)
-    )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS matches (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        week INTEGER,
-        group_name TEXT,
-        team1_id INTEGER,
-        team2_id INTEGER,
-        winner_id INTEGER,
-        score_t1 INTEGER DEFAULT 0,
-        score_t2 INTEGER DEFAULT 0,
-        status TEXT DEFAULT 'scheduled',
-        format TEXT,
-        maps_played INTEGER DEFAULT 0,
-        FOREIGN KEY(team1_id) REFERENCES teams(id),
-        FOREIGN KEY(team2_id) REFERENCES teams(id),
-        FOREIGN KEY(winner_id) REFERENCES teams(id)
-    )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS match_maps (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        match_id INTEGER NOT NULL,
-        map_index INTEGER NOT NULL,
-        map_name TEXT,
-        team1_rounds INTEGER,
-        team2_rounds INTEGER,
-        winner_id INTEGER
-    )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS match_stats (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        match_id INTEGER NOT NULL,
-        player_id INTEGER NOT NULL,
-        team_id INTEGER,
-        acs INTEGER,
-        kills INTEGER,
-        deaths INTEGER,
-        assists INTEGER
-    )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS agents (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT UNIQUE
-    )''')
-    if should_close:
-        conn.commit()
-        conn.close()
-
-def ensure_column(table, column_name, column_def_sql, conn=None):
-    # Allowed tables for security validation
-    ALLOWED_TABLES = {"teams", "players", "matches", "match_maps", "match_stats_map", "match_stats", "agents", "seasons", "team_history", "admins"}
-    if table not in ALLOWED_TABLES:
-        return # Skip if table is not allowed
-    
-    should_close = False
-    if conn is None:
-        conn = get_conn()
-        should_close = True
-    
-    c = conn.cursor()
-    # Use string interpolation only for table names which are now validated against ALLOWED_TABLES
-    cols = [r[1] for r in c.execute(f"PRAGMA table_info({table})").fetchall()]
-    if column_name not in cols:
-        try:
-            # Validate column_def_sql basic structure to prevent injection if it comes from untrusted source
-            # In this app, it is hardcoded, but good practice to validate
-            c.execute(f"ALTER TABLE {table} ADD COLUMN {column_def_sql}")
-        except sqlite3.OperationalError:
-            pass
-    
-    if should_close:
-        conn.commit()
-        conn.close()
-
-def ensure_upgrade_schema(conn=None):
-    should_close = False
-    if conn is None:
-        conn = get_conn()
-        should_close = True
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS seasons (
-        id INTEGER PRIMARY KEY,
-        name TEXT UNIQUE,
-        start_date TEXT,
-        end_date TEXT,
-        is_active BOOLEAN DEFAULT 0
-    )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS team_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        team_id INTEGER,
-        season_id INTEGER,
-        final_rank INTEGER,
-        group_name TEXT,
-        FOREIGN KEY(team_id) REFERENCES teams(id),
-        FOREIGN KEY(season_id) REFERENCES seasons(id)
-    )''')
-    
-    ensure_column("teams", "logo_path", "logo_path TEXT", conn=conn)
-    ensure_column("players", "rank", "rank TEXT", conn=conn)
-    ensure_column("matches", "format", "format TEXT", conn=conn)
-    ensure_column("matches", "maps_played", "maps_played INTEGER DEFAULT 0", conn=conn)
-    ensure_column("seasons", "is_active", "is_active BOOLEAN DEFAULT 0", conn=conn)
-    ensure_column("admins", "role", "role TEXT DEFAULT 'admin'", conn=conn)
-    ensure_column("matches", "match_type", "match_type TEXT DEFAULT 'regular'", conn=conn)
-    ensure_column("matches", "playoff_round", "playoff_round INTEGER", conn=conn)
-    ensure_column("matches", "bracket_pos", "bracket_pos INTEGER", conn=conn)
-    ensure_column("matches", "is_forfeit", "is_forfeit BOOLEAN DEFAULT 0", conn=conn)
-    ensure_column("matches", "bracket_label", "bracket_label TEXT", conn=conn)
-    
-    try:
-        c.execute("INSERT OR IGNORE INTO seasons (id, name, is_active) VALUES (22, 'Season 22', 0)")
-        c.execute("INSERT OR IGNORE INTO seasons (id, name, is_active) VALUES (23, 'Season 23', 1)")
-    except Exception:
-        pass
-    try:
-        c.execute("INSERT OR IGNORE INTO team_history (team_id, season_id, group_name) SELECT id, 23, group_name FROM teams")
-    except Exception:
-        pass
-    
-    if should_close:
-        conn.commit()
-        conn.close()
-
 def import_sqlite_db(upload_bytes):
     import pandas as pd
     import tempfile
@@ -1213,33 +1241,6 @@ def authenticate(username, password):
     if verify_password(password, salt, ph):
         return {"username": u, "role": role}
     return None
-
-def init_match_stats_map_table(conn=None):
-    should_close = False
-    if conn is None:
-        conn = get_conn()
-        should_close = True
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS match_stats_map (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            match_id INTEGER NOT NULL,
-            map_index INTEGER NOT NULL,
-            team_id INTEGER NOT NULL,
-            player_id INTEGER,
-            is_sub INTEGER DEFAULT 0,
-            subbed_for_id INTEGER,
-            agent TEXT,
-            acs INTEGER,
-            kills INTEGER,
-            deaths INTEGER,
-            assists INTEGER
-        )
-        """
-    )
-    if should_close:
-        conn.commit()
-        conn.close()
 
 def upsert_match_maps(match_id, maps_data):
     conn = get_conn()
