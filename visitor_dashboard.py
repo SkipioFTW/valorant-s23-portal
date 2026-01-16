@@ -1192,7 +1192,7 @@ def get_match_maps(match_id):
     return df
 
 @st.cache_data(ttl=300)
-def get_all_players_directory():
+def get_all_players_directory(format_names=True):
     import pandas as pd
     conn = get_conn()
     try:
@@ -1209,6 +1209,10 @@ def get_all_players_directory():
         df = pd.DataFrame(columns=['id','name','riot_id','rank','team'])
     finally:
         conn.close()
+    
+    if not df.empty and format_names:
+        df['name'] = df.apply(lambda r: f"{r['name']} ({r['riot_id']})" if r['riot_id'] and str(r['riot_id']).strip() else r['name'], axis=1)
+    
     return df
 
 @st.cache_data(ttl=300)
@@ -1518,10 +1522,11 @@ if page == "Overview & Standings":
         rosters_by_team = {}
         if not all_players_bench.empty:
             all_players_bench = all_players_bench.copy()
-            # Format name to include Riot ID
-            all_players_bench['name'] = all_players_bench.apply(lambda r: f"{r['name']} ({r['riot_id']})" if r['riot_id'] and str(r['riot_id']).strip() else r['name'], axis=1)
+            # Create display name for the table
+            all_players_bench['display_name'] = all_players_bench.apply(lambda r: f"{r['name']} ({r['riot_id']})" if r['riot_id'] and str(r['riot_id']).strip() else r['name'], axis=1)
             for tid, group in all_players_bench.groupby('default_team_id'):
-                rosters_by_team[int(tid)] = group[['name', 'rank']]
+                # Keep all columns but we'll show display_name in the table
+                rosters_by_team[int(tid)] = group
 
         df = df.merge(hist, left_on='id', right_on='team_id', how='left')
         df['season_count'] = df['season_count'].fillna(1).astype(int)
@@ -1558,7 +1563,16 @@ if page == "Overview & Standings":
                     with st.expander("Roster"):
                         roster = rosters_by_team.get(int(row.id), pd.DataFrame())
                         if roster.empty: st.caption("No players")
-                        else: st.dataframe(roster, hide_index=True, use_container_width=True)
+                        else: 
+                            st.dataframe(
+                                roster[['display_name', 'rank']], 
+                                hide_index=True, 
+                                use_container_width=True,
+                                column_config={
+                                    "display_name": "Name",
+                                    "rank": "Rank"
+                                }
+                            )
             
             # Standings Table for Group
             st.markdown("<br>", unsafe_allow_html=True)
@@ -2011,12 +2025,11 @@ elif page == "Players Directory":
         st.info("No players found matching your criteria.")
     else:
         st.dataframe(
-            out[['name', 'riot_id', 'rank', 'team']], 
+            out[['name', 'rank', 'team']], 
             use_container_width=True, 
             hide_index=True,
             column_config={
-                "name": st.column_config.TextColumn("Name", width="medium"),
-                "riot_id": st.column_config.TextColumn("Riot ID", width="medium"),
+                "name": st.column_config.TextColumn("Name (Riot ID)", width="large"),
                 "rank": st.column_config.TextColumn("Rank", width="small"),
                 "team": st.column_config.TextColumn("Team", width="medium"),
             }
@@ -2033,10 +2046,11 @@ elif page == "Teams":
     rosters_by_team = {}
     if not all_players.empty:
         all_players = all_players.copy()
-        # Format name to include Riot ID
-        all_players['name'] = all_players.apply(lambda r: f"{r['name']} ({r['riot_id']})" if r['riot_id'] and str(r['riot_id']).strip() else r['name'], axis=1)
+        # Create display name for the table
+        all_players['display_name'] = all_players.apply(lambda r: f"{r['name']} ({r['riot_id']})" if r['riot_id'] and str(r['riot_id']).strip() else r['name'], axis=1)
         for tid, group in all_players.groupby('default_team_id'):
-            rosters_by_team[int(tid)] = group[['name', 'rank']]
+            # Keep all columns for admin management, but we'll filter for display
+            rosters_by_team[int(tid)] = group
     
     groups = ["All"] + sorted(teams['group_name'].dropna().unique().tolist())
     
@@ -2072,7 +2086,15 @@ elif page == "Teams":
                 if roster.empty:
                     st.info("No players yet")
                 else:
-                    st.dataframe(roster, hide_index=True, use_container_width=True)
+                    st.dataframe(
+                        roster[['display_name', 'rank']], 
+                        hide_index=True, 
+                        use_container_width=True,
+                        column_config={
+                            "display_name": "Name",
+                            "rank": "Rank"
+                        }
+                    )
                 
                 if st.session_state.get('is_admin'):
                     st.markdown("---")
@@ -2100,8 +2122,6 @@ elif page == "Teams":
                         st.caption("Roster Management")
                         # Add player
                         unassigned = all_players[all_players['default_team_id'].isna()].copy()
-                        if not unassigned.empty:
-                            unassigned['display_name'] = unassigned.apply(lambda r: f"{r['name']} ({r['riot_id']})" if r['riot_id'] and str(r['riot_id']).strip() else r['name'], axis=1)
                         
                         add_sel = st.selectbox(f"Add Player", [""] + unassigned['display_name'].tolist(), key=f"add_{row.id}")
                         if add_sel:
@@ -2115,9 +2135,6 @@ elif page == "Teams":
                         
                         # Remove player
                         if not roster.empty:
-                            roster = roster.copy()
-                            roster['display_name'] = roster.apply(lambda r: f"{r['name']} ({r['riot_id']})" if r['riot_id'] and str(r['riot_id']).strip() else r['name'], axis=1)
-                            
                             rem_sel = st.selectbox(f"Remove Player", [""] + roster['display_name'].tolist(), key=f"rem_{row.id}")
                             if rem_sel:
                                 pid = int(roster[roster['display_name'] == rem_sel].iloc[0]['id'])
@@ -2957,7 +2974,7 @@ elif page == "Admin Panel":
 
         st.divider()
         st.subheader("Players Admin")
-        players_df = get_all_players_directory()
+        players_df = get_all_players_directory(format_names=False)
         teams_list = get_teams_list()
         
         team_names = teams_list['name'].tolist() if not teams_list.empty else []
