@@ -3451,6 +3451,8 @@ elif page == "Admin Panel":
                         for rid_to_rem in remove_ids:
                             conn_clean.execute("UPDATE match_stats_map SET player_id = ? WHERE player_id = ?", (int(keep_id), int(rid_to_rem)))
                             conn_clean.execute("UPDATE match_stats_map SET subbed_for_id = ? WHERE subbed_for_id = ?", (int(keep_id), int(rid_to_rem)))
+                            conn_clean.execute("UPDATE match_stats SET player_id = ? WHERE player_id = ?", (int(keep_id), int(rid_to_rem)))
+                            conn_clean.execute("UPDATE match_stats SET subbed_for_id = ? WHERE subbed_for_id = ?", (int(keep_id), int(rid_to_rem)))
                             conn_clean.execute("DELETE FROM players WHERE id = ?", (int(rid_to_rem),))
                             merged_count += 1
                     
@@ -3466,11 +3468,14 @@ elif page == "Admin Panel":
                             if exists:
                                 conn_clean.execute("UPDATE match_stats_map SET player_id = ? WHERE player_id = ?", (int(keep_id), int(rid_to_rem)))
                                 conn_clean.execute("UPDATE match_stats_map SET subbed_for_id = ? WHERE subbed_for_id = ?", (int(keep_id), int(rid_to_rem)))
+                                conn_clean.execute("UPDATE match_stats SET player_id = ? WHERE player_id = ?", (int(keep_id), int(rid_to_rem)))
+                                conn_clean.execute("UPDATE match_stats SET subbed_for_id = ? WHERE subbed_for_id = ?", (int(keep_id), int(rid_to_rem)))
                                 conn_clean.execute("DELETE FROM players WHERE id = ?", (int(rid_to_rem),))
                                 merged_count += 1
                     
                     conn_clean.commit()
                     if merged_count > 0:
+                        st.cache_data.clear() # Clear cache to show merged players
                         st.success(f"Successfully merged {merged_count} duplicate records.")
                         st.rerun()
                     else:
@@ -3504,13 +3509,18 @@ elif page == "Admin Panel":
                             conn_exec = get_conn()
                             try:
                                  # Clean up references in match_stats_map and match_stats
+                                 # For player_id, we delete the stats because they belong to the deleted player
                                  conn_exec.execute("DELETE FROM match_stats_map WHERE player_id = ?", (int(p_to_del_id),))
-                                 conn_exec.execute("DELETE FROM match_stats_map WHERE subbed_for_id = ?", (int(p_to_del_id),))
                                  conn_exec.execute("DELETE FROM match_stats WHERE player_id = ?", (int(p_to_del_id),))
-                                 conn_exec.execute("DELETE FROM match_stats WHERE subbed_for_id = ?", (int(p_to_del_id),))
+                                 
+                                 # For subbed_for_id, we only set it to NULL to keep the stats of the sub
+                                 conn_exec.execute("UPDATE match_stats_map SET subbed_for_id = NULL WHERE subbed_for_id = ?", (int(p_to_del_id),))
+                                 conn_exec.execute("UPDATE match_stats SET subbed_for_id = NULL WHERE subbed_for_id = ?", (int(p_to_del_id),))
+                                 
                                  # Delete the player
                                  conn_exec.execute("DELETE FROM players WHERE id = ?", (int(p_to_del_id),))
                                  conn_exec.commit()
+                                 st.cache_data.clear() # CRITICAL: Clear cache to update UI
                                  st.success(f"Player '{p_to_del_name}' deleted.")
                                  st.rerun()
                             except Exception as e:
@@ -3601,10 +3611,15 @@ elif page == "Admin Panel":
                 
                 if deleted_ids:
                     for pid in deleted_ids:
+                         # For player_id, we delete the stats because they belong to the deleted player
                          conn_up.execute("DELETE FROM match_stats_map WHERE player_id = ?", (pid,))
-                         conn_up.execute("DELETE FROM match_stats_map WHERE subbed_for_id = ?", (pid,))
                          conn_up.execute("DELETE FROM match_stats WHERE player_id = ?", (pid,))
-                         conn_up.execute("DELETE FROM match_stats WHERE subbed_for_id = ?", (pid,))
+                         
+                         # For subbed_for_id, we only set it to NULL to keep the stats of the sub
+                         conn_up.execute("UPDATE match_stats_map SET subbed_for_id = NULL WHERE subbed_for_id = ?", (pid,))
+                         conn_up.execute("UPDATE match_stats SET subbed_for_id = NULL WHERE subbed_for_id = ?", (pid,))
+                         
+                         # Delete the player
                          conn_up.execute("DELETE FROM players WHERE id = ?", (pid,))
 
                 for row in edited.itertuples():
