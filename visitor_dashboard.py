@@ -11,6 +11,108 @@ import base64
 import requests
 from tracker_scraper import TrackerScraper
 
+def get_secret(key, default=None):
+    try:
+        return st.secrets[key]
+    except Exception:
+        return os.getenv(key, default)
+
+DB_PATH = get_secret("DB_PATH", "valorant_s23.db")
+
+def get_conn():
+    return sqlite3.connect(DB_PATH)
+
+def init_admin_table(conn=None):
+    should_close = False
+    if conn is None:
+        conn = get_conn()
+        should_close = True
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS admins (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password_hash BLOB NOT NULL,
+            salt BLOB NOT NULL,
+            is_active INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    if should_close:
+        conn.commit()
+        conn.close()
+
+def init_session_activity_table(conn=None):
+    should_close = False
+    if conn is None:
+        conn = get_conn()
+        should_close = True
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS session_activity (
+            session_id TEXT PRIMARY KEY,
+            username TEXT,
+            role TEXT,
+            last_activity REAL
+        )
+        """
+    )
+    if should_close:
+        conn.commit()
+        conn.close()
+
+def track_user_activity():
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+        ctx = get_script_run_ctx()
+        if not ctx:
+            return
+        session_id = ctx.session_id
+        
+        username = st.session_state.get('username')
+        is_admin = st.session_state.get('is_admin', False)
+        app_mode = st.session_state.get('app_mode', 'portal')
+        
+        role = 'visitor'
+        if is_admin:
+            role = st.session_state.get('role', 'admin')
+        elif app_mode == 'admin':
+            role = 'visitor' # Attempting to login
+            
+        conn = get_conn()
+        conn.execute(
+            "INSERT OR REPLACE INTO session_activity (session_id, username, role, last_activity) VALUES (?, ?, ?, ?)",
+            (session_id, username, role, time.time())
+        )
+        # Cleanup old sessions (older than 30 minutes)
+        conn.execute("DELETE FROM session_activity WHERE last_activity < ?", (time.time() - 1800,))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def get_active_user_count():
+    conn = get_conn()
+    # Active in last 5 minutes
+    res = conn.execute("SELECT COUNT(*) FROM session_activity WHERE last_activity > ?", (time.time() - 300,)).fetchone()
+    conn.close()
+    return res[0] if res else 0
+
+def get_active_admin_session():
+    conn = get_conn()
+    # Check for active admin/dev sessions in last 2 minutes
+    # Exclude current session
+    from streamlit.runtime.scriptrunner import get_script_run_ctx
+    ctx = get_script_run_ctx()
+    curr_session_id = ctx.session_id if ctx else None
+    
+    res = conn.execute(
+        "SELECT username, role FROM session_activity WHERE (role='admin' OR role='dev') AND last_activity > ? AND session_id != ?", 
+        (time.time() - 120, curr_session_id)
+    ).fetchone()
+    conn.close()
+    return res
+
 # Set page config immediately as the first streamlit command
 st.set_page_config(page_title="S23 Portal", layout="wide")
 
@@ -453,108 +555,6 @@ def get_base64_image(image_path):
             return base64.b64encode(f.read()).decode()
     except Exception:
         return None
-
-def get_secret(key, default=None):
-    try:
-        return st.secrets[key]
-    except Exception:
-        return os.getenv(key, default)
-
-DB_PATH = get_secret("DB_PATH", "valorant_s23.db")
-
-def get_conn():
-    return sqlite3.connect(DB_PATH)
-
-def init_admin_table(conn=None):
-    should_close = False
-    if conn is None:
-        conn = get_conn()
-        should_close = True
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS admins (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password_hash BLOB NOT NULL,
-            salt BLOB NOT NULL,
-            is_active INTEGER NOT NULL DEFAULT 1
-        )
-        """
-    )
-    if should_close:
-        conn.commit()
-        conn.close()
-
-def init_session_activity_table(conn=None):
-    should_close = False
-    if conn is None:
-        conn = get_conn()
-        should_close = True
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS session_activity (
-            session_id TEXT PRIMARY KEY,
-            username TEXT,
-            role TEXT,
-            last_activity REAL
-        )
-        """
-    )
-    if should_close:
-        conn.commit()
-        conn.close()
-
-def track_user_activity():
-    try:
-        from streamlit.runtime.scriptrunner import get_script_run_ctx
-        ctx = get_script_run_ctx()
-        if not ctx:
-            return
-        session_id = ctx.session_id
-        
-        username = st.session_state.get('username')
-        is_admin = st.session_state.get('is_admin', False)
-        app_mode = st.session_state.get('app_mode', 'portal')
-        
-        role = 'visitor'
-        if is_admin:
-            role = st.session_state.get('role', 'admin')
-        elif app_mode == 'admin':
-            role = 'visitor' # Attempting to login
-            
-        conn = get_conn()
-        conn.execute(
-            "INSERT OR REPLACE INTO session_activity (session_id, username, role, last_activity) VALUES (?, ?, ?, ?)",
-            (session_id, username, role, time.time())
-        )
-        # Cleanup old sessions (older than 30 minutes)
-        conn.execute("DELETE FROM session_activity WHERE last_activity < ?", (time.time() - 1800,))
-        conn.commit()
-        conn.close()
-    except Exception:
-        pass
-
-def get_active_user_count():
-    conn = get_conn()
-    # Active in last 5 minutes
-    res = conn.execute("SELECT COUNT(*) FROM session_activity WHERE last_activity > ?", (time.time() - 300,)).fetchone()
-    conn.close()
-    return res[0] if res else 0
-
-def get_active_admin_session():
-    conn = get_conn()
-    # Check for active admin/dev sessions in last 2 minutes
-    # Exclude current session
-    from streamlit.runtime.scriptrunner import get_script_run_ctx
-    ctx = get_script_run_ctx()
-    curr_session_id = ctx.session_id if ctx else None
-    
-    res = conn.execute(
-        "SELECT username, role FROM session_activity WHERE (role='admin' OR role='dev') AND last_activity > ? AND session_id != ?", 
-        (time.time() - 120, curr_session_id)
-    ).fetchone()
-    conn.close()
-    return res
 
 def ensure_base_schema(conn=None):
     should_close = False
