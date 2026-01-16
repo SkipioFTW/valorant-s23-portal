@@ -5,6 +5,8 @@ import html
 import json
 import re
 import pandas as pd
+import hmac
+import time
 from tracker_scraper import TrackerScraper
 
 # Set page config immediately as the first streamlit command
@@ -15,7 +17,10 @@ if 'app_mode' not in st.session_state:
     st.session_state['app_mode'] = 'portal'
 
 # Hide standard sidebar navigation and other streamlit elements
-st.markdown("""<link href='https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Rajdhani:wght@400;600&family=Inter:wght@400;700&display=swap' rel='stylesheet'><style>
+st.markdown("""<link href='https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Rajdhani:wght@400;600&family=Inter:wght@400;700&display=swap' rel='stylesheet'>""", unsafe_allow_html=True)
+
+st.markdown("""
+<style>
 /* Global Styles */
 :root {
 --primary-blue: #3FD1FF;
