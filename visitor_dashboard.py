@@ -1,782 +1,13 @@
 import streamlit as st
 import sqlite3
-import pandas as pd
 import os
-import hashlib
-import hmac
-import secrets
-import tempfile
-import base64
-import requests
-import cloudscraper
-import re
-import io
-import json
 import html
-import time
-import plotly.express as px
-import plotly.graph_objects as go
-from PIL import Image, ImageOps
+import json
+import re
+import pandas as pd
+from tracker_scraper import TrackerScraper
 
-def is_safe_path(path):
-    if not path:
-        return False
-    # Prevent path traversal, absolute paths, and alternate data streams (Windows)
-    if ".." in path or os.path.isabs(path) or ":" in path:
-        return False
-    return True
-
-def ocr_extract(image_bytes, crop_box=None):
-    """
-    Returns (text, dataframe, error_message)
-    """
-    try:
-        import pytesseract
-        # Try to find tesseract binary in common paths if not in PATH
-        # (Windows specific check)
-        possible_paths = [
-            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
-            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
-            r"C:\Users\SBS\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
-        ]
-        for p in possible_paths:
-            if os.path.exists(p):
-                pytesseract.pytesseract.tesseract_cmd = p
-                break
-
-        img = Image.open(io.BytesIO(image_bytes))
-        if crop_box:
-            img = img.crop(crop_box)
-        
-        # Preprocessing
-        # 1. Convert to grayscale
-        img_gray = img.convert('L')
-        # 2. Thresholding (simple binary)
-        # Adjust threshold as needed, 128 is standard
-        img_thresh = img_gray.point(lambda x: 0 if x < 150 else 255, '1')
-        
-        # Try getting data
-        try:
-            df = pytesseract.image_to_data(img_thresh, output_type=pytesseract.Output.DATAFRAME)
-        except Exception as e:
-            # If data extraction fails, we might still get text? 
-            # Usually if one fails, both fail, but let's try.
-            # Also catch if tesseract is missing
-            return "", None, f"Tesseract Error: {str(e)}"
-            
-        text = pytesseract.image_to_string(img_thresh)
-        return text, df, None
-    except ImportError:
-        return "", None, "pytesseract not installed. Please install it to use OCR."
-    except Exception as e:
-        return "", None, f"Image Processing Error: {str(e)}"
-
-def scrape_tracker_match(url):
-    """
-    Scrapes match data from tracker.gg using the provided URL.
-    Returns (match_data_json, error_message)
-    """
-    try:
-        # Extract match ID from URL
-        # Format: https://tracker.gg/valorant/match/4e473784-f3f5-450e-9f1b-66ba5e90be01
-        match_id_match = re.search(r'match/([a-zA-Z0-9\-]+)', url)
-        if not match_id_match:
-            return None, "Invalid Tracker.gg match URL"
-        
-        match_id = match_id_match.group(1)
-        api_url = f"https://api.tracker.gg/api/v2/valorant/standard/matches/{match_id}"
-        
-        # Use cloudscraper with enhanced headers and browser simulation to bypass 403 errors
-        scraper = cloudscraper.create_scraper(
-            browser={
-                'browser': 'chrome',
-                'platform': 'windows',
-                'desktop': True
-            }
-        )
-        
-        headers = {
-            'Accept': 'application/json, text/plain, */*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Referer': f'https://tracker.gg/valorant/match/{match_id}',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        }
-        
-        r = scraper.get(api_url, headers=headers)
-        
-        if r.status_code != 200:
-            return None, f"Tracker.gg API error: {r.status_code}"
-        
-        data = r.json()
-        return data, None
-    except Exception as e:
-        return None, f"Scraping error: {str(e)}"
-
-def get_secret(key, default=None):
-    try:
-        return st.secrets[key]
-    except Exception:
-        return os.getenv(key, default)
-
-DB_PATH = get_secret("DB_PATH", "valorant_s23.db")
-
-def get_conn():
-    return sqlite3.connect(DB_PATH)
-
-def init_admin_table():
-    conn = get_conn()
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS admins (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password_hash BLOB NOT NULL,
-            salt BLOB NOT NULL,
-            is_active INTEGER NOT NULL DEFAULT 1
-        )
-        """
-    )
-    conn.commit()
-    conn.close()
-
-def ensure_base_schema():
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS teams (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        tag TEXT,
-        name TEXT UNIQUE,
-        group_name TEXT,
-        captain TEXT,
-        co_captain TEXT
-    )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS players (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT UNIQUE,
-        riot_id TEXT,
-        rank TEXT,
-        default_team_id INTEGER,
-        FOREIGN KEY(default_team_id) REFERENCES teams(id)
-    )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS matches (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        week INTEGER,
-        group_name TEXT,
-        team1_id INTEGER,
-        team2_id INTEGER,
-        winner_id INTEGER,
-        score_t1 INTEGER DEFAULT 0,
-        score_t2 INTEGER DEFAULT 0,
-        status TEXT DEFAULT 'scheduled',
-        format TEXT,
-        maps_played INTEGER DEFAULT 0,
-        FOREIGN KEY(team1_id) REFERENCES teams(id),
-        FOREIGN KEY(team2_id) REFERENCES teams(id),
-        FOREIGN KEY(winner_id) REFERENCES teams(id)
-    )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS match_maps (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        match_id INTEGER NOT NULL,
-        map_index INTEGER NOT NULL,
-        map_name TEXT,
-        team1_rounds INTEGER,
-        team2_rounds INTEGER,
-        winner_id INTEGER
-    )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS match_stats (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        match_id INTEGER NOT NULL,
-        player_id INTEGER NOT NULL,
-        team_id INTEGER,
-        acs INTEGER,
-        kills INTEGER,
-        deaths INTEGER,
-        assists INTEGER
-    )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS agents (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT UNIQUE
-    )''')
-    conn.commit()
-    conn.close()
-
-def ensure_column(table, column_name, column_def_sql):
-    # Allowed tables for security validation
-    ALLOWED_TABLES = {"teams", "players", "matches", "match_maps", "match_stats_map", "match_stats", "agents", "seasons", "team_history", "admins"}
-    if table not in ALLOWED_TABLES:
-        return # Skip if table is not allowed
-    
-    conn = get_conn()
-    c = conn.cursor()
-    # Use string interpolation only for table names which are now validated against ALLOWED_TABLES
-    cols = [r[1] for r in c.execute(f"PRAGMA table_info({table})").fetchall()]
-    if column_name not in cols:
-        try:
-            # Validate column_def_sql basic structure to prevent injection if it comes from untrusted source
-            # In this app, it is hardcoded, but good practice to validate
-            c.execute(f"ALTER TABLE {table} ADD COLUMN {column_def_sql}")
-        except sqlite3.OperationalError:
-            pass
-    conn.commit()
-    conn.close()
-
-def ensure_upgrade_schema():
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS seasons (
-        id INTEGER PRIMARY KEY,
-        name TEXT UNIQUE,
-        start_date TEXT,
-        end_date TEXT,
-        is_active BOOLEAN DEFAULT 0
-    )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS team_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        team_id INTEGER,
-        season_id INTEGER,
-        final_rank INTEGER,
-        group_name TEXT,
-        FOREIGN KEY(team_id) REFERENCES teams(id),
-        FOREIGN KEY(season_id) REFERENCES seasons(id)
-    )''')
-    conn.commit()
-    conn.close()
-    ensure_column("teams", "logo_path", "logo_path TEXT")
-    ensure_column("players", "rank", "rank TEXT")
-    ensure_column("matches", "format", "format TEXT")
-    ensure_column("matches", "maps_played", "maps_played INTEGER DEFAULT 0")
-    ensure_column("seasons", "is_active", "is_active BOOLEAN DEFAULT 0")
-    ensure_column("admins", "role", "role TEXT DEFAULT 'admin'")
-    ensure_column("matches", "match_type", "match_type TEXT DEFAULT 'regular'")
-    ensure_column("matches", "playoff_round", "playoff_round INTEGER")
-    ensure_column("matches", "bracket_pos", "bracket_pos INTEGER")
-    conn2 = get_conn()
-    c2 = conn2.cursor()
-    try:
-        c2.execute("INSERT OR IGNORE INTO seasons (id, name, is_active) VALUES (22, 'Season 22', 0)")
-        c2.execute("INSERT OR IGNORE INTO seasons (id, name, is_active) VALUES (23, 'Season 23', 1)")
-    except Exception:
-        pass
-    try:
-        c2.execute("SELECT id, group_name FROM teams")
-        teams = c2.fetchall()
-        for tid, grp in teams:
-            c2.execute("INSERT OR IGNORE INTO team_history (team_id, season_id, group_name) VALUES (?, 23, ?)", (tid, grp))
-    except Exception:
-        pass
-    conn2.commit()
-    conn2.close()
-
-def import_sqlite_db(upload_bytes):
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
-    try:
-        tmp.write(upload_bytes)
-        tmp.flush()
-        src = sqlite3.connect(tmp.name)
-        tgt = get_conn()
-        tables = [
-            "teams","players","matches","match_maps","match_stats_map","match_stats","agents","seasons","team_history"
-        ]
-        summary = {}
-        for t in tables:
-            try:
-                df = pd.read_sql(f"SELECT * FROM {t}", src)
-            except Exception:
-                continue
-            if df.empty:
-                continue
-            cols = [r[1] for r in tgt.execute(f"PRAGMA table_info({t})").fetchall()]
-            use = [c for c in df.columns if c in cols]
-            if not use:
-                continue
-            q = f"INSERT OR REPLACE INTO {t} (" + ",".join(use) + ") VALUES (" + ",".join(["?"]*len(use)) + ")"
-            vals = df[use].values.tolist()
-            tgt.executemany(q, vals)
-            summary[t] = len(vals)
-        tgt.commit()
-        src.close()
-        tgt.close()
-        return summary
-    finally:
-        tmp.close()
-        if os.path.exists(tmp.name):
-            try:
-                os.remove(tmp.name)
-            except Exception:
-                pass
-
-def export_db_bytes():
-    p = os.path.abspath(DB_PATH)
-    try:
-        if os.path.exists(p):
-            with open(p, 'rb') as f:
-                return f.read()
-    except Exception:
-        return None
-    return None
-
-def restore_db_from_github():
-    owner = get_secret("GH_OWNER")
-    repo = get_secret("GH_REPO")
-    path = get_secret("GH_DB_PATH")
-    branch = get_secret("GH_BRANCH", "main")
-    if not owner or not repo or not path:
-        return False
-    url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}"
-    try:
-        r = requests.get(url, timeout=15)
-        if r.status_code == 200 and r.content:
-            with open(DB_PATH, "wb") as f:
-                f.write(r.content)
-            return True
-    except Exception:
-        return False
-    return False
-
-def backup_db_to_github():
-    owner = get_secret("GH_OWNER")
-    repo = get_secret("GH_REPO")
-    path = get_secret("GH_DB_PATH")
-    branch = get_secret("GH_BRANCH", "main")
-    token = get_secret("GH_TOKEN")
-    if not owner or not repo or not path or not token:
-        return False, "Missing secrets"
-    url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
-    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
-    sha = None
-    try:
-        gr = requests.get(url, headers=headers, params={"ref": branch}, timeout=15)
-        if gr.status_code == 200:
-            data = gr.json()
-            sha = data.get("sha")
-    except Exception:
-        pass
-    data_bytes = export_db_bytes()
-    if not data_bytes:
-        return False, "No DB data"
-    payload = {
-        "message": "Portal DB backup",
-        "content": base64.b64encode(data_bytes).decode("ascii"),
-        "branch": branch,
-    }
-    if sha:
-        payload["sha"] = sha
-    try:
-        pr = requests.put(url, headers=headers, json=payload, timeout=20)
-        if pr.status_code in [200, 201]:
-            return True, "Backed up"
-        return False, f"Error {pr.status_code}"
-    except Exception:
-        return False, "Request failed"
-
-def get_substitutions_log():
-    conn = get_conn()
-    try:
-        df = pd.read_sql(
-            """
-            SELECT msm.match_id, msm.map_index, m.week, m.group_name,
-                   t.name AS team, p.name AS player, sp.name AS subbed_for,
-                   msm.agent, msm.acs, msm.kills, msm.deaths, msm.assists
-            FROM match_stats_map msm
-            JOIN matches m ON msm.match_id = m.id
-            LEFT JOIN teams t ON msm.team_id = t.id
-            LEFT JOIN players p ON msm.player_id = p.id
-            LEFT JOIN players sp ON msm.subbed_for_id = sp.id
-            WHERE msm.is_sub = 1
-            ORDER BY m.week, msm.match_id, msm.map_index
-            """,
-            conn,
-        )
-    except Exception:
-        conn.close()
-        return pd.DataFrame()
-    conn.close()
-    return df
-
-def get_player_profile(player_id):
-    conn = get_conn()
-    info = pd.read_sql(
-        "SELECT p.id, p.name, p.rank, t.tag as team FROM players p LEFT JOIN teams t ON p.default_team_id=t.id WHERE p.id=?",
-        conn,
-        params=(int(player_id),),
-    )
-    stats = pd.read_sql(
-        "SELECT match_id, map_index, agent, acs, kills, deaths, assists, is_sub FROM match_stats_map WHERE player_id=?",
-        conn,
-        params=(int(player_id),),
-    )
-    league = pd.read_sql(
-        "SELECT msm.player_id, msm.acs, msm.kills, msm.deaths, msm.assists FROM match_stats_map msm",
-        conn,
-    )
-    rank_df = pd.read_sql(
-        "SELECT p.id as player_id, p.rank, msm.acs, msm.kills, msm.deaths, msm.assists FROM match_stats_map msm JOIN players p ON msm.player_id=p.id",
-        conn,
-    )
-    conn.close()
-    if info.empty:
-        return {}
-    rank_val = info.iloc[0]['rank']
-    games = stats['match_id'].nunique() if not stats.empty else 0
-    avg_acs = float(stats['acs'].mean()) if not stats.empty else 0.0
-    total_k = int(stats['kills'].sum()) if not stats.empty else 0
-    total_d = int(stats['deaths'].sum()) if not stats.empty else 0
-    total_a = int(stats['assists'].sum()) if not stats.empty else 0
-    kd = (total_k / (total_d if total_d != 0 else 1)) if not stats.empty else 0.0
-    same_rank = rank_df[rank_df['rank'] == rank_val] if not rank_df.empty else pd.DataFrame()
-    sr_avg_acs = float(same_rank['acs'].mean()) if not same_rank.empty else 0.0
-    sr_k = float(same_rank['kills'].mean()) if not same_rank.empty else 0.0
-    sr_d = float(same_rank['deaths'].mean()) if not same_rank.empty else 0.0
-    sr_a = float(same_rank['assists'].mean()) if not same_rank.empty else 0.0
-    lg_avg_acs = float(league['acs'].mean()) if not league.empty else 0.0
-    lg_k = float(league['kills'].mean()) if not league.empty else 0.0
-    lg_d = float(league['deaths'].mean()) if not league.empty else 0.0
-    lg_a = float(league['assists'].mean()) if not league.empty else 0.0
-    trend = pd.DataFrame()
-    if not stats.empty:
-        conn2 = get_conn()
-        mmeta = pd.read_sql("SELECT id, week FROM matches", conn2)
-        conn2.close()
-        agg = stats.groupby('match_id').agg({'acs':'mean','kills':'sum','deaths':'sum'}).reset_index()
-        agg = agg.merge(mmeta, left_on='match_id', right_on='id', how='left')
-        agg['kda'] = agg['kills'] / agg['deaths'].replace(0, 1)
-        agg['label'] = agg.apply(lambda r: f"W{int(r['week'] or 0)}-M{int(r['match_id'])}", axis=1)
-        agg = agg.rename(columns={'acs':'avg_acs'})
-        trend = agg[['label','avg_acs','kda']]
-    sub_impact = None
-    if not stats.empty:
-        s_sub = stats[stats['is_sub'] == 1]
-        s_sta = stats[stats['is_sub'] == 0]
-        sub_impact = {
-            'sub_acs': float(s_sub['acs'].mean()) if not s_sub.empty else 0.0,
-            'starter_acs': float(s_sta['acs'].mean()) if not s_sta.empty else 0.0,
-            'sub_kda': float((s_sub['kills'].sum() / max(s_sub['deaths'].sum(), 1))) if not s_sub.empty else 0.0,
-            'starter_kda': float((s_sta['kills'].sum() / max(s_sta['deaths'].sum(), 1))) if not s_sta.empty else 0.0,
-        }
-    return {
-        'info': info.iloc[0].to_dict(),
-        'games': int(games),
-        'avg_acs': round(avg_acs, 1),
-        'total_kills': total_k,
-        'total_deaths': total_d,
-        'total_assists': total_a,
-        'kd_ratio': round(kd, 2),
-        'sr_avg_acs': round(sr_avg_acs, 1),
-        'sr_k': round(sr_k, 1),
-        'sr_d': round(sr_d, 1),
-        'sr_a': round(sr_a, 1),
-        'lg_avg_acs': round(lg_avg_acs, 1),
-        'lg_k': round(lg_k, 1),
-        'lg_d': round(lg_d, 1),
-        'lg_a': round(lg_a, 1),
-        'maps': stats,
-        'trend': trend,
-        'sub_impact': sub_impact,
-    }
-def reset_db():
-    conn = get_conn()
-    c = conn.cursor()
-    for t in [
-        "admins","match_stats_map","match_stats","match_maps","matches","players","teams","agents","team_history","seasons"
-    ]:
-        try:
-            c.execute(f"DROP TABLE IF EXISTS {t}")
-        except Exception:
-            pass
-    conn.commit()
-    conn.close()
-    ensure_base_schema()
-    init_admin_table()
-    init_match_stats_map_table()
-    ensure_upgrade_schema()
-
-def hash_password(password, salt=None):
-    if salt is None:
-        salt = secrets.token_bytes(16)
-    hashed = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 200000)
-    return salt, hashed
-
-def verify_password(password, salt, stored_hash):
-    calc = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 200000)
-    return hmac.compare_digest(calc, stored_hash)
-
-def admin_exists():
-    conn = get_conn()
-    cur = conn.execute("SELECT COUNT(*) FROM admins WHERE is_active=1")
-    count = cur.fetchone()[0]
-    conn.close()
-    return count > 0
-
-def create_admin(username, password):
-    salt, ph = hash_password(password)
-    conn = get_conn()
-    role = get_secret("ADMIN_SEED_ROLE", "admin") if not admin_exists() else "admin"
-    conn.execute("INSERT INTO admins (username, password_hash, salt, is_active, role) VALUES (?, ?, ?, 1, ?)", (username, ph, salt, role))
-    conn.commit()
-    conn.close()
-
-def create_admin_with_role(username, password, role):
-    salt, ph = hash_password(password)
-    conn = get_conn()
-    conn.execute("INSERT INTO admins (username, password_hash, salt, is_active, role) VALUES (?, ?, ?, 1, ?)", (username, ph, salt, role))
-    conn.commit()
-    conn.close()
-
-def ensure_seed_admins():
-    su = get_secret("ADMIN_SEED_USER")
-    sp = get_secret("ADMIN_SEED_PWD")
-    sr = get_secret("ADMIN_SEED_ROLE", "admin")
-    conn = get_conn()
-    c = conn.cursor()
-    if su and sp:
-        row = c.execute("SELECT id, role FROM admins WHERE username=?", (su,)).fetchone()
-        if not row:
-            salt, ph = hash_password(sp)
-            c.execute(
-                "INSERT INTO admins (username, password_hash, salt, is_active, role) VALUES (?, ?, ?, 1, ?)",
-                (su, ph, salt, sr)
-            )
-        else:
-            if row[1] != sr:
-                c.execute("UPDATE admins SET role=? WHERE id=?", (sr, int(row[0])))
-    su2 = get_secret("ADMIN2_USER")
-    sp2 = get_secret("ADMIN2_PWD")
-    sr2 = get_secret("ADMIN2_ROLE", "admin")
-    if su2 and sp2:
-        row2 = c.execute("SELECT id FROM admins WHERE username=?", (su2,)).fetchone()
-        if not row2:
-            salt2, ph2 = hash_password(sp2)
-            c.execute(
-                "INSERT INTO admins (username, password_hash, salt, is_active, role) VALUES (?, ?, ?, 1, ?)",
-                (su2, ph2, salt2, sr2)
-            )
-    conn.commit()
-    conn.close()
-
-def authenticate(username, password):
-    conn = get_conn()
-    row = conn.execute("SELECT username, password_hash, salt, role FROM admins WHERE username=? AND is_active=1", (username,)).fetchone()
-    conn.close()
-    if not row:
-        return None
-    u, ph, salt, role = row
-    if verify_password(password, salt, ph):
-        return {"username": u, "role": role}
-    return None
-
-def init_match_stats_map_table():
-    conn = get_conn()
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS match_stats_map (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            match_id INTEGER NOT NULL,
-            map_index INTEGER NOT NULL,
-            team_id INTEGER NOT NULL,
-            player_id INTEGER,
-            is_sub INTEGER DEFAULT 0,
-            subbed_for_id INTEGER,
-            agent TEXT,
-            acs INTEGER,
-            kills INTEGER,
-            deaths INTEGER,
-            assists INTEGER
-        )
-        """
-    )
-    conn.commit()
-    conn.close()
-
-def upsert_match_maps(match_id, maps_data):
-    conn = get_conn()
-    c = conn.cursor()
-    for m in maps_data:
-        c.execute("SELECT id FROM match_maps WHERE match_id=? AND map_index=?", (match_id, m['map_index']))
-        ex = c.fetchone()
-        if ex:
-            c.execute(
-                "UPDATE match_maps SET map_name=?, team1_rounds=?, team2_rounds=?, winner_id=? WHERE id=?",
-                (m['map_name'], m['team1_rounds'], m['team2_rounds'], m['winner_id'], ex[0])
-            )
-        else:
-            c.execute(
-                "INSERT INTO match_maps (match_id, map_index, map_name, team1_rounds, team2_rounds, winner_id) VALUES (?, ?, ?, ?, ?, ?)",
-                (match_id, m['map_index'], m['map_name'], m['team1_rounds'], m['team2_rounds'], m['winner_id'])
-            )
-    conn.commit()
-    conn.close()
-
-def get_standings():
-    conn = get_conn()
-    try:
-        teams_df = pd.read_sql_query("SELECT id, name, group_name, logo_path FROM teams", conn)
-        matches_df = pd.read_sql_query("SELECT * FROM matches WHERE status='completed' AND match_type='regular' AND (UPPER(format)='BO1' OR format IS NULL)", conn)
-    except Exception:
-        conn.close()
-        return pd.DataFrame()
-    conn.close()
-    exclude_ids = set(teams_df[teams_df['name'].isin(['FAT1','FAT2'])]['id'].tolist())
-    if exclude_ids:
-        teams_df = teams_df[~teams_df['id'].isin(exclude_ids)]
-        matches_df = matches_df[~(matches_df['team1_id'].isin(exclude_ids) | matches_df['team2_id'].isin(exclude_ids))]
-    stats = {}
-    for _, row in teams_df.iterrows():
-        stats[row['id']] = {'Wins': 0, 'Losses': 0, 'RD': 0, 'Points': 0, 'Points Against': 0, 'Played': 0}
-    for _, m in matches_df.iterrows():
-        t1, t2 = m['team1_id'], m['team2_id']
-        s1, s2 = m['score_t1'], m['score_t2']
-        
-        # Determine if it's overtime
-        # User rule: Overtime starts if both teams reached 12 rounds (12-12).
-        # Winner gets 15 + rounds_won.
-        # Loser gets rounds_won (plus 12 bonus if it was overtime).
-        is_ot = (s1 >= 12 and s2 >= 12)
-        
-        if s1 > s2:
-            p1 = 15 + s1
-            p2 = (12 + s2) if is_ot else s2
-        else:
-            p2 = 15 + s2
-            p1 = (12 + s1) if is_ot else s1
-        
-        if t1 in stats:
-            stats[t1]['Played'] += 1
-            stats[t1]['RD'] += (s1 - s2)
-            stats[t1]['Points'] += p1
-            stats[t1]['Points Against'] += s2 # Every round goes in points against
-            if s1 > s2:
-                stats[t1]['Wins'] += 1
-            else:
-                stats[t1]['Losses'] += 1
-        if t2 in stats:
-            stats[t2]['Played'] += 1
-            stats[t2]['RD'] += (s2 - s1)
-            stats[t2]['Points'] += p2
-            stats[t2]['Points Against'] += s1 # Every round goes in points against
-            if s2 > s1:
-                stats[t2]['Wins'] += 1
-            else:
-                stats[t2]['Losses'] += 1
-
-    standings = []
-    for tid, data in stats.items():
-        row = teams_df[teams_df['id'] == tid].iloc[0].to_dict()
-        row.update(data)
-        standings.append(row)
-    df = pd.DataFrame(standings)
-    if df.empty:
-        return df
-    # Higher Points, then Lower Points Against
-    return df.sort_values(by=['Points', 'Points Against'], ascending=[False, True])
-
-def get_player_leaderboard():
-    conn = get_conn()
-    try:
-        df = pd.read_sql_query(
-            """
-            SELECT p.id as player_id,
-                   p.name,
-                   t.tag as team,
-                   COUNT(DISTINCT msm.match_id) as games,
-                   AVG(msm.acs) as avg_acs,
-                   SUM(msm.kills) as total_kills,
-                   SUM(msm.deaths) as total_deaths,
-                   SUM(msm.assists) as total_assists
-            FROM match_stats_map msm
-            JOIN players p ON msm.player_id = p.id
-            LEFT JOIN teams t ON p.default_team_id = t.id
-            GROUP BY p.id, p.name
-            HAVING games > 0
-            """,
-            conn,
-        )
-    except Exception:
-        conn.close()
-        return pd.DataFrame()
-    conn.close()
-    if not df.empty:
-        df['kd_ratio'] = df['total_kills'] / df['total_deaths'].replace(0, 1)
-        df['avg_acs'] = df['avg_acs'].round(1)
-        df['kd_ratio'] = df['kd_ratio'].round(2)
-    return df.sort_values('avg_acs', ascending=False)
-
-def get_week_matches(week):
-    conn = get_conn()
-    df = pd.read_sql_query(
-        """
-        SELECT m.id, m.week, m.group_name, m.status, m.format, m.maps_played,
-               t1.name as t1_name, t2.name as t2_name,
-               m.score_t1, m.score_t2, t1.id as t1_id, t2.id as t2_id
-        FROM matches m
-        JOIN teams t1 ON m.team1_id = t1.id
-        JOIN teams t2 ON m.team2_id = t2.id
-        WHERE m.week = ? AND m.match_type = 'regular'
-        ORDER BY m.id
-        """,
-        conn,
-        params=(week,),
-    )
-    conn.close()
-    return df
-
-def get_playoff_matches():
-    conn = get_conn()
-    df = pd.read_sql_query(
-        """
-        SELECT m.id, m.playoff_round, m.bracket_pos, m.status, m.format, m.maps_played,
-               t1.name as t1_name, t2.name as t2_name,
-               m.score_t1, m.score_t2, t1.id as t1_id, t2.id as t2_id,
-               m.winner_id
-        FROM matches m
-        LEFT JOIN teams t1 ON m.team1_id = t1.id
-        LEFT JOIN teams t2 ON m.team2_id = t2.id
-        WHERE m.match_type = 'playoff'
-        ORDER BY m.playoff_round ASC, m.bracket_pos ASC
-        """,
-        conn
-    )
-    conn.close()
-    return df
-
-def get_match_maps(match_id):
-    conn = get_conn()
-    df = pd.read_sql_query(
-        "SELECT map_index, map_name, team1_rounds, team2_rounds, winner_id FROM match_maps WHERE match_id=? ORDER BY map_index",
-        conn,
-        params=(match_id,),
-    )
-    conn.close()
-    return df
-
-def apply_plotly_theme(fig):
-    fig.update_layout(
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
-        font_color='#ECE8E1',
-        font_family='Inter',
-        title_font_family='Orbitron',
-        title_font_color='#3FD1FF',
-        xaxis=dict(
-            gridcolor='rgba(255,255,255,0.05)', 
-            zerolinecolor='rgba(255,255,255,0.1)',
-            tickfont=dict(color='#8B97A5'),
-            title_font=dict(color='#8B97A5')
-        ),
-        yaxis=dict(
-            gridcolor='rgba(255,255,255,0.05)', 
-            zerolinecolor='rgba(255,255,255,0.1)',
-            tickfont=dict(color='#8B97A5'),
-            title_font=dict(color='#8B97A5')
-        ),
-        margin=dict(l=20, r=20, t=40, b=20),
-        legend=dict(
-            bgcolor='rgba(0,0,0,0)',
-            bordercolor='rgba(255,255,255,0.1)',
-            font=dict(color='#ECE8E1')
-        )
-    )
-    return fig
-
+# Set page config immediately as the first streamlit command
 st.set_page_config(page_title="S23 Portal", layout="wide")
 
 # App Mode Logic
@@ -884,251 +115,139 @@ gap: 1.5rem;
 width: 100%;
 max-width: 1000px;
 margin: 0 auto 2rem auto;
-flex-wrap: wrap;
 }
 .status-indicator {
-padding: 0.8rem 1.5rem;
-border-radius: 8px;
-font-family: 'Orbitron';
-font-size: 0.8rem;
-letter-spacing: 2px;
-text-align: center;
-background: rgba(255, 255, 255, 0.03);
-border: 1px solid rgba(255, 255, 255, 0.1);
-min-width: 220px;
-box-shadow: 0 4px 15px rgba(0,0,0,0.2);
-transition: all 0.3s ease;
-}
-.status-indicator:hover {
+padding: 8px 16px;
 background: rgba(255, 255, 255, 0.05);
-transform: translateY(-2px);
+border-radius: 20px;
+font-size: 0.7rem;
+letter-spacing: 2px;
+font-family: 'Orbitron', sans-serif;
+border: 1px solid rgba(255, 255, 255, 0.1);
 }
-.status-online { color: #00ff88; border-color: rgba(0, 255, 136, 0.3); background: rgba(0, 255, 136, 0.08); text-shadow: 0 0 10px rgba(0, 255, 136, 0.3); }
-.status-offline { color: var(--primary-red); border-color: rgba(255, 70, 85, 0.3); background: rgba(255, 70, 85, 0.08); text-shadow: 0 0 10px rgba(255, 70, 85, 0.3); }
+.status-online { color: #00ff88; border-color: rgba(0, 255, 136, 0.2); }
+.status-offline { color: #ff4655; border-color: rgba(255, 70, 85, 0.2); }
+
 .portal-options {
 display: grid;
 grid-template-columns: repeat(3, 1fr);
-gap: 2.5rem;
+gap: 2rem;
 width: 100%;
-max-width: 1100px;
-margin-top: 1rem;
+max-width: 1200px;
 }
 .portal-card-wrapper {
-background: linear-gradient(145deg, var(--card-bg), #1a222a);
-border: 1px solid rgba(63, 209, 255, 0.15);
-padding: 0;
-border-radius: 16px;
-transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-position: relative;
-overflow: hidden;
-display: flex;
-flex-direction: column;
-height: 100%;
-box-shadow: 0 10px 30px rgba(0,0,0,0.3);
-}
-.portal-card-wrapper::before {
-content: '';
-position: absolute;
-top: 0;
-left: 0;
-right: 0;
-height: 2px;
-background: linear-gradient(90deg, transparent, var(--primary-blue), transparent);
-opacity: 0.3;
-}
-.portal-card-wrapper:hover:not(.disabled) {
-transform: translateY(-12px);
-border-color: var(--primary-blue);
-box-shadow: 0 20px 50px rgba(63, 209, 255, 0.2);
-}
-.portal-card-wrapper:hover:not(.disabled)::before {
-opacity: 1;
-}
-.portal-card-content {
-padding: 2.5rem 2rem;
-text-align: center;
-flex-grow: 1;
-}
-.portal-card-footer {
-padding: 1.5rem;
-background: rgba(0,0,0,0.2);
-border-top: 1px solid rgba(255,255,255,0.05);
-}
-.portal-card-wrapper.disabled {
-opacity: 0.5;
-cursor: not-allowed;
-filter: grayscale(0.8);
-}
-.portal-card-wrapper.disabled:hover::after {
-content: "COMING SOON";
-position: absolute;
-top: 0;
-left: 0;
-right: 0;
-bottom: 0;
-background: rgba(15, 25, 35, 0.92);
-display: flex;
-align-items: center;
-justify-content: center;
-color: var(--primary-red);
-font-family: 'Orbitron';
-font-weight: bold;
-font-size: 1rem;
-letter-spacing: 2px;
-z-index: 10;
-}
-.custom-card {
 background: var(--card-bg);
-border: 1px solid rgba(63, 209, 255, 0.1);
-border-radius: 12px;
-padding: 1.5rem;
-margin-bottom: 1.5rem;
-box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+border: 1px solid rgba(255, 255, 255, 0.05);
+border-radius: 8px;
+padding: 2rem;
+text-align: center;
 transition: all 0.3s ease;
 position: relative;
 overflow: hidden;
+height: 100%;
+display: flex;
+flex-direction: column;
+justify-content: space-between;
 }
-.custom-card:hover {
+.portal-card-wrapper:hover {
 border-color: var(--primary-blue);
-transform: translateY(-2px);
-box-shadow: 0 8px 30px rgba(63, 209, 255, 0.15);
+transform: translateY(-5px);
+box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
 }
-[data-testid='stSidebarNav'] {display: none;}
-[data-testid='stHeader'] {display: none;}
-h1, h2, h3 {
-font-family: 'Orbitron', sans-serif !important;
-text-transform: uppercase;
-letter-spacing: 2px;
-font-weight: 700 !important;
+.portal-card-wrapper.disabled {
+opacity: 0.6;
+cursor: not-allowed;
+filter: grayscale(1);
 }
-.main-header {
-color: var(--primary-blue);
-text-shadow: 0 0 20px rgba(63, 209, 255, 0.3);
-border-left: 5px solid var(--primary-red);
-padding-left: 15px;
-margin-top: 0.5rem !important;
-margin-bottom: 2.5rem !important;
-font-size: 3rem;
-animation: fadeIn 0.8s ease-out;
+.portal-card-wrapper.disabled:hover {
+transform: none;
+border-color: rgba(255, 255, 255, 0.05);
 }
-h2, h3 { color: var(--primary-blue); }
-@keyframes fadeIn {
-from { opacity: 0; transform: translateY(5px); }
-to { opacity: 1; transform: translateY(0); }
+.portal-card-content h3 {
+font-family: 'Orbitron', sans-serif;
+color: var(--text-main);
+margin-bottom: 1rem;
 }
-.stMarkdown, .stDataFrame, .stPlotlyChart, .element-container {
-animation: fadeIn 0.4s ease-out forwards;
+.portal-card-footer {
+margin-top: 2rem;
 }
+
+/* Navbar Styles */
 .nav-wrapper {
 position: fixed;
 top: 0;
 left: 0;
 right: 0;
-height: 100px;
-background: rgba(15, 25, 35, 0.98);
-backdrop-filter: blur(20px);
-border-bottom: 1px solid rgba(63, 209, 255, 0.2);
+height: var(--nav-height);
+background: rgba(15, 25, 35, 0.95);
+backdrop-filter: blur(10px);
+border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 display: flex;
-align-items: flex-start;
-padding: 20px 1.5rem 0 1.5rem;
-z-index: 9999;
-justify-content: center;
-box-shadow: 0 4px 30px rgba(0, 0, 0, 0.5);
+align-items: center;
+padding: 0 4rem;
+z-index: 1000;
 }
 .nav-logo {
-font-family: 'Orbitron';
-color: var(--primary-blue);
+font-family: 'Orbitron', sans-serif;
 font-size: 1.2rem;
-font-weight: bold;
+color: var(--primary-blue);
 letter-spacing: 4px;
-white-space: nowrap;
-text-shadow: 0 0 15px rgba(63, 209, 255, 0.5);
-line-height: 1;
+font-weight: bold;
 }
 .sub-nav-wrapper {
 position: fixed;
-top: 100px;
+top: var(--nav-height);
 left: 0;
 right: 0;
-z-index: 9998;
-background: rgba(15, 25, 35, 0.9);
-padding: 15px 1.5rem;
+background: rgba(31, 41, 51, 0.8);
 border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-backdrop-filter: blur(10px);
-box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+padding: 10px 4rem;
+z-index: 999;
 }
-/* Responsive Adjustments */
+
+/* Custom Card for Dashboard */
+.custom-card {
+background: var(--card-bg);
+border: 1px solid rgba(255, 255, 255, 0.05);
+border-radius: 4px;
+padding: 1.5rem;
+height: 100%;
+}
+
+/* Dataframe Styling */
+[data-testid="stDataFrame"] {
+border: 1px solid rgba(255, 255, 255, 0.05) !important;
+border-radius: 4px !important;
+}
+
+@keyframes fadeIn {
+from { opacity: 0; transform: translateY(20px); }
+to { opacity: 1; transform: translateY(0); }
+}
+
+/* Mobile Responsiveness */
+@media (max-width: 1024px) {
+.portal-header { font-size: 2.5rem; }
+.portal-options { grid-template-columns: 1fr; gap: 1rem; }
+.nav-wrapper { padding: 0 2rem; }
+.sub-nav-wrapper { padding: 10px 2rem; }
+}
+
 @media (max-width: 768px) {
-.stApp .main .block-container {
-padding-top: 140px !important;
-padding-left: 1rem !important;
-padding-right: 1rem !important;
-}
-.portal-container {
-padding: 1rem;
-min-height: auto;
-}
-.portal-header {
-font-size: 2rem !important;
-}
-.portal-subtitle {
-font-size: 0.7rem !important;
-letter-spacing: 2px !important;
-margin-bottom: 1.5rem !important;
-}
-.status-grid {
-flex-direction: column;
-gap: 0.8rem;
-}
-.status-indicator {
-min-width: 100%;
-}
-.portal-options {
-grid-template-columns: 1fr;
-gap: 1.5rem;
-}
-.nav-wrapper {
-height: 60px;
-padding: 0 1rem;
-align-items: center;
-}
-.nav-logo {
-font-size: 0.9rem;
-letter-spacing: 2px;
-}
-.sub-nav-wrapper {
-top: 60px;
-padding: 8px 0.5rem;
-overflow-x: auto;
-white-space: nowrap;
-display: block !important;
--webkit-overflow-scrolling: touch;
-background: rgba(15, 25, 35, 0.95);
-}
-.sub-nav-wrapper [data-testid="stHorizontalBlock"] {
-display: flex !important;
-flex-wrap: nowrap !important;
-width: max-content !important;
-gap: 12px !important;
-padding: 0 10px !important;
-}
-.sub-nav-wrapper [data-testid="column"] {
-width: auto !important;
-min-width: 130px !important;
-flex: 0 0 auto !important;
-}
+.portal-header { font-size: 2rem; }
+.portal-subtitle { font-size: 0.7rem; letter-spacing: 2px; margin-bottom: 1.5rem; }
+.status-grid { flex-direction: column; gap: 0.8rem; }
+.status-indicator { min-width: 100%; }
+.portal-options { grid-template-columns: 1fr; gap: 1.5rem; }
+.nav-wrapper { height: 60px; padding: 0 1rem; align-items: center; }
+.nav-logo { font-size: 0.9rem; letter-spacing: 2px; }
+.sub-nav-wrapper { top: 60px; padding: 8px 0.5rem; overflow-x: auto; white-space: nowrap; display: block !important; -webkit-overflow-scrolling: touch; background: rgba(15, 25, 35, 0.95); }
+.sub-nav-wrapper [data-testid="stHorizontalBlock"] { display: flex !important; flex-wrap: nowrap !important; width: max-content !important; gap: 12px !important; padding: 0 10px !important; }
+.sub-nav-wrapper [data-testid="column"] { width: auto !important; min-width: 130px !important; flex: 0 0 auto !important; }
 /* Hide the scrollbar for sub-nav */
-.sub-nav-wrapper::-webkit-scrollbar {
-display: none;
-}
-.sub-nav-wrapper {
--ms-overflow-style: none;
-scrollbar-width: none;
-}
-.main-header {
-font-size: 1.8rem !important;
-margin-bottom: 1.5rem !important;
-}
+.sub-nav-wrapper::-webkit-scrollbar { display: none; }
+.sub-nav-wrapper { -ms-overflow-style: none; scrollbar-width: none; }
+.main-header { font-size: 1.8rem !important; margin-bottom: 1.5rem !important; }
 }
 </style>""", unsafe_allow_html=True)
 
@@ -1140,11 +259,1022 @@ else:
     st.markdown("<style>:root { --padding-top: 180px; }</style>", unsafe_allow_html=True)
     st.markdown("<style>@media (max-width: 768px) { :root { --padding-top: 140px; } }</style>", unsafe_allow_html=True)
 
-ensure_base_schema()
-init_admin_table()
-init_match_stats_map_table()
-ensure_upgrade_schema()
-ensure_seed_admins()
+# Deferred imports moved inside functions to reduce initial white screen/load time:
+# pandas, numpy, hashlib, hmac, secrets, tempfile, base64, requests, cloudscraper, re, io, json, html, time, plotly, PIL
+
+def is_safe_path(path):
+    if not path:
+        return False
+    # Prevent path traversal, absolute paths, and alternate data streams (Windows)
+    if ".." in path or os.path.isabs(path) or ":" in path:
+        return False
+    return True
+
+def ocr_extract(image_bytes, crop_box=None):
+    """
+    Returns (text, dataframe, error_message)
+    """
+    import io
+    from PIL import Image
+    try:
+        import pytesseract
+        # Try to find tesseract binary in common paths if not in PATH
+        # (Windows specific check)
+        possible_paths = [
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+            r"C:\Users\SBS\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
+        ]
+        for p in possible_paths:
+            if os.path.exists(p):
+                pytesseract.pytesseract.tesseract_cmd = p
+                break
+
+        img = Image.open(io.BytesIO(image_bytes))
+        if crop_box:
+            img = img.crop(crop_box)
+        
+        # Preprocessing
+        # 1. Convert to grayscale
+        img_gray = img.convert('L')
+        # 2. Thresholding (simple binary)
+        # Adjust threshold as needed, 128 is standard
+        img_thresh = img_gray.point(lambda x: 0 if x < 150 else 255, '1')
+        
+        # Try getting data
+        try:
+            df = pytesseract.image_to_data(img_thresh, output_type=pytesseract.Output.DATAFRAME)
+        except Exception as e:
+            # If data extraction fails, we might still get text? 
+            # Usually if one fails, both fail, but let's try.
+            # Also catch if tesseract is missing
+            return "", None, f"Tesseract Error: {str(e)}"
+            
+        text = pytesseract.image_to_string(img_thresh)
+        return text, df, None
+    except ImportError:
+        return "", None, "pytesseract not installed. Please install it to use OCR."
+    except Exception as e:
+        return "", None, f"Image Processing Error: {str(e)}"
+
+def scrape_tracker_match(url):
+    """
+    Scrapes match data from tracker.gg using the TrackerScraper class.
+    Returns (match_data_json, error_message)
+    """
+    try:
+        scraper = TrackerScraper()
+        data, error = scraper.get_match_data(url)
+        return data, error
+    except Exception as e:
+        return None, f"Scraping error: {str(e)}"
+
+def parse_tracker_json(jsdata, team1_id):
+    """
+    Parses Tracker.gg JSON data and matches it to team1_id.
+    Returns (json_suggestions, map_name, t1_rounds, t2_rounds)
+    """
+    import re
+    json_suggestions = {}
+    segments = jsdata.get("data", {}).get("segments", [])
+    
+    # First pass: find team names/IDs to identify which Tracker team is which
+    tracker_team_1_id = None
+    team_segments = [s for s in segments if s.get("type") == "team-summary"]
+    if len(team_segments) >= 2:
+        # Use Riot IDs to match teams
+        all_players_df = get_all_players()
+        # Ensure team1_id is int for comparison
+        t1_id_int = int(team1_id) if team1_id is not None else None
+        t1_roster = all_players_df[all_players_df['default_team_id'] == t1_id_int]['riot_id'].dropna().tolist()
+        t1_roster = [str(r).strip().lower() for r in t1_roster]
+        
+        potential_t1_id = team_segments[0].get("attributes", {}).get("teamId")
+        t1_matches = 0
+        for p_seg in [s for s in segments if s.get("type") == "player-summary"]:
+            if p_seg.get("metadata", {}).get("teamId") == potential_t1_id:
+                rid = p_seg.get("metadata", {}).get("platformInfo", {}).get("platformUserIdentifier")
+                if rid and str(rid).strip().lower() in t1_roster:
+                    t1_matches += 1
+        
+        if t1_matches >= 1:
+            tracker_team_1_id = potential_t1_id
+        else:
+            tracker_team_1_id = team_segments[1].get("attributes", {}).get("teamId")
+
+    for seg in segments:
+        if seg.get("type") == "player-summary":
+            rid = seg.get("metadata", {}).get("platformInfo", {}).get("platformUserIdentifier")
+            if rid:
+                rid = str(rid).strip()
+            agent = seg.get("metadata", {}).get("agentName")
+            st_map = seg.get("stats", {})
+            acs = st_map.get("scorePerRound", {}).get("value", 0)
+            k = st_map.get("kills", {}).get("value", 0)
+            d = st_map.get("deaths", {}).get("value", 0)
+            a = st_map.get("assists", {}).get("value", 0)
+            t_id = seg.get("metadata", {}).get("teamId")
+            
+            our_team_num = 1 if t_id == tracker_team_1_id else 2
+            
+            if rid:
+                rid_lower = rid.lower()
+                json_suggestions[rid_lower] = {
+                    'acs': int(acs) if acs is not None else 0, 
+                    'k': int(k) if k is not None else 0, 
+                    'd': int(d) if d is not None else 0, 
+                    'a': int(a) if a is not None else 0, 
+                    'agent': agent,
+                    'team_num': our_team_num,
+                    'conf': 100.0
+                }
+    
+    # Extract map name and rounds
+    map_name = jsdata.get("data", {}).get("metadata", {}).get("mapName")
+    t1_r = 0
+    t2_r = 0
+    
+    if len(team_segments) >= 2:
+        if tracker_team_1_id == team_segments[0].get("attributes", {}).get("teamId"):
+            t1_r = team_segments[0].get("stats", {}).get("roundsWon", {}).get("value", 0)
+            t2_r = team_segments[1].get("stats", {}).get("roundsWon", {}).get("value", 0)
+        else:
+            t1_r = team_segments[1].get("stats", {}).get("roundsWon", {}).get("value", 0)
+            t2_r = team_segments[0].get("stats", {}).get("roundsWon", {}).get("value", 0)
+            
+    return json_suggestions, map_name, int(t1_r), int(t2_r)
+
+@st.cache_data(ttl=3600)
+def get_base64_image(image_path):
+    import base64
+    if not image_path or not is_safe_path(image_path) or not os.path.exists(image_path):
+        return None
+    try:
+        with open(image_path, "rb") as f:
+            return base64.b64encode(f.read()).decode()
+    except Exception:
+        return None
+
+def get_secret(key, default=None):
+    try:
+        return st.secrets[key]
+    except Exception:
+        return os.getenv(key, default)
+
+DB_PATH = get_secret("DB_PATH", "valorant_s23.db")
+
+def get_conn():
+    return sqlite3.connect(DB_PATH)
+
+def init_admin_table(conn=None):
+    should_close = False
+    if conn is None:
+        conn = get_conn()
+        should_close = True
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS admins (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password_hash BLOB NOT NULL,
+            salt BLOB NOT NULL,
+            is_active INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    if should_close:
+        conn.commit()
+        conn.close()
+
+def ensure_base_schema(conn=None):
+    should_close = False
+    if conn is None:
+        conn = get_conn()
+        should_close = True
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS teams (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tag TEXT,
+        name TEXT UNIQUE,
+        group_name TEXT,
+        captain TEXT,
+        co_captain TEXT
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS players (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT UNIQUE,
+        riot_id TEXT,
+        rank TEXT,
+        default_team_id INTEGER,
+        FOREIGN KEY(default_team_id) REFERENCES teams(id)
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS matches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        week INTEGER,
+        group_name TEXT,
+        team1_id INTEGER,
+        team2_id INTEGER,
+        winner_id INTEGER,
+        score_t1 INTEGER DEFAULT 0,
+        score_t2 INTEGER DEFAULT 0,
+        status TEXT DEFAULT 'scheduled',
+        format TEXT,
+        maps_played INTEGER DEFAULT 0,
+        FOREIGN KEY(team1_id) REFERENCES teams(id),
+        FOREIGN KEY(team2_id) REFERENCES teams(id),
+        FOREIGN KEY(winner_id) REFERENCES teams(id)
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS match_maps (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        match_id INTEGER NOT NULL,
+        map_index INTEGER NOT NULL,
+        map_name TEXT,
+        team1_rounds INTEGER,
+        team2_rounds INTEGER,
+        winner_id INTEGER
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS match_stats (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        match_id INTEGER NOT NULL,
+        player_id INTEGER NOT NULL,
+        team_id INTEGER,
+        acs INTEGER,
+        kills INTEGER,
+        deaths INTEGER,
+        assists INTEGER
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS agents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT UNIQUE
+    )''')
+    if should_close:
+        conn.commit()
+        conn.close()
+
+def ensure_column(table, column_name, column_def_sql, conn=None):
+    # Allowed tables for security validation
+    ALLOWED_TABLES = {"teams", "players", "matches", "match_maps", "match_stats_map", "match_stats", "agents", "seasons", "team_history", "admins"}
+    if table not in ALLOWED_TABLES:
+        return # Skip if table is not allowed
+    
+    should_close = False
+    if conn is None:
+        conn = get_conn()
+        should_close = True
+    
+    c = conn.cursor()
+    # Use string interpolation only for table names which are now validated against ALLOWED_TABLES
+    cols = [r[1] for r in c.execute(f"PRAGMA table_info({table})").fetchall()]
+    if column_name not in cols:
+        try:
+            # Validate column_def_sql basic structure to prevent injection if it comes from untrusted source
+            # In this app, it is hardcoded, but good practice to validate
+            c.execute(f"ALTER TABLE {table} ADD COLUMN {column_def_sql}")
+        except sqlite3.OperationalError:
+            pass
+    
+    if should_close:
+        conn.commit()
+        conn.close()
+
+def ensure_upgrade_schema(conn=None):
+    should_close = False
+    if conn is None:
+        conn = get_conn()
+        should_close = True
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS seasons (
+        id INTEGER PRIMARY KEY,
+        name TEXT UNIQUE,
+        start_date TEXT,
+        end_date TEXT,
+        is_active BOOLEAN DEFAULT 0
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS team_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        team_id INTEGER,
+        season_id INTEGER,
+        final_rank INTEGER,
+        group_name TEXT,
+        FOREIGN KEY(team_id) REFERENCES teams(id),
+        FOREIGN KEY(season_id) REFERENCES seasons(id)
+    )''')
+    
+    ensure_column("teams", "logo_path", "logo_path TEXT", conn=conn)
+    ensure_column("players", "rank", "rank TEXT", conn=conn)
+    ensure_column("matches", "format", "format TEXT", conn=conn)
+    ensure_column("matches", "maps_played", "maps_played INTEGER DEFAULT 0", conn=conn)
+    ensure_column("seasons", "is_active", "is_active BOOLEAN DEFAULT 0", conn=conn)
+    ensure_column("admins", "role", "role TEXT DEFAULT 'admin'", conn=conn)
+    ensure_column("matches", "match_type", "match_type TEXT DEFAULT 'regular'", conn=conn)
+    ensure_column("matches", "playoff_round", "playoff_round INTEGER", conn=conn)
+    ensure_column("matches", "bracket_pos", "bracket_pos INTEGER", conn=conn)
+    
+    try:
+        c.execute("INSERT OR IGNORE INTO seasons (id, name, is_active) VALUES (22, 'Season 22', 0)")
+        c.execute("INSERT OR IGNORE INTO seasons (id, name, is_active) VALUES (23, 'Season 23', 1)")
+    except Exception:
+        pass
+    try:
+        c.execute("INSERT OR IGNORE INTO team_history (team_id, season_id, group_name) SELECT id, 23, group_name FROM teams")
+    except Exception:
+        pass
+    
+    if should_close:
+        conn.commit()
+        conn.close()
+
+def import_sqlite_db(upload_bytes):
+    import pandas as pd
+    import tempfile
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+    try:
+        tmp.write(upload_bytes)
+        tmp.flush()
+        src = sqlite3.connect(tmp.name)
+        tgt = get_conn()
+        tables = [
+            "teams","players","matches","match_maps","match_stats_map","match_stats","agents","seasons","team_history"
+        ]
+        summary = {}
+        for t in tables:
+            try:
+                df = pd.read_sql(f"SELECT * FROM {t}", src)
+            except Exception:
+                continue
+            if df.empty:
+                continue
+            cols = [r[1] for r in tgt.execute(f"PRAGMA table_info({t})").fetchall()]
+            use = [c for c in df.columns if c in cols]
+            if not use:
+                continue
+            q = f"INSERT OR REPLACE INTO {t} (" + ",".join(use) + ") VALUES (" + ",".join(["?"]*len(use)) + ")"
+            vals = df[use].values.tolist()
+            tgt.executemany(q, vals)
+            summary[t] = len(vals)
+        tgt.commit()
+        src.close()
+        tgt.close()
+        return summary
+    finally:
+        tmp.close()
+        if os.path.exists(tmp.name):
+            try:
+                os.remove(tmp.name)
+            except Exception:
+                pass
+
+def export_db_bytes():
+    p = os.path.abspath(DB_PATH)
+    try:
+        if os.path.exists(p):
+            with open(p, 'rb') as f:
+                return f.read()
+    except Exception:
+        return None
+    return None
+
+def restore_db_from_github():
+    owner = get_secret("GH_OWNER")
+    repo = get_secret("GH_REPO")
+    path = get_secret("GH_DB_PATH")
+    branch = get_secret("GH_BRANCH", "main")
+    if not owner or not repo or not path:
+        return False
+    url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}"
+    try:
+        r = requests.get(url, timeout=15)
+        if r.status_code == 200 and r.content:
+            with open(DB_PATH, "wb") as f:
+                f.write(r.content)
+            return True
+    except Exception:
+        return False
+    return False
+
+def backup_db_to_github():
+    owner = get_secret("GH_OWNER")
+    repo = get_secret("GH_REPO")
+    path = get_secret("GH_DB_PATH")
+    branch = get_secret("GH_BRANCH", "main")
+    token = get_secret("GH_TOKEN")
+    if not owner or not repo or not path or not token:
+        return False, "Missing secrets"
+    url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+    sha = None
+    try:
+        gr = requests.get(url, headers=headers, params={"ref": branch}, timeout=15)
+        if gr.status_code == 200:
+            data = gr.json()
+            sha = data.get("sha")
+    except Exception:
+        pass
+    data_bytes = export_db_bytes()
+    if not data_bytes:
+        return False, "No DB data"
+    payload = {
+        "message": "Portal DB backup",
+        "content": base64.b64encode(data_bytes).decode("ascii"),
+        "branch": branch,
+    }
+    if sha:
+        payload["sha"] = sha
+    try:
+        pr = requests.put(url, headers=headers, json=payload, timeout=20)
+        if pr.status_code in [200, 201]:
+            return True, "Backed up"
+        return False, f"Error {pr.status_code}"
+    except Exception:
+        return False, "Request failed"
+
+@st.cache_data(ttl=300)
+def get_substitutions_log():
+    import pandas as pd
+    conn = get_conn()
+    try:
+        df = pd.read_sql(
+            """
+            SELECT msm.match_id, msm.map_index, m.week, m.group_name,
+                   t.name AS team, p.name AS player, sp.name AS subbed_for,
+                   msm.agent, msm.acs, msm.kills, msm.deaths, msm.assists
+            FROM match_stats_map msm
+            JOIN matches m ON msm.match_id = m.id
+            LEFT JOIN teams t ON msm.team_id = t.id
+            LEFT JOIN players p ON msm.player_id = p.id
+            LEFT JOIN players sp ON msm.subbed_for_id = sp.id
+            WHERE msm.is_sub = 1
+            ORDER BY m.week, msm.match_id, msm.map_index
+            """,
+            conn,
+        )
+    except Exception:
+        conn.close()
+        return pd.DataFrame()
+    conn.close()
+    return df
+
+@st.cache_data(ttl=300)
+def get_player_profile(player_id):
+    import pandas as pd
+    conn = get_conn()
+    try:
+        info = pd.read_sql(
+            "SELECT p.id, p.name, p.rank, t.tag as team FROM players p LEFT JOIN teams t ON p.default_team_id=t.id WHERE p.id=?",
+            conn,
+            params=(int(player_id),),
+        )
+        if info.empty:
+            conn.close()
+            return {}
+            
+        rank_val = info.iloc[0]['rank']
+        
+        # Stats with match metadata in one go
+        stats = pd.read_sql(
+            """
+            SELECT msm.match_id, msm.map_index, msm.agent, msm.acs, msm.kills, msm.deaths, msm.assists, msm.is_sub, m.week
+            FROM match_stats_map msm
+            JOIN matches m ON msm.match_id = m.id
+            WHERE msm.player_id=?
+            """,
+            conn,
+            params=(int(player_id),),
+        )
+        
+        # Combined Benchmarks
+        bench = pd.read_sql(
+            """
+            SELECT 
+                AVG(msm.acs) as lg_acs, AVG(msm.kills) as lg_k, AVG(msm.deaths) as lg_d, AVG(msm.assists) as lg_a,
+                AVG(CASE WHEN p.rank = ? THEN msm.acs ELSE NULL END) as r_acs,
+                AVG(CASE WHEN p.rank = ? THEN msm.kills ELSE NULL END) as r_k,
+                AVG(CASE WHEN p.rank = ? THEN msm.deaths ELSE NULL END) as r_d,
+                AVG(CASE WHEN p.rank = ? THEN msm.assists ELSE NULL END) as r_a
+            FROM match_stats_map msm
+            JOIN players p ON msm.player_id = p.id
+            """,
+            conn,
+            params=(rank_val, rank_val, rank_val, rank_val)
+        ).iloc[0]
+        
+        trend = pd.DataFrame()
+        if not stats.empty:
+            agg = stats.groupby('match_id').agg({'acs':'mean','kills':'sum','deaths':'sum','week':'first'}).reset_index()
+            agg['kda'] = agg['kills'] / agg['deaths'].replace(0, 1)
+            agg['label'] = 'W' + agg['week'].fillna(0).astype(int).astype(str) + '-M' + agg['match_id'].astype(int).astype(str)
+            agg = agg.rename(columns={'acs':'avg_acs'})
+            trend = agg[['label','avg_acs','kda']]
+            
+        conn.close()
+    except Exception:
+        if 'conn' in locals(): conn.close()
+        return {}
+        
+    games = stats['match_id'].nunique() if not stats.empty else 0
+    avg_acs = float(stats['acs'].mean()) if not stats.empty else 0.0
+    total_k = int(stats['kills'].sum()) if not stats.empty else 0
+    total_d = int(stats['deaths'].sum()) if not stats.empty else 0
+    total_a = int(stats['assists'].sum()) if not stats.empty else 0
+    kd = (total_k / (total_d if total_d != 0 else 1)) if not stats.empty else 0.0
+    
+    sub_impact = None
+    if not stats.empty:
+        s_sub = stats[stats['is_sub'] == 1]
+        s_sta = stats[stats['is_sub'] == 0]
+        sub_impact = {
+            'sub_acs': float(s_sub['acs'].mean()) if not s_sub.empty else 0.0,
+            'starter_acs': float(s_sta['acs'].mean()) if not s_sta.empty else 0.0,
+            'sub_kda': float((s_sub['kills'].sum() / max(s_sub['deaths'].sum(), 1))) if not s_sub.empty else 0.0,
+            'starter_kda': float((s_sta['kills'].sum() / max(s_sta['deaths'].sum(), 1))) if not s_sta.empty else 0.0,
+        }
+
+    return {
+        'info': info.iloc[0].to_dict(),
+        'games': int(games),
+        'avg_acs': round(avg_acs, 1),
+        'total_kills': total_k,
+        'total_deaths': total_d,
+        'total_assists': total_a,
+        'kd_ratio': round(kd, 2),
+        'sr_avg_acs': round(float(bench['r_acs'] or 0), 1),
+        'sr_k': round(float(bench['r_k'] or 0), 1),
+        'sr_d': round(float(bench['r_d'] or 0), 1),
+        'sr_a': round(float(bench['r_a'] or 0), 1),
+        'lg_avg_acs': round(float(bench['lg_acs'] or 0), 1),
+        'lg_k': round(float(bench['lg_k'] or 0), 1),
+        'lg_d': round(float(bench['lg_d'] or 0), 1),
+        'lg_a': round(float(bench['lg_a'] or 0), 1),
+        'maps': stats,
+        'trend': trend,
+        'sub_impact': sub_impact,
+    }
+def reset_db():
+    conn = get_conn()
+    c = conn.cursor()
+    for t in [
+        "admins","match_stats_map","match_stats","match_maps","matches","players","teams","agents","team_history","seasons"
+    ]:
+        try:
+            c.execute(f"DROP TABLE IF EXISTS {t}")
+        except Exception:
+            pass
+    conn.commit()
+    conn.close()
+    ensure_base_schema()
+    init_admin_table()
+    init_match_stats_map_table()
+    ensure_upgrade_schema()
+
+def hash_password(password, salt=None):
+    import secrets
+    import hashlib
+    if salt is None:
+        salt = secrets.token_bytes(16)
+    hashed = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 200000)
+    return salt, hashed
+
+def verify_password(password, salt, stored_hash):
+    import hashlib
+    import hmac
+    calc = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 200000)
+    return hmac.compare_digest(calc, stored_hash)
+
+def admin_exists():
+    conn = get_conn()
+    cur = conn.execute("SELECT COUNT(*) FROM admins WHERE is_active=1")
+    count = cur.fetchone()[0]
+    conn.close()
+    return count > 0
+
+def create_admin(username, password):
+    salt, ph = hash_password(password)
+    conn = get_conn()
+    role = get_secret("ADMIN_SEED_ROLE", "admin") if not admin_exists() else "admin"
+    conn.execute("INSERT INTO admins (username, password_hash, salt, is_active, role) VALUES (?, ?, ?, 1, ?)", (username, ph, salt, role))
+    conn.commit()
+    conn.close()
+
+def create_admin_with_role(username, password, role):
+    salt, ph = hash_password(password)
+    conn = get_conn()
+    conn.execute("INSERT INTO admins (username, password_hash, salt, is_active, role) VALUES (?, ?, ?, 1, ?)", (username, ph, salt, role))
+    conn.commit()
+    conn.close()
+
+def ensure_seed_admins(conn=None):
+    su = get_secret("ADMIN_SEED_USER")
+    sp = get_secret("ADMIN_SEED_PWD")
+    sr = get_secret("ADMIN_SEED_ROLE", "admin")
+    
+    should_close = False
+    if conn is None:
+        conn = get_conn()
+        should_close = True
+    
+    c = conn.cursor()
+    if su and sp:
+        row = c.execute("SELECT id, role FROM admins WHERE username=?", (su,)).fetchone()
+        if not row:
+            salt, ph = hash_password(sp)
+            c.execute(
+                "INSERT INTO admins (username, password_hash, salt, is_active, role) VALUES (?, ?, ?, 1, ?)",
+                (su, ph, salt, sr)
+            )
+        else:
+            if row[1] != sr:
+                c.execute("UPDATE admins SET role=? WHERE id=?", (sr, int(row[0])))
+    su2 = get_secret("ADMIN2_USER")
+    sp2 = get_secret("ADMIN2_PWD")
+    sr2 = get_secret("ADMIN2_ROLE", "admin")
+    if su2 and sp2:
+        row2 = c.execute("SELECT id FROM admins WHERE username=?", (su2,)).fetchone()
+        if not row2:
+            salt2, ph2 = hash_password(sp2)
+            c.execute(
+                "INSERT INTO admins (username, password_hash, salt, is_active, role) VALUES (?, ?, ?, 1, ?)",
+                (su2, ph2, salt2, sr2)
+            )
+    
+    if should_close:
+        conn.commit()
+        conn.close()
+
+def authenticate(username, password):
+    conn = get_conn()
+    row = conn.execute("SELECT username, password_hash, salt, role FROM admins WHERE username=? AND is_active=1", (username,)).fetchone()
+    conn.close()
+    if not row:
+        return None
+    u, ph, salt, role = row
+    if verify_password(password, salt, ph):
+        return {"username": u, "role": role}
+    return None
+
+def init_match_stats_map_table(conn=None):
+    should_close = False
+    if conn is None:
+        conn = get_conn()
+        should_close = True
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS match_stats_map (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            match_id INTEGER NOT NULL,
+            map_index INTEGER NOT NULL,
+            team_id INTEGER NOT NULL,
+            player_id INTEGER,
+            is_sub INTEGER DEFAULT 0,
+            subbed_for_id INTEGER,
+            agent TEXT,
+            acs INTEGER,
+            kills INTEGER,
+            deaths INTEGER,
+            assists INTEGER
+        )
+        """
+    )
+    if should_close:
+        conn.commit()
+        conn.close()
+
+def upsert_match_maps(match_id, maps_data):
+    conn = get_conn()
+    c = conn.cursor()
+    for m in maps_data:
+        c.execute("SELECT id FROM match_maps WHERE match_id=? AND map_index=?", (match_id, m['map_index']))
+        ex = c.fetchone()
+        if ex:
+            c.execute(
+                "UPDATE match_maps SET map_name=?, team1_rounds=?, team2_rounds=?, winner_id=? WHERE id=?",
+                (m['map_name'], m['team1_rounds'], m['team2_rounds'], m['winner_id'], ex[0])
+            )
+        else:
+            c.execute(
+                "INSERT INTO match_maps (match_id, map_index, map_name, team1_rounds, team2_rounds, winner_id) VALUES (?, ?, ?, ?, ?, ?)",
+                (match_id, m['map_index'], m['map_name'], m['team1_rounds'], m['team2_rounds'], m['winner_id'])
+            )
+    conn.commit()
+    conn.close()
+
+@st.cache_data(ttl=300)
+def get_standings():
+    import pandas as pd
+    import numpy as np
+    conn = get_conn()
+    try:
+        teams_df = pd.read_sql_query("SELECT id, name, group_name, logo_path FROM teams", conn)
+        matches_df = pd.read_sql_query("SELECT * FROM matches WHERE status='completed' AND match_type='regular' AND (UPPER(format)='BO1' OR format IS NULL)", conn)
+    except Exception:
+        conn.close()
+        return pd.DataFrame()
+    conn.close()
+    
+    # Pre-calculate logo display safety to cache it
+    # Vectorized check using list comprehension (faster than .apply for small/medium DFs)
+    teams_df['logo_display'] = [
+        p if p and not (".." in p or p.startswith("/") or p.startswith("\\")) and os.path.exists(p) 
+        else None 
+        for p in teams_df['logo_path']
+    ]
+
+    exclude_ids = set(teams_df[teams_df['name'].isin(['FAT1','FAT2'])]['id'].tolist())
+    if exclude_ids:
+        teams_df = teams_df[~teams_df['id'].isin(exclude_ids)]
+        matches_df = matches_df[~(matches_df['team1_id'].isin(exclude_ids) | matches_df['team2_id'].isin(exclude_ids))]
+    
+    # Initialize stats using vectorization
+    if matches_df.empty:
+        for col in ['Wins', 'Losses', 'RD', 'Points', 'Points Against', 'Played']:
+            teams_df[col] = 0
+        return teams_df
+
+    # Calculate match-level stats
+    m = matches_df.copy()
+    m['is_ot'] = (m['score_t1'] >= 12) & (m['score_t2'] >= 12)
+    
+    # Points for Team 1
+    m['p1'] = 0
+    m.loc[m['score_t1'] > m['score_t2'], 'p1'] = 15 + m['score_t1']
+    m.loc[m['score_t1'] < m['score_t2'], 'p1'] = np.where(m['is_ot'], 12 + m['score_t1'], m['score_t1'])
+    
+    # Points for Team 2
+    m['p2'] = 0
+    m.loc[m['score_t2'] > m['score_t1'], 'p2'] = 15 + m['score_t2']
+    m.loc[m['score_t2'] < m['score_t1'], 'p2'] = np.where(m['is_ot'], 12 + m['score_t2'], m['score_t2'])
+    
+    # Wins/Losses
+    m['t1_win'] = (m['score_t1'] > m['score_t2']).astype(int)
+    m['t2_win'] = (m['score_t2'] > m['score_t1']).astype(int)
+    
+    # Reshape to team-level
+    t1_stats = m.groupby('team1_id').agg({
+        't1_win': 'sum',
+        't2_win': lambda x: (1-x).sum(), # t1 losses
+        'score_t1': 'sum', # for RD calculation later or Points
+        'score_t2': 'sum', # for RD calculation later or Points Against
+        'p1': 'sum',
+        'id': 'count' # Played
+    }).rename(columns={'t1_win': 'Wins', 't2_win': 'Losses', 'score_t1': 'S_For', 'score_t2': 'S_Ag', 'p1': 'Points', 'id': 'Played'})
+    
+    t2_stats = m.groupby('team2_id').agg({
+        't2_win': 'sum',
+        't1_win': lambda x: (1-x).sum(), # t2 losses
+        'score_t2': 'sum',
+        'score_t1': 'sum',
+        'p2': 'sum',
+        'id': 'count'
+    }).rename(columns={'t2_win': 'Wins', 't1_win': 'Losses', 'score_t2': 'S_For', 'score_t1': 'S_Ag', 'p2': 'Points', 'id': 'Played'})
+
+    # Combine stats
+    combined = pd.concat([t1_stats, t2_stats]).groupby(level=0).sum()
+    combined['RD'] = combined['S_For'] - combined['S_Ag']
+    combined = combined.rename(columns={'S_Ag': 'Points Against'})
+    combined = combined.drop(columns=['S_For'])
+    
+    # Merge with teams_df
+    df = teams_df.merge(combined, left_on='id', right_index=True, how='left').fillna(0)
+    
+    # Ensure correct types for numeric columns
+    for col in ['Wins', 'Losses', 'RD', 'Points', 'Points Against', 'Played']:
+        df[col] = df[col].astype(int)
+        
+    return df.sort_values(by=['Points', 'Points Against'], ascending=[False, True])
+
+@st.cache_data(ttl=60)
+def get_player_leaderboard():
+    import pandas as pd
+    conn = get_conn()
+    try:
+        df = pd.read_sql_query(
+            """
+            SELECT p.id as player_id,
+                   p.name,
+                   t.tag as team,
+                   COUNT(DISTINCT msm.match_id) as games,
+                   AVG(msm.acs) as avg_acs,
+                   SUM(msm.kills) as total_kills,
+                   SUM(msm.deaths) as total_deaths,
+                   SUM(msm.assists) as total_assists
+            FROM match_stats_map msm
+            JOIN players p ON msm.player_id = p.id
+            LEFT JOIN teams t ON p.default_team_id = t.id
+            GROUP BY p.id, p.name
+            HAVING games > 0
+            """,
+            conn,
+        )
+    except Exception:
+        conn.close()
+        return pd.DataFrame()
+    conn.close()
+    if not df.empty:
+        df['kd_ratio'] = df['total_kills'] / df['total_deaths'].replace(0, 1)
+        df['avg_acs'] = df['avg_acs'].round(1)
+        df['kd_ratio'] = df['kd_ratio'].round(2)
+    return df.sort_values('avg_acs', ascending=False)
+
+@st.cache_data(ttl=60)
+def get_week_matches(week):
+    import pandas as pd
+    conn = get_conn()
+    df = pd.read_sql_query(
+        """
+        SELECT m.id, m.week, m.group_name, m.status, m.format, m.maps_played,
+               t1.name as t1_name, t2.name as t2_name,
+               m.score_t1, m.score_t2, t1.id as t1_id, t2.id as t2_id
+        FROM matches m
+        JOIN teams t1 ON m.team1_id = t1.id
+        JOIN teams t2 ON m.team2_id = t2.id
+        WHERE m.week = ? AND m.match_type = 'regular'
+        ORDER BY m.id
+        """,
+        conn,
+        params=(week,),
+    )
+    conn.close()
+    return df
+
+@st.cache_data(ttl=300)
+def get_playoff_matches():
+    import pandas as pd
+    conn = get_conn()
+    df = pd.read_sql_query(
+        """
+        SELECT m.id, m.playoff_round, m.bracket_pos, m.status, m.format, m.maps_played,
+               t1.name as t1_name, t2.name as t2_name,
+               m.score_t1, m.score_t2, t1.id as t1_id, t2.id as t2_id,
+               m.winner_id
+        FROM matches m
+        LEFT JOIN teams t1 ON m.team1_id = t1.id
+        LEFT JOIN teams t2 ON m.team2_id = t2.id
+        WHERE m.match_type = 'playoff'
+        ORDER BY m.playoff_round ASC, m.bracket_pos ASC
+        """,
+        conn
+    )
+    conn.close()
+    return df
+
+@st.cache_data(ttl=300)
+def get_match_maps(match_id):
+    import pandas as pd
+    conn = get_conn()
+    df = pd.read_sql_query(
+        "SELECT map_index, map_name, team1_rounds, team2_rounds, winner_id FROM match_maps WHERE match_id=? ORDER BY map_index",
+        conn,
+        params=(match_id,),
+    )
+    conn.close()
+    return df
+
+@st.cache_data(ttl=300)
+def get_all_players_directory():
+    import pandas as pd
+    conn = get_conn()
+    try:
+        df = pd.read_sql(
+            """
+            SELECT p.id, p.name, p.riot_id, p.rank, t.name as team
+            FROM players p
+            LEFT JOIN teams t ON p.default_team_id = t.id
+            ORDER BY p.name
+            """,
+            conn
+        )
+    except Exception:
+        df = pd.DataFrame(columns=['id','name','riot_id','rank','team'])
+    finally:
+        conn.close()
+    return df
+
+@st.cache_data(ttl=300)
+def get_map_stats(match_id, map_index, team_id):
+    import pandas as pd
+    conn = get_conn()
+    try:
+        df = pd.read_sql(
+            """
+            SELECT p.name, ms.agent, ms.acs, ms.kills, ms.deaths, ms.assists, ms.is_sub 
+            FROM match_stats_map ms 
+            JOIN players p ON ms.player_id=p.id 
+            WHERE ms.match_id=? AND ms.map_index=? AND ms.team_id=?
+            """, 
+            conn, 
+            params=(int(match_id), int(map_index), int(team_id))
+        )
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+@st.cache_data(ttl=300)
+def get_team_history_counts():
+    import pandas as pd
+    conn = get_conn()
+    try:
+        df = pd.read_sql_query(
+            "SELECT team_id, COUNT(DISTINCT season_id) as season_count FROM team_history GROUP BY team_id",
+            conn,
+        )
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+@st.cache_data(ttl=300)
+def get_all_players():
+    import pandas as pd
+    conn = get_conn()
+    try:
+        df = pd.read_sql("SELECT id, name, riot_id, rank, default_team_id FROM players ORDER BY name", conn)
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+@st.cache_data(ttl=300)
+def get_teams_list_full():
+    import pandas as pd
+    conn = get_conn()
+    try:
+        df = pd.read_sql("SELECT id, name, tag, group_name, logo_path FROM teams ORDER BY name", conn)
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+@st.cache_data(ttl=300)
+def get_teams_list():
+    import pandas as pd
+    df = get_teams_list_full()
+    return df[['id', 'name']] if not df.empty else pd.DataFrame(columns=['id', 'name'])
+
+@st.cache_data(ttl=3600)
+def get_agents_list():
+    import pandas as pd
+    conn = get_conn()
+    try:
+        df = pd.read_sql("SELECT name FROM agents ORDER BY name", conn)
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df['name'].tolist() if not df.empty else []
+
+@st.cache_data(ttl=300)
+def get_match_weeks():
+    import pandas as pd
+    conn = get_conn()
+    try:
+        df = pd.read_sql_query("SELECT DISTINCT week FROM matches ORDER BY week", conn)
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df['week'].tolist() if not df.empty else []
+
+@st.cache_data(ttl=300)
+def get_match_maps_cached(match_id):
+    return get_match_maps(match_id)
+
+@st.cache_data(ttl=300)
+def get_completed_matches():
+    import pandas as pd
+    conn = get_conn()
+    try:
+        df = pd.read_sql("SELECT * FROM matches WHERE status='completed'", conn)
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+def apply_plotly_theme(fig):
+    fig.update_layout(
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        font_color='#ECE8E1',
+        font_family='Inter',
+        title_font_family='Orbitron',
+        title_font_color='#3FD1FF',
+        xaxis=dict(
+            gridcolor='rgba(255,255,255,0.05)', 
+            zerolinecolor='rgba(255,255,255,0.1)',
+            tickfont=dict(color='#8B97A5'),
+            title_font=dict(color='#8B97A5')
+        ),
+        yaxis=dict(
+            gridcolor='rgba(255,255,255,0.05)', 
+            zerolinecolor='rgba(255,255,255,0.1)',
+            tickfont=dict(color='#8B97A5'),
+            title_font=dict(color='#8B97A5')
+        ),
+        margin=dict(l=20, r=20, t=40, b=20),
+        legend=dict(
+            bgcolor='rgba(0,0,0,0)',
+            bordercolor='rgba(255,255,255,0.1)',
+            font=dict(color='#ECE8E1')
+        )
+    )
+    return fig
 
 # App Mode Logic
 if 'login_attempts' not in st.session_state:
@@ -1311,19 +1441,21 @@ st.markdown('</div>', unsafe_allow_html=True)
 page = st.session_state['page']
 
 if page == "Overview & Standings":
+    import pandas as pd
     st.markdown('<h1 class="main-header">OVERVIEW & STANDINGS</h1>', unsafe_allow_html=True)
     
     df = get_standings()
     if not df.empty:
-        conn = get_conn()
-        hist = pd.read_sql_query(
-            "SELECT team_id, COUNT(DISTINCT season_id) as season_count FROM team_history GROUP BY team_id",
-            conn,
-        )
-        conn.close()
+        hist = get_team_history_counts()
+        all_players_bench = get_all_players()
+        # Pre-group rosters for efficiency
+        rosters_by_team = {}
+        if not all_players_bench.empty:
+            for tid, group in all_players_bench.groupby('default_team_id'):
+                rosters_by_team[int(tid)] = group[['name', 'rank']]
+
         df = df.merge(hist, left_on='id', right_on='team_id', how='left')
         df['season_count'] = df['season_count'].fillna(1).astype(int)
-        df['logo_display'] = df['logo_path'].apply(lambda x: x if x and is_safe_path(x) and os.path.exists(x) else None)
         
         groups = sorted(df['group_name'].unique())
         
@@ -1334,30 +1466,28 @@ if page == "Overview & Standings":
             
             # Team Cards Grid
             t_cols = st.columns(min(len(grp_df), 3))
-            for idx, (_, row) in enumerate(grp_df.iterrows()):
+            for idx, row in enumerate(grp_df.itertuples()):
                 with t_cols[idx % 3]:
                     logo_html = ""
-                    if row['logo_display']:
-                        with open(row['logo_display'], "rb") as f:
-                            logo_html = f"<img src='data:image/png;base64,{base64.b64encode(f.read()).decode()}' width='40' style='border-radius: 4px;'/>"
+                    b64 = get_base64_image(row.logo_display)
+                    if b64:
+                        logo_html = f"<img src='data:image/png;base64,{b64}' width='40' style='border-radius: 4px;'/>"
                     else:
                         logo_html = "<div style='width:40px;height:40px;background:rgba(255,255,255,0.05);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--text-dim);'>?</div>"
                     
                     st.markdown(f"""<div class="custom-card" style="height: 100%;">
 <div style="display: flex; align-items: center; gap: 15px; margin-bottom: 10px;">
 {logo_html}
-<div style="font-weight: bold; color: var(--primary-blue); font-size: 1rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{html.escape(str(row['name']))}</div>
+<div style="font-weight: bold; color: var(--primary-blue); font-size: 1rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{html.escape(str(row.name))}</div>
 </div>
 <div style="display: flex; justify-content: space-between; color: var(--text-dim); font-size: 0.8rem;">
-<span>WINS: <span style="color: var(--text-main); font-family: 'Orbitron';">{row['Wins']}</span></span>
-<span>PTS: <span style="color: var(--primary-blue); font-family: 'Orbitron';">{row['Points']}</span></span>
+<span>WINS: <span style="color: var(--text-main); font-family: 'Orbitron';">{row.Wins}</span></span>
+<span>PTS: <span style="color: var(--primary-blue); font-family: 'Orbitron';">{row.Points}</span></span>
 </div>
 </div>""", unsafe_allow_html=True)
                     
                     with st.expander("Roster"):
-                        conn_r = get_conn()
-                        roster = pd.read_sql_query("SELECT name, rank FROM players WHERE default_team_id=? ORDER BY name", conn_r, params=(int(row['id']),))
-                        conn_r.close()
+                        roster = rosters_by_team.get(int(row.id), pd.DataFrame())
                         if roster.empty: st.caption("No players")
                         else: st.dataframe(roster, hide_index=True, use_container_width=True)
             
@@ -1377,6 +1507,7 @@ if page == "Overview & Standings":
         st.info("No standings data available yet.")
 
 elif page == "Matches":
+    import pandas as pd
     st.markdown('<h1 class="main-header">MATCH SCHEDULE</h1>', unsafe_allow_html=True)
     week = st.selectbox("Select Week", [1, 2, 3, 4, 5], index=0)
     df = get_week_matches(week)
@@ -1388,66 +1519,72 @@ elif page == "Matches":
         if sched.empty:
             st.caption("None")
         else:
-            for _, m in sched.iterrows():
+            for m in sched.itertuples():
                 st.markdown(f"""<div class="custom-card">
 <div style="display: flex; justify-content: space-between; align-items: center;">
-<div style="flex: 1; text-align: right; font-weight: bold; color: var(--primary-blue);">{html.escape(str(m['t1_name']))}</div>
+<div style="flex: 1; text-align: right; font-weight: bold; color: var(--primary-blue);">{html.escape(str(m.t1_name))}</div>
 <div style="margin: 0 20px; color: var(--text-dim); font-family: 'Orbitron';">VS</div>
-<div style="flex: 1; text-align: left; font-weight: bold; color: var(--primary-red);">{html.escape(str(m['t2_name']))}</div>
+<div style="flex: 1; text-align: left; font-weight: bold; color: var(--primary-red);">{html.escape(str(m.t2_name))}</div>
 </div>
-<div style="text-align: center; color: var(--text-dim); font-size: 0.8rem; margin-top: 10px;">{html.escape(str(m['format']))} • {html.escape(str(m['group_name']))}</div>
+<div style="text-align: center; color: var(--text-dim); font-size: 0.8rem; margin-top: 10px;">{html.escape(str(m.format))} • {html.escape(str(m.group_name))}</div>
 </div>""", unsafe_allow_html=True)
         
         st.markdown("### Completed")
         comp = df[df['status'] == 'completed']
-        for _, m in comp.iterrows():
+        for m in comp.itertuples():
             with st.container():
-                winner_color_1 = "var(--primary-blue)" if m['score_t1'] > m['score_t2'] else "var(--text-main)"
-                winner_color_2 = "var(--primary-red)" if m['score_t2'] > m['score_t1'] else "var(--text-main)"
+                winner_color_1 = "var(--primary-blue)" if m.score_t1 > m.score_t2 else "var(--text-main)"
+                winner_color_2 = "var(--primary-red)" if m.score_t2 > m.score_t1 else "var(--text-main)"
                 
-                st.markdown(f"""<div class="custom-card" style="border-left: 4px solid {'var(--primary-blue)' if m['score_t1'] > m['score_t2'] else 'var(--primary-red)'};">
+                st.markdown(f"""<div class="custom-card" style="border-left: 4px solid {'var(--primary-blue)' if m.score_t1 > m.score_t2 else 'var(--primary-red)'};">
 <div style="display: flex; justify-content: space-between; align-items: center;">
 <div style="flex: 1; text-align: right;">
-<span style="font-weight: bold; color: {winner_color_1};">{html.escape(str(m['t1_name']))}</span>
-<span style="font-size: 1.5rem; margin-left: 10px; font-family: 'Orbitron';">{m['score_t1']}</span>
+<span style="font-weight: bold; color: {winner_color_1};">{html.escape(str(m.t1_name))}</span>
+<span style="font-size: 1.5rem; margin-left: 10px; font-family: 'Orbitron';">{m.score_t1}</span>
 </div>
 <div style="margin: 0 20px; color: var(--text-dim); font-family: 'Orbitron';">-</div>
 <div style="flex: 1; text-align: left;">
-<span style="font-size: 1.5rem; margin-right: 10px; font-family: 'Orbitron';">{m['score_t2']}</span>
-<span style="font-weight: bold; color: {winner_color_2};">{html.escape(str(m['t2_name']))}</span>
+<span style="font-size: 1.5rem; margin-right: 10px; font-family: 'Orbitron';">{m.score_t2}</span>
+<span style="font-weight: bold; color: {winner_color_2};">{html.escape(str(m.t2_name))}</span>
 </div>
 </div>
-<div style="text-align: center; color: var(--text-dim); font-size: 0.8rem; margin-top: 10px;">{html.escape(str(m['format']))} • {html.escape(str(m['group_name']))}</div>
+<div style="text-align: center; color: var(--text-dim); font-size: 0.8rem; margin-top: 10px;">{html.escape(str(m.format))} • {html.escape(str(m.group_name))}</div>
 </div>""", unsafe_allow_html=True)
                 
                 with st.expander("Match Details"):
-                    maps_df = get_match_maps(int(m['id']))
+                    maps_df = get_match_maps(int(m.id))
                     if maps_df.empty:
                         st.caption("No map details")
                     else:
                         md = maps_df.copy()
-                        t1_id_val = int(m.get('t1_id', m.get('team1_id')))
-                        t2_id_val = int(m.get('t2_id', m.get('team2_id')))
-                        md['Winner'] = md.apply(lambda r: m['t1_name'] if r['winner_id'] == t1_id_val else (m['t2_name'] if r['winner_id'] == t2_id_val else ''), axis=1)
+                        t1_id_val = int(getattr(m, 't1_id', getattr(m, 'team1_id', 0)))
+                        t2_id_val = int(getattr(m, 't2_id', getattr(m, 'team2_id', 0)))
+                        # Vectorized Winner calculation
+                        md['Winner'] = ''
+                        md.loc[md['winner_id'] == t1_id_val, 'Winner'] = m.t1_name
+                        md.loc[md['winner_id'] == t2_id_val, 'Winner'] = m.t2_name
+                        
                         md = md.rename(columns={
                             'map_index': 'Map',
                             'map_name': 'Name',
-                            'team1_rounds': m['t1_name'],
-                            'team2_rounds': m['t2_name'],
+                            'team1_rounds': m.t1_name,
+                            'team2_rounds': m.t2_name,
                         })
                         md['Map'] = md['Map'] + 1
-                        st.dataframe(md[['Map', 'Name', m['t1_name'], m['t2_name'], 'Winner']], hide_index=True, use_container_width=True)
+                        st.dataframe(md[['Map', 'Name', m.t1_name, m.t2_name, 'Winner']], hide_index=True, use_container_width=True)
 
 elif page == "Match Summary":
     st.markdown('<h1 class="main-header">MATCH SUMMARY</h1>', unsafe_allow_html=True)
     
-    week = st.sidebar.selectbox("Week", [1, 2, 3, 4, 5], index=0, key="wk_sum")
-    df = get_week_matches(week)
+    wk_list = get_match_weeks()
+    week = st.sidebar.selectbox("Week", wk_list if wk_list else [1], index=0, key="wk_sum")
+    df = get_week_matches(week) if wk_list else pd.DataFrame()
     
     if df.empty:
         st.info("No matches for this week.")
     else:
-        opts = df.apply(lambda r: f"{r['t1_name']} vs {r['t2_name']} ({r['group_name']})", axis=1).tolist()
+        # Vectorized option generation
+        opts = (df['t1_name'].fillna('') + " vs " + df['t2_name'].fillna('') + " (" + df['group_name'].fillna('') + ")").tolist()
         sel = st.selectbox("Select Match", list(range(len(opts))), format_func=lambda i: opts[i])
         m = df.iloc[sel]
         
@@ -1503,12 +1640,10 @@ elif page == "Match Summary":
 </div>""", unsafe_allow_html=True)
             
             # Scoreboards
-            conn_s = get_conn()
             t1_id_val = int(m.get('t1_id', m.get('team1_id')))
             t2_id_val = int(m.get('t2_id', m.get('team2_id')))
-            s1 = pd.read_sql("SELECT p.name, ms.agent, ms.acs, ms.kills, ms.deaths, ms.assists, ms.is_sub FROM match_stats_map ms JOIN players p ON ms.player_id=p.id WHERE ms.match_id=? AND ms.map_index=? AND ms.team_id=?", conn_s, params=(int(m['id']), selected_map_idx, t1_id_val))
-            s2 = pd.read_sql("SELECT p.name, ms.agent, ms.acs, ms.kills, ms.deaths, ms.assists, ms.is_sub FROM match_stats_map ms JOIN players p ON ms.player_id=p.id WHERE ms.match_id=? AND ms.map_index=? AND ms.team_id=?", conn_s, params=(int(m['id']), selected_map_idx, t2_id_val))
-            conn_s.close()
+            s1 = get_map_stats(m['id'], selected_map_idx, t1_id_val)
+            s2 = get_map_stats(m['id'], selected_map_idx, t2_id_val)
             
             c1, c2 = st.columns(2)
             with c1:
@@ -1526,15 +1661,14 @@ elif page == "Match Summary":
                     st.dataframe(s2.rename(columns={'name':'Player','agent':'Agent','acs':'ACS','kills':'K','deaths':'D','assists':'A','is_sub':'Sub'}), hide_index=True, use_container_width=True)
 
 elif page == "Match Predictor":
+    import pandas as pd
     st.markdown('<h1 class="main-header">MATCH PREDICTOR</h1>', unsafe_allow_html=True)
     st.write("Predict the outcome of a match based on team history and stats.")
     
-    conn = get_conn()
-    teams_df = pd.read_sql("SELECT id, name FROM teams ORDER BY name", conn)
-    matches_df = pd.read_sql("SELECT * FROM matches WHERE status='completed'", conn)
-    conn.close()
+    teams_df = get_teams_list()
+    matches_df = get_completed_matches()
     
-    tnames = teams_df['name'].tolist()
+    tnames = teams_df['name'].tolist() if not teams_df.empty else []
     c1, c2 = st.columns(2)
     
     # Check if user is admin or dev
@@ -1552,20 +1686,18 @@ elif page == "Match Predictor":
             
             # Feature extraction helper
             def get_team_stats(tid):
+                import pandas as pd
                 played = matches_df[(matches_df['team1_id']==tid) | (matches_df['team2_id']==tid)]
                 if played.empty:
                     return {'win_rate': 0.0, 'avg_score': 0.0, 'games': 0}
                 wins = played[played['winner_id'] == tid].shape[0]
                 total = played.shape[0]
                 
-                # Calculate avg score (rounds won)
-                scores = []
-                for _, r in played.iterrows():
-                    if r['team1_id'] == tid:
-                        scores.append(r['score_t1'])
-                    else:
-                        scores.append(r['score_t2'])
-                avg_score = sum(scores)/len(scores) if scores else 0
+                # Calculate avg score (rounds won) using vectorized operations
+                scores_t1 = played.loc[played['team1_id'] == tid, 'score_t1']
+                scores_t2 = played.loc[played['team2_id'] == tid, 'score_t2']
+                all_scores = pd.concat([scores_t1, scores_t2])
+                avg_score = all_scores.mean() if not all_scores.empty else 0
                 
                 return {'win_rate': wins/total, 'avg_score': avg_score, 'games': total}
 
@@ -1666,6 +1798,7 @@ elif page == "Match Predictor":
 </div>""", unsafe_allow_html=True)
 
 elif page == "Player Leaderboard":
+    import pandas as pd
     df = get_player_leaderboard()
     if df.empty:
         st.info("No player stats yet.")
@@ -1677,13 +1810,13 @@ elif page == "Player Leaderboard":
         medals = ["🥇", "🥈", "🥉"]
         colors = ["#FFD700", "#C0C0C0", "#CD7132"]
         
-        for i, (_, row) in enumerate(top3.iterrows()):
+        for i, row in enumerate(top3.itertuples()):
             with cols[i]:
                 st.markdown(f"""<div class="custom-card" style="text-align: center; border-bottom: 3px solid {colors[i]};">
 <div style="font-size: 2rem;">{medals[i]}</div>
-<div style="font-weight: bold; color: var(--primary-blue); font-size: 1.2rem; margin: 10px 0;">{html.escape(str(row['name']))}</div>
-<div style="color: var(--text-dim); font-size: 0.8rem;">{html.escape(str(row['team']))}</div>
-<div style="font-family: 'Orbitron'; font-size: 1.5rem; color: var(--text-main); margin-top: 10px;">{row['avg_acs']}</div>
+<div style="font-weight: bold; color: var(--primary-blue); font-size: 1.2rem; margin: 10px 0;">{html.escape(str(row.name))}</div>
+<div style="color: var(--text-dim); font-size: 0.8rem;">{html.escape(str(row.team))}</div>
+<div style="font-family: 'Orbitron'; font-size: 1.5rem; color: var(--text-main); margin-top: 10px;">{row.avg_acs}</div>
 <div style="font-size: 0.6rem; color: var(--text-dim);">AVG ACS</div>
 </div>""", unsafe_allow_html=True)
         
@@ -1693,12 +1826,9 @@ elif page == "Player Leaderboard":
         names = df['name'].tolist()
         sel = st.selectbox("Detailed Profile", ["Select a player..."] + names)
         if sel != "Select a player...":
-            conn_pp = get_conn()
-            pid_row = pd.read_sql("SELECT id FROM players WHERE name=?", conn_pp, params=(sel,))
-            conn_pp.close()
-            if not pid_row.empty:
-                prof = get_player_profile(int(pid_row.iloc[0]['id']))
-                if prof:
+            pid = int(df[df['name'] == sel].iloc[0]['player_id'])
+            prof = get_player_profile(pid)
+            if prof:
                     st.markdown(f"""<div style="margin-top: 2rem; padding: 1rem; border-left: 5px solid var(--primary-blue); background: rgba(63, 209, 255, 0.05);">
 <h2 style="margin: 0;">{html.escape(str(prof['info'].get('name')))}</h2>
 <div style="color: var(--text-dim); font-family: 'Orbitron';">{html.escape(str(prof['info'].get('team') or 'No Team'))} • {html.escape(str(prof['info'].get('rank') or 'Unranked'))}</div>
@@ -1719,6 +1849,8 @@ elif page == "Player Leaderboard":
                     st.dataframe(cmp_df, hide_index=True, use_container_width=True)
                     
                     # Performance Benchmarks Chart (Dual Axis)
+                    import plotly.graph_objects as go
+                    import plotly.express as px
                     from plotly.subplots import make_subplots
                     fig_cmp_admin = make_subplots(specs=[[{"secondary_y": True}]])
                     
@@ -1777,22 +1909,10 @@ elif page == "Player Leaderboard":
                         st.dataframe(prof['maps'][['match_id','map_index','agent','acs','kills','deaths','assists','is_sub']], hide_index=True, use_container_width=True)
 
 elif page == "Players Directory":
+    import pandas as pd
     st.markdown('<h1 class="main-header">PLAYERS DIRECTORY</h1>', unsafe_allow_html=True)
     
-    conn = get_conn()
-    try:
-        players_df = pd.read_sql(
-            """
-            SELECT p.id, p.name, p.riot_id, p.rank, t.name AS team
-            FROM players p
-            LEFT JOIN teams t ON p.default_team_id = t.id
-            ORDER BY p.name
-            """,
-            conn,
-        )
-    except Exception:
-        players_df = pd.DataFrame(columns=['id','name','riot_id','rank','team'])
-    conn.close()
+    players_df = get_all_players_directory()
     
     ranks_base = ["Unranked", "Iron", "Bronze", "Silver", "Gold", "Platinum", "Diamond", "Ascendant", "Immortal", "Radiant"]
     dynamic_ranks = sorted(list(set(players_df['rank'].dropna().unique().tolist() + ranks_base)))
@@ -1811,7 +1931,10 @@ elif page == "Players Directory":
     out = out[out['rank'].isin(rf)]
     if q:
         s = q.lower()
-        out = out[out.apply(lambda r: s in str(r['name']).lower() or s in str(r['riot_id']).lower(), axis=1)]
+        out = out[
+            out['name'].str.lower().fillna("").str.contains(s) | 
+            out['riot_id'].str.lower().fillna("").str.contains(s)
+        ]
     
     # Display as a clean table with the brand theme
     st.markdown("<br>", unsafe_allow_html=True)
@@ -1831,12 +1954,17 @@ elif page == "Players Directory":
         )
 
 elif page == "Teams":
+    import pandas as pd
     st.markdown('<h1 class="main-header">TEAMS</h1>', unsafe_allow_html=True)
     
-    conn = get_conn()
-    teams = pd.read_sql("SELECT id, name, tag, group_name, logo_path FROM teams ORDER BY name", conn)
-    all_players = pd.read_sql("SELECT id, name, default_team_id FROM players ORDER BY name", conn)
-    conn.close()
+    teams = get_teams_list_full()
+    all_players = get_all_players()
+    
+    # Pre-group rosters for efficiency
+    rosters_by_team = {}
+    if not all_players.empty:
+        for tid, group in all_players.groupby('default_team_id'):
+            rosters_by_team[int(tid)] = group[['name', 'rank']]
     
     groups = ["All"] + sorted(teams['group_name'].dropna().unique().tolist())
     
@@ -1848,52 +1976,49 @@ elif page == "Teams":
     st.markdown("<br>", unsafe_allow_html=True)
     
     show = teams if g == "All" else teams[teams['group_name'] == g]
-    for _, row in show.iterrows():
+    for row in show.itertuples():
         with st.container():
             # Team Header Card
+            b64 = get_base64_image(row.logo_path)
+            logo_img_html = f"<img src='data:image/png;base64,{b64}' width='60'/>" if b64 else "<div style='width:60px;height:60px;background:rgba(255,255,255,0.05);border-radius:8px;display:flex;align-items:center;justify-content:center;color:var(--text-dim);'>?</div>"
+            
             st.markdown(f"""<div class="custom-card" style="margin-bottom: 10px;">
 <div style="display: flex; align-items: center; gap: 20px;">
 <div style="flex-shrink: 0;">
-{"<img src='data:image/png;base64," + base64.b64encode(open(row['logo_path'], "rb").read()).decode() + "' width='60'/>" if row['logo_path'] and is_safe_path(row['logo_path']) and os.path.exists(row['logo_path']) else "<div style='width:60px;height:60px;background:rgba(255,255,255,0.05);border-radius:8px;display:flex;align-items:center;justify-content:center;color:var(--text-dim);'>?</div>"}
+{logo_img_html}
 </div>
 <div>
-<h3 style="margin: 0; color: var(--primary-blue); font-family: 'Orbitron';">{html.escape(str(row['name']))} <span style="color: var(--text-dim); font-size: 0.9rem;">[{html.escape(str(row['tag'] or ''))}]</span></h3>
-<div style="color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">Group {html.escape(str(row['group_name']))}</div>
+<h3 style="margin: 0; color: var(--primary-blue); font-family: 'Orbitron';">{html.escape(str(row.name))} <span style="color: var(--text-dim); font-size: 0.9rem;">[{html.escape(str(row.tag or ''))}]</span></h3>
+<div style="color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">Group {html.escape(str(row.group_name))}</div>
 </div>
 </div>
 </div>""", unsafe_allow_html=True)
             
             with st.expander("Manage Roster & Details"):
-                conn_r = get_conn()
-                roster = pd.read_sql_query(
-                    "SELECT id, name, rank FROM players WHERE default_team_id=? ORDER BY name",
-                    conn_r,
-                    params=(int(row['id']),),
-                )
-                conn_r.close()
+                roster = rosters_by_team.get(int(row.id), pd.DataFrame())
                 
                 if roster.empty:
                     st.info("No players yet")
                 else:
-                    st.dataframe(roster[['name','rank']], hide_index=True, use_container_width=True)
+                    st.dataframe(roster, hide_index=True, use_container_width=True)
                 
                 if st.session_state.get('is_admin'):
                     st.markdown("---")
                     col1, col2 = st.columns(2)
                     with col1:
                         st.caption("Edit Team Details")
-                        with st.form(f"edit_team_{row['id']}"):
-                            new_name = st.text_input("Name", value=row['name'])
-                            new_tag = st.text_input("Tag", value=row['tag'] or "")
-                            new_group = st.text_input("Group", value=row['group_name'] or "")
-                            new_logo = st.text_input("Logo Path", value=row['logo_path'] or "")
+                        with st.form(f"edit_team_{row.id}"):
+                            new_name = st.text_input("Name", value=row.name)
+                            new_tag = st.text_input("Tag", value=row.tag or "")
+                            new_group = st.text_input("Group", value=row.group_name or "")
+                            new_logo = st.text_input("Logo Path", value=row.logo_path or "")
                             if st.form_submit_button("Update Team"):
                                 # Use is_safe_path for validation
                                 if new_logo and not is_safe_path(new_logo):
                                     st.error("Invalid logo path. Path traversal or absolute paths are not allowed.")
                                 else:
                                     conn_u = get_conn()
-                                    conn_u.execute("UPDATE teams SET name=?, tag=?, group_name=?, logo_path=? WHERE id=?", (new_name, new_tag or None, new_group or None, new_logo or None, int(row['id'])))
+                                    conn_u.execute("UPDATE teams SET name=?, tag=?, group_name=?, logo_path=? WHERE id=?", (new_name, new_tag or None, new_group or None, new_logo or None, int(row.id)))
                                     conn_u.commit()
                                     conn_u.close()
                                     st.success("Team updated")
@@ -1903,11 +2028,11 @@ elif page == "Teams":
                         st.caption("Roster Management")
                         # Add player
                         unassigned = all_players[all_players['default_team_id'].isna()]
-                        add_sel = st.selectbox(f"Add Player", [""] + unassigned['name'].tolist(), key=f"add_{row['id']}")
+                        add_sel = st.selectbox(f"Add Player", [""] + unassigned['name'].tolist(), key=f"add_{row.id}")
                         if add_sel:
                             pid = int(all_players[all_players['name'] == add_sel].iloc[0]['id'])
                             conn_a = get_conn()
-                            conn_a.execute("UPDATE players SET default_team_id=? WHERE id=?", (int(row['id']), pid))
+                            conn_a.execute("UPDATE players SET default_team_id=? WHERE id=?", (int(row.id), pid))
                             conn_a.commit()
                             conn_a.close()
                             st.success("Player added")
@@ -1915,7 +2040,7 @@ elif page == "Teams":
                         
                         # Remove player
                         if not roster.empty:
-                            rem_sel = st.selectbox(f"Remove Player", [""] + roster['name'].tolist(), key=f"rem_{row['id']}")
+                            rem_sel = st.selectbox(f"Remove Player", [""] + roster['name'].tolist(), key=f"rem_{row.id}")
                             if rem_sel:
                                 pid = int(roster[roster['name'] == rem_sel].iloc[0]['id'])
                                 conn_d = get_conn()
@@ -1927,7 +2052,8 @@ elif page == "Teams":
         st.markdown("<br>", unsafe_allow_html=True)
 
 elif page == "Playoffs":
-    st.markdown('<h1 class="main-header">PLAYOFFS BRACKETS</h1>', unsafe_allow_html=True)
+    import pandas as pd
+    st.markdown('<h1 class="main-header">PLAYOFFS</h1>', unsafe_allow_html=True)
     
     if not st.session_state.get('is_admin'):
         st.warning("Playoffs are currently in staging. Only administrators can view this page.")
@@ -1942,15 +2068,13 @@ elif page == "Playoffs":
         standings_df = get_standings()
         if not standings_df.empty:
             ref_cols = st.columns(4)
-            for i, (_, row) in enumerate(standings_df.head(24).iterrows()):
+            for i, row in enumerate(standings_df.head(24).itertuples()):
                 with ref_cols[i % 4]:
-                    st.markdown(f"<small>#{i+1}: {row['name']}</small>", unsafe_allow_html=True)
+                    st.markdown(f"<small>#{i+1}: {row.name}</small>", unsafe_allow_html=True)
         st.divider()
 
-        conn = get_conn()
-        teams_df = pd.read_sql("SELECT id, name FROM teams ORDER BY name", conn)
-        conn.close()
-        tnames = [""] + teams_df['name'].tolist()
+        teams_df = get_teams_list()
+        tnames = [""] + (teams_df['name'].tolist() if not teams_df.empty else [])
         
         with st.form("add_playoff_match"):
             c1, c2, c3 = st.columns(3)
@@ -1987,7 +2111,8 @@ elif page == "Playoffs":
     # Match Map Editor for Playoffs (Admin Only)
     if not df.empty:
         with st.expander("📝 Edit Playoff Match Scores & Maps"):
-            match_opts = df.apply(lambda r: f"R{r['playoff_round']} P{r['bracket_pos']}: {r['t1_name']} vs {r['t2_name']}", axis=1).tolist()
+            # Vectorized option generation
+            match_opts = ("R" + df['playoff_round'].astype(str) + " P" + df['bracket_pos'].astype(str) + ": " + df['t1_name'].fillna('') + " vs " + df['t2_name'].fillna('')).tolist()
             idx = st.selectbox("Select Playoff Match to Edit", list(range(len(match_opts))), format_func=lambda i: match_opts[i], key="po_edit_idx")
             m = df.iloc[idx]
             
@@ -2059,8 +2184,7 @@ elif page == "Playoffs":
         standings_df = get_standings()
         team_to_rank = {}
         if not standings_df.empty:
-            for i, (_, row) in enumerate(standings_df.iterrows()):
-                team_to_rank[row['name']] = i + 1
+            team_to_rank = dict(zip(standings_df['name'], range(1, len(standings_df) + 1)))
 
         # Define Rounds
         rounds = {
@@ -2193,6 +2317,8 @@ elif page == "Playoffs":
                         """, unsafe_allow_html=True)
 
 elif page == "Admin Panel":
+    import pandas as pd
+    import numpy as np
     st.markdown('<h1 class="main-header">ADMIN PANEL</h1>', unsafe_allow_html=True)
     if not st.session_state.get('is_admin'):
         st.warning("Admin only")
@@ -2249,10 +2375,7 @@ elif page == "Admin Panel":
                     except Exception:
                         st.error("Failed to create admin")
         st.subheader("Match Editor")
-        conn = get_conn()
-        weeks_df = pd.read_sql_query("SELECT DISTINCT week FROM matches ORDER BY week", conn)
-        conn.close()
-        wk_list = weeks_df['week'].tolist() if not weeks_df.empty else []
+        wk_list = get_match_weeks()
         wk = st.selectbox("Week", wk_list) if wk_list else None
         if wk is None:
             st.info("No matches yet")
@@ -2261,7 +2384,8 @@ elif page == "Admin Panel":
             if dfm.empty:
                 st.info("No matches for this week")
             else:
-                match_opts = dfm.apply(lambda r: f"ID {r['id']}: {r['t1_name']} vs {r['t2_name']} ({r['group_name']})", axis=1).tolist()
+                # Vectorized option generation
+                match_opts = ("ID " + dfm['id'].astype(str) + ": " + dfm['t1_name'].fillna('') + " vs " + dfm['t2_name'].fillna('') + " (" + dfm['group_name'].fillna('') + ")").tolist()
                 idx = st.selectbox("Match", list(range(len(match_opts))), format_func=lambda i: match_opts[i])
                 m = dfm.iloc[idx]
 
@@ -2298,73 +2422,26 @@ elif page == "Admin Panel":
                                         st.error(err)
                                     else:
                                         # Save to session state for scoreboard reuse
-                                        json_suggestions = {}
-                                        segments = jsdata.get("data", {}).get("segments", [])
-                                        for seg in segments:
-                                            if seg.get("type") == "player-summary":
-                                                rid = seg.get("metadata", {}).get("platformInfo", {}).get("platformUserIdentifier")
-                                                if rid:
-                                                    rid = str(rid).strip()
-                                                agent = seg.get("metadata", {}).get("agentName")
-                                                st_map = seg.get("stats", {})
-                                                acs = st_map.get("scorePerRound", {}).get("value", 0)
-                                                k = st_map.get("kills", {}).get("value", 0)
-                                                d = st_map.get("deaths", {}).get("value", 0)
-                                                a = st_map.get("assists", {}).get("value", 0)
-                                                if rid:
-                                                    json_suggestions[rid] = {
-                                                        'acs': int(acs) if acs is not None else 0, 
-                                                        'k': int(k) if k is not None else 0, 
-                                                        'd': int(d) if d is not None else 0, 
-                                                        'a': int(a) if a is not None else 0, 
-                                                        'agent': agent,
-                                                        'conf': 100.0
-                                                    }
-                                        st.session_state[f"ocr_{m['id']}_{i}"] = json_suggestions
-                                        
-                                        # Extract map name and rounds
-                                        map_name = jsdata.get("data", {}).get("metadata", {}).get("mapName")
-                                        
-                                        # Improved Team Matching
-                                        # Get roster Riot IDs for Team 1
-                                        conn_roster = get_conn()
                                         cur_t1_id = int(m.get('t1_id', m.get('team1_id')))
-                                        t1_roster = pd.read_sql("SELECT riot_id FROM players WHERE default_team_id=?", conn_roster, params=(cur_t1_id,))['riot_id'].dropna().tolist()
-                                        conn_roster.close()
-                                        t1_roster = [str(r).strip().lower() for r in t1_roster]
-
-                                        team_segments = [s for s in segments if s.get("type") == "team-summary"]
-                                        player_segments = [s for s in segments if s.get("type") == "player-summary"]
+                                        json_suggestions, map_name, t1_r, t2_r = parse_tracker_json(jsdata, cur_t1_id)
                                         
-                                        t1_r = 0
-                                        t2_r = 0
-                                        
-                                        if len(team_segments) >= 2:
-                                            # Determine which Tracker team is our Team 1 by checking players
-                                            tracker_team_1_id = team_segments[0].get("attributes", {}).get("teamId")
-                                            
-                                            # Count how many of our Team 1 players are in Tracker's first team
-                                            t1_matches = 0
-                                            for p_seg in player_segments:
-                                                if p_seg.get("metadata", {}).get("teamId") == tracker_team_1_id:
-                                                    rid = p_seg.get("metadata", {}).get("platformInfo", {}).get("platformUserIdentifier")
-                                                    if rid and str(rid).strip().lower() in t1_roster:
-                                                        t1_matches += 1
-                                            
-                                            if t1_matches >= 1: # Found at least one player from our Team 1 in Tracker Team 1
-                                                t1_r = team_segments[0].get("stats", {}).get("roundsWon", {}).get("value", 0)
-                                                t2_r = team_segments[1].get("stats", {}).get("roundsWon", {}).get("value", 0)
-                                            else: # Team 2 is likely Tracker's Team 1
-                                                t1_r = team_segments[1].get("stats", {}).get("roundsWon", {}).get("value", 0)
-                                                t2_r = team_segments[0].get("stats", {}).get("roundsWon", {}).get("value", 0)
-                                        
+                                        st.session_state[f"ocr_{m['id']}_{i}"] = json_suggestions
                                         st.session_state[f"scraped_data_{m['id']}_{i}"] = {
                                             'map_name': map_name,
                                             't1_rounds': int(t1_r),
                                             't2_rounds': int(t2_r)
                                         }
                                         st.session_state[f"scraped_url_{m['id']}_{i}"] = turl
-                                        st.success("Map data scraped!")
+
+                                        # Save to file for caching
+                                        mid_match = re.search(r'match/([a-zA-Z0-9\-]+)', turl)
+                                        if mid_match:
+                                            mid = mid_match.group(1)
+                                            if not os.path.exists("matches"): os.makedirs("matches")
+                                            with open(os.path.join("matches", f"match_{mid}.json"), 'w', encoding='utf-8') as f:
+                                                json.dump(jsdata, f, indent=4)
+                                        
+                                        st.success("Map data scraped and scoreboard pre-filled!")
 
                         scraped = st.session_state.get(f"scraped_data_{m['id']}_{i}")
                         
@@ -2420,136 +2497,143 @@ elif page == "Admin Panel":
                 st.subheader("Per-Map Scoreboard")
                 map_choice = st.selectbox("Select Map", list(range(1, max_maps+1)), index=0)
                 map_idx = map_choice - 1
-                conn_all0 = get_conn()
-                all_df0 = pd.read_sql("SELECT id, name, riot_id FROM players ORDER BY name", conn_all0)
-                conn_all0.close()
-                name_to_riot = dict(zip(all_df0['name'].astype(str), all_df0['riot_id'].astype(str)))
                 
-                # Match ID input for automatic pre-filling from folder
+                all_df0 = get_all_players()
+                name_to_riot = dict(zip(all_df0['name'].astype(str), all_df0['riot_id'].astype(str))) if not all_df0.empty else {}
+                
+                # Match ID or Link input for automatic pre-filling
                 col_json1, col_json2, col_json3 = st.columns([2, 1, 1])
                 with col_json1:
-                    match_id_input = st.text_input("Enter Match ID to load JSON data", key=f"mid_{m['id']}_{map_idx}")
+                    match_input = st.text_input("Enter Tracker.gg Link or Match ID", key=f"mid_{m['id']}_{map_idx}", placeholder="https://tracker.gg/valorant/match/...")
                 with col_json2:
-                    if st.button("Force Apply JSON", key=f"force_json_{m['id']}_{map_idx}"):
-                        st.session_state[f"force_apply_{m['id']}_{map_idx}"] = True
+                    if st.button("Force Apply", key=f"force_json_{m['id']}_{map_idx}"):
+                        st.session_state[f"force_apply_{m['id']}_{map_idx}"] = st.session_state.get(f"force_apply_{m['id']}_{map_idx}", 0) + 1
+                        st.rerun()
                 with col_json3:
-                    st.info("💡 **Pro Tip:** Use the **Tracker.gg Scraper** in the 'Per-Map Scores' section above to automatically pre-fill rounds and scoreboard data for this map!")
+                    st.info("💡 **Tip:** Paste a Tracker.gg match link to automatically fetch rounds and stats!")
 
-                force_apply = st.session_state.get(f"force_apply_{m['id']}_{map_idx}", False)
-                if match_id_input:
-                    # Sanitize input to prevent path traversal
-                    match_id_input = re.sub(r'[^a-zA-Z0-9\-]', '', match_id_input)
-                    json_filename = f"match_{match_id_input}.json"
-                    json_path = os.path.join("matches", json_filename)
-                    
-                    if os.path.exists(json_path):
-                        try:
-                            with open(json_path, 'r', encoding='utf-8') as f:
-                                jsdata = json.load(f)
-                            json_suggestions = {}
-                            segments = jsdata.get("data", {}).get("segments", [])
-                            
-                            # First pass: find team names/IDs to identify which Tracker team is which
-                            tracker_team_1_id = None
-                            team_segments = [s for s in segments if s.get("type") == "team-summary"]
-                            if len(team_segments) >= 2:
-                                # Use Riot IDs to match teams
-                                conn_roster = get_conn()
-                                # Safely get team ID from m
-                                cur_t1_id = int(m.get('t1_id', m.get('team1_id')))
-                                t1_roster = pd.read_sql("SELECT riot_id FROM players WHERE default_team_id=?", conn_roster, params=(cur_t1_id,))['riot_id'].dropna().tolist()
-                                conn_roster.close()
-                                t1_roster = [str(r).strip().lower() for r in t1_roster]
-                                
-                                potential_t1_id = team_segments[0].get("attributes", {}).get("teamId")
-                                t1_matches = 0
-                                for p_seg in [s for s in segments if s.get("type") == "player-summary"]:
-                                    if p_seg.get("metadata", {}).get("teamId") == potential_t1_id:
-                                        rid = p_seg.get("metadata", {}).get("platformInfo", {}).get("platformUserIdentifier")
-                                        if rid and str(rid).strip().lower() in t1_roster:
-                                            t1_matches += 1
-                                
-                                if t1_matches >= 1:
-                                    tracker_team_1_id = potential_t1_id
+                if match_input:
+                    jsdata = None
+                    # 1. Try if it's a URL
+                    if "tracker.gg" in match_input:
+                        if f"scraped_data_{m['id']}_{map_idx}" not in st.session_state or st.session_state.get(f"scraped_url_{m['id']}_{map_idx}") != match_input:
+                            with st.spinner("Scraping Tracker.gg..."):
+                                jsdata, err = scrape_tracker_match(match_input)
+                                if err:
+                                    st.error(err)
                                 else:
-                                    tracker_team_1_id = team_segments[1].get("attributes", {}).get("teamId")
+                                    st.session_state[f"scraped_url_{m['id']}_{map_idx}"] = match_input
+                                    # Save to file for caching/offline use
+                                    match_id_match = re.search(r'match/([a-zA-Z0-9\-]+)', match_input)
+                                    if match_id_match:
+                                        mid = match_id_match.group(1)
+                                        if not os.path.exists("matches"): os.makedirs("matches")
+                                        with open(os.path.join("matches", f"match_{mid}.json"), 'w', encoding='utf-8') as f:
+                                            json.dump(jsdata, f, indent=4)
+                    else:
+                        # 2. Treat as Match ID and load from folder
+                        match_id_clean = re.sub(r'[^a-zA-Z0-9\-]', '', match_input)
+                        json_filename = f"match_{match_id_clean}.json"
+                        json_path = os.path.join("matches", json_filename)
+                        if os.path.exists(json_path):
+                            try:
+                                with open(json_path, 'r', encoding='utf-8') as f:
+                                    jsdata = json.load(f)
+                            except Exception as e:
+                                st.error(f"JSON Error: {str(e)}")
+                        else:
+                            st.warning(f"File '{json_filename}' not found in 'matches' folder.")
 
-                            for seg in segments:
-                                if seg.get("type") == "player-summary":
-                                    rid = seg.get("metadata", {}).get("platformInfo", {}).get("platformUserIdentifier")
-                                    if rid:
-                                        rid = str(rid).strip()
-                                    agent = seg.get("metadata", {}).get("agentName")
-                                    st_map = seg.get("stats", {})
-                                    acs = st_map.get("scorePerRound", {}).get("value", 0)
-                                    k = st_map.get("kills", {}).get("value", 0)
-                                    d = st_map.get("deaths", {}).get("value", 0)
-                                    a = st_map.get("assists", {}).get("value", 0)
-                                    t_id = seg.get("metadata", {}).get("teamId")
-                                    
-                                    # Assign to our internal Team 1 or Team 2
-                                    our_team_num = 1 if t_id == tracker_team_1_id else 2
-                                    
-                                    if rid:
-                                        json_suggestions[rid] = {
-                                            'acs': int(acs) if acs is not None else 0, 
-                                            'k': int(k) if k is not None else 0, 
-                                            'd': int(d) if d is not None else 0, 
-                                            'a': int(a) if a is not None else 0, 
-                                            'agent': agent,
-                                            'team_num': our_team_num,
-                                            'conf': 100.0
-                                        }
+                    if jsdata:
+                        try:
+                            cur_t1_id = int(m.get('t1_id', m.get('team1_id')))
+                            json_suggestions, map_name, t1_r, t2_r = parse_tracker_json(jsdata, cur_t1_id)
+                            
                             st.session_state[f"ocr_{m['id']}_{map_idx}"] = json_suggestions
-                            st.success(f"JSON file '{json_filename}' loaded and parsed.")
+                            st.session_state[f"scraped_data_{m['id']}_{map_idx}"] = {
+                                'map_name': map_name,
+                                't1_rounds': int(t1_r),
+                                't2_rounds': int(t2_r)
+                            }
+                            # Trigger force apply
+                            st.session_state[f"force_apply_{m['id']}_{map_idx}"] = st.session_state.get(f"force_apply_{m['id']}_{map_idx}", 0) + 1
+                            st.success("Data loaded! Rounds and scoreboard pre-filled.")
                             st.rerun()
                         except Exception as e:
-                            st.error(f"JSON Error: {str(e)}")
-                    else:
-                        st.warning(f"File '{json_filename}' not found in 'matches' folder.")
+                            st.error(f"Processing Error: {str(e)}")
+                
+                force_apply = st.session_state.get(f"force_apply_{m['id']}_{map_idx}", False)
+
+                # Pre-fetch shared data outside the loop
+                agents_list = get_agents_list()
+                all_df = get_all_players()
+                
+                # Vectorized global list and map creation
+                if not all_df.empty:
+                    has_riot = all_df['riot_id'].notna() & (all_df['riot_id'].str.strip() != "")
+                    all_df['display_label'] = all_df['name']
+                    all_df.loc[has_riot, 'display_label'] = all_df.loc[has_riot, 'riot_id'].astype(str) + " (" + all_df.loc[has_riot, 'name'] + ")"
+                    global_list = all_df['display_label'].tolist()
+                    global_map = dict(zip(global_list, all_df['id']))
+                    label_to_riot = dict(zip(all_df.loc[has_riot, 'display_label'], all_df.loc[has_riot, 'riot_id'].str.strip().str.lower()))
+                    riot_to_label = {v: k for k, v in label_to_riot.items()}
+                else:
+                    global_list = []
+                    global_map = {}
+                    label_to_riot = {}
+                    riot_to_label = {}
+
+                # Vectorized player lookup creation (common for both teams)
+                player_lookup = {}
+                if not all_df.empty:
+                    player_lookup = {
+                        row.id: {
+                            'label': row.display_label,
+                            'riot_id': str(row.riot_id).strip().lower() if pd.notna(row.riot_id) and str(row.riot_id).strip() else None
+                        }
+                        for row in all_df.itertuples()
+                    }
+
+                # Fetch all stats for this match and map index at once to reduce DB calls
+                conn_p = get_conn()
+                all_map_stats = pd.read_sql(
+                    "SELECT * FROM match_stats_map WHERE match_id=? AND map_index=?", 
+                    conn_p, 
+                    params=(int(m['id']), map_idx)
+                )
+                conn_p.close()
 
                 for team_key, team_id, team_name in [("t1", int(m.get('t1_id', m.get('team1_id'))), m['t1_name']), ("t2", int(m.get('t2_id', m.get('team2_id'))), m['t2_name'])]:
                     st.caption(f"{team_name} players")
-                    conn_p = get_conn()
-                    roster_df = pd.read_sql("SELECT id, name, riot_id FROM players WHERE default_team_id=? ORDER BY name", conn_p, params=(team_id,))
-                    agents_df = pd.read_sql("SELECT name FROM agents ORDER BY name", conn_p)
-                    existing = pd.read_sql("SELECT * FROM match_stats_map WHERE match_id=? AND map_index=? AND team_id=?", conn_p, params=(int(m['id']), map_idx, team_id))
-                    conn_p.close()
-                    conn_all = get_conn()
-                    all_df = pd.read_sql("SELECT id, name, riot_id FROM players ORDER BY name", conn_all)
-                    conn_all.close()
-                    roster_list = roster_df.apply(lambda r: (f"{str(r['riot_id'])} ({r['name']})" if pd.notna(r['riot_id']) and str(r['riot_id']).strip() else r['name']), axis=1).tolist()
+                    
+                    # Filter roster from all_df instead of querying DB
+                    roster_df = all_df[all_df['default_team_id'] == team_id].sort_values('name')
+                    
+                    # Filter existing stats from the pre-fetched all_map_stats
+                    existing = all_map_stats[all_map_stats['team_id'] == team_id]
+                    
+                    roster_list = roster_df['display_label'].tolist() if not roster_df.empty else []
                     roster_map = dict(zip(roster_list, roster_df['id']))
-                    global_list = all_df.apply(lambda r: (f"{str(r['riot_id'])} ({r['name']})" if pd.notna(r['riot_id']) and str(r['riot_id']).strip() else r['name']), axis=1).tolist()
-                    global_map = dict(zip(global_list, all_df['id']))
-                    # Improved label_to_riot to handle NaN correctly and normalize to lowercase
-                    label_to_riot = {label: str(rid).strip().lower() for label, rid in zip(global_list, all_df['riot_id']) if pd.notna(rid) and str(rid).strip()}
-                    riot_to_label = {v: k for k, v in label_to_riot.items()}
-                    agents_list = agents_df['name'].tolist()
                     rows = []
                     
                     sug = st.session_state.get(f"ocr_{m['id']}_{map_idx}", {})
                     our_team_num = 1 if team_key == "t1" else 2
                     
                     if not existing.empty and not force_apply:
-                        for _, r in existing.iterrows():
+                        for r in existing.itertuples():
                             pname = ""
                             rid = None
-                            if r['player_id']:
-                                rp = get_conn().execute("SELECT name, riot_id FROM players WHERE id=?", (r['player_id'],)).fetchone()
-                                if rp:
-                                    pname = (f"{str(rp[1])} ({rp[0]})" if rp[1] else rp[0])
-                                    rid = str(rp[1]).strip() if rp[1] else None
+                            if r.player_id in player_lookup:
+                                pname = player_lookup[r.player_id]['label']
+                                rid = player_lookup[r.player_id]['riot_id']
                             
                             sfname = ""
-                            if r['subbed_for_id']:
-                                sp = get_conn().execute("SELECT name, riot_id FROM players WHERE id=?", (r['subbed_for_id'],)).fetchone()
-                                if sp:
-                                    sfname = (f"{str(sp[1])} ({sp[0]})" if sp[1] else sp[0])
+                            if r.subbed_for_id in player_lookup:
+                                sfname = player_lookup[r.subbed_for_id]['label']
                             
                             # Merge with JSON if existing stats are 0
-                            acs, k, d, a = int(r['acs'] or 0), int(r['kills'] or 0), int(r['deaths'] or 0), int(r['assists'] or 0)
-                            agent = r['agent'] or (agents_list[0] if agents_list else "")
+                            acs, k, d, a = int(r.acs or 0), int(r.kills or 0), int(r.deaths or 0), int(r.assists or 0)
+                            agent = r.agent or (agents_list[0] if agents_list else "")
                             
                             if rid and rid in sug and acs == 0 and k == 0:
                                 s = sug[rid]
@@ -2558,7 +2642,7 @@ elif page == "Admin Panel":
                                 
                             rows.append({
                                 'player': pname,
-                                'is_sub': bool(r['is_sub']),
+                                'is_sub': bool(r.is_sub),
                                 'subbed_for': sfname or (roster_list[0] if roster_list else ""),
                                 'agent': agent,
                                 'acs': acs,
@@ -2567,71 +2651,66 @@ elif page == "Admin Panel":
                                 'a': a,
                             })
                     else:
-                        # For new maps OR if we want to pre-fill from JSON
-                        # 1. Identify players from JSON for this team
+                        # New Logic for JSON pre-fill with substitution support
                         team_sug_rids = [rid for rid, s in sug.items() if s.get('team_num') == our_team_num]
+                        roster_labels = roster_list
                         
-                        # 2. Match these RIDs to DB labels
-                        used_roster_indices = set()
-                        json_players_added = 0
+                        json_roster_matches = [] # (rid, label, stats)
+                        json_subs = [] # (rid, label_or_none, stats)
                         
                         for rid in team_sug_rids:
                             s = sug[rid]
-                            # Use lowercase for matching against our normalized riot_to_label keys
-                            db_label = riot_to_label.get(rid.lower())
+                            l_rid = rid.lower()
+                            db_label = riot_to_label.get(l_rid)
                             
-                            if db_label:
-                                is_sub = False
-                                subbed_for = ""
-                                
-                                # Check if they are in roster
-                                if db_label in roster_list:
-                                    idx = roster_list.index(db_label)
-                                    used_roster_indices.add(idx)
-                                    subbed_for = db_label
-                                else:
-                                    is_sub = True
-                                    # Will assign subbed_for later from unused roster players
-                                
-                                rows.append({
-                                    'player': db_label,
-                                    'is_sub': is_sub,
-                                    'subbed_for': subbed_for,
-                                    'agent': s.get('agent') or (agents_list[0] if agents_list else ""),
-                                    'acs': s['acs'], 
-                                    'k': s['k'], 
-                                    'd': s['d'], 
-                                    'a': s['a']
-                                })
-                                json_players_added += 1
-
-                        # 3. Fill remaining slots with roster players not already in JSON
-                        remaining_slots = 5 - len(rows)
-                        if remaining_slots > 0:
-                            for i, r_label in enumerate(roster_list):
-                                if i not in used_roster_indices and len(rows) < 5:
-                                    rows.append({
-                                        'player': r_label,
-                                        'is_sub': False,
-                                        'subbed_for': r_label,
-                                        'agent': agents_list[0] if agents_list else "",
-                                        'acs': 0, 'k': 0, 'd': 0, 'a': 0
-                                    })
+                            if db_label in roster_labels:
+                                json_roster_matches.append((rid, db_label, s))
+                            else:
+                                json_subs.append((rid, db_label, s))
                         
-                        # 4. Assign subbed_for for the subs we added
-                        unused_roster = [roster_list[i] for i in range(len(roster_list)) if i not in used_roster_indices]
-                        for row in rows:
-                            if row['is_sub'] and not row['subbed_for'] and unused_roster:
-                                row['subbed_for'] = unused_roster.pop(0)
-                            elif not row['subbed_for'] and roster_list:
-                                row['subbed_for'] = roster_list[0]
-
-                        # 5. Final fallback to 5 rows
+                        used_roster_labels = [m[1] for m in json_roster_matches]
+                        missing_roster_labels = [l for l in roster_labels if l not in used_roster_labels]
+                        
+                        rows = []
+                        # 1. Add roster matches
+                        for rid, label, s in json_roster_matches:
+                            rows.append({
+                                'player': label,
+                                'is_sub': False,
+                                'subbed_for': label,
+                                'agent': s.get('agent') or (agents_list[0] if agents_list else ""),
+                                'acs': s['acs'], 'k': s['k'], 'd': s['d'], 'a': s['a']
+                            })
+                            
+                        # 2. Add subs (mapping to missing roster players)
+                        for rid, db_label, s in json_subs:
+                            if len(rows) >= 5: break
+                            subbed_for = missing_roster_labels.pop(0) if missing_roster_labels else (roster_labels[0] if roster_labels else "")
+                            rows.append({
+                                'player': db_label or "",
+                                'is_sub': True,
+                                'subbed_for': subbed_for,
+                                'agent': s.get('agent') or (agents_list[0] if agents_list else ""),
+                                'acs': s['acs'], 'k': s['k'], 'd': s['d'], 'a': s['a']
+                            })
+                            
+                        # 3. Fill remaining slots with missing roster players
+                        while len(rows) < 5 and missing_roster_labels:
+                            l = missing_roster_labels.pop(0)
+                            rows.append({
+                                'player': l,
+                                'is_sub': False,
+                                'subbed_for': l,
+                                'agent': agents_list[0] if agents_list else "",
+                                'acs': 0, 'k': 0, 'd': 0, 'a': 0
+                            })
+                            
+                        # 4. Final fallback to 5 rows
                         while len(rows) < 5:
                             rows.append({
-                                'player': global_list[0] if global_list else "",
+                                'player': "",
                                 'is_sub': False,
-                                'subbed_for': roster_list[0] if roster_list else "",
+                                'subbed_for': roster_labels[0] if roster_labels else "",
                                 'agent': agents_list[0] if agents_list else "",
                                 'acs': 0, 'k': 0, 'd': 0, 'a': 0
                             })
@@ -2658,17 +2737,22 @@ elif page == "Admin Panel":
                                 p_idx = len(global_list) # Empty
 
                             # Use a unique key for the inputs to force refresh when JSON changes or Force Apply is clicked
-                            input_key_suffix = f"{m['id']}_{map_idx}_{team_key}_{i}"
-                            if force_apply or match_id_input:
-                                # Append a hash of the JSON suggestions to the key to force refresh
+                            # We include the hash of suggestions and the force apply counter to ensure inputs update
+                            force_cnt = st.session_state.get(f"force_apply_{m['id']}_{map_idx}", 0)
+                            input_key_suffix = f"{m['id']}_{map_idx}_{team_key}_{i}_{force_cnt}"
+                            if sug:
                                 input_key_suffix += f"_{hash(str(sug))}"
-
+                            
                             psel = c1.selectbox(f"P_{input_key_suffix}", global_list + [""], index=p_idx, label_visibility="collapsed")
+                            rid_psel = label_to_riot.get(psel)
+                            
+                            # Update key suffix for stats inputs to include the selected player
+                            # This ensures that changing a player updates their stats from suggestions
+                            stats_key_suffix = input_key_suffix + f"_{rid_psel}"
+                            
                             is_sub = c2.checkbox(f"S_{input_key_suffix}", value=rowd['is_sub'], label_visibility="collapsed")
                             sf_sel = c3.selectbox(f"SF_{input_key_suffix}", roster_list + [""], index=(roster_list.index(rowd['subbed_for']) if rowd['subbed_for'] in roster_list else (0 if roster_list else 0)), label_visibility="collapsed")
                             ag_sel = c4.selectbox(f"Ag_{input_key_suffix}", agents_list + [""], index=(agents_list.index(rowd['agent']) if rowd['agent'] in agents_list else (0 if agents_list else 0)), label_visibility="collapsed")
-                            
-                            rid_psel = label_to_riot.get(psel)
                             
                             # Final fallback: if selectbox changed, try to get suggestion again
                             current_sug = sug.get(rid_psel, {}) if rid_psel else {}
@@ -2679,10 +2763,10 @@ elif page == "Admin Panel":
                             val_a = current_sug.get('a', rowd['a'])
                             val_conf = current_sug.get('conf', '-')
                             
-                            acs = c5.number_input(f"ACS_{input_key_suffix}", min_value=0, value=int(val_acs), label_visibility="collapsed")
-                            k = c6.number_input(f"K_{input_key_suffix}", min_value=0, value=int(val_k), label_visibility="collapsed")
-                            d = c7.number_input(f"D_{input_key_suffix}", min_value=0, value=int(val_d), label_visibility="collapsed")
-                            a = c8.number_input(f"A_{input_key_suffix}", min_value=0, value=int(val_a), label_visibility="collapsed")
+                            acs = c5.number_input(f"ACS_{stats_key_suffix}", min_value=0, value=int(val_acs), label_visibility="collapsed")
+                            k = c6.number_input(f"K_{stats_key_suffix}", min_value=0, value=int(val_k), label_visibility="collapsed")
+                            d = c7.number_input(f"D_{stats_key_suffix}", min_value=0, value=int(val_d), label_visibility="collapsed")
+                            a = c8.number_input(f"A_{stats_key_suffix}", min_value=0, value=int(val_a), label_visibility="collapsed")
                             c9.write(val_conf)
                             
                             entries.append({
@@ -2699,21 +2783,29 @@ elif page == "Admin Panel":
                         if submit:
                             conn_s = get_conn()
                             conn_s.execute("DELETE FROM match_stats_map WHERE match_id=? AND map_index=? AND team_id=?", (int(m['id']), map_idx, team_id))
+                            
+                            # Pre-fetch all player Riot IDs for the entries to avoid queries in loop
+                            entry_p_ids = [e['player_id'] for e in entries if e['player_id']]
+                            p_riot_map = {}
+                            if entry_p_ids:
+                                placeholders = ",".join(["?"] * len(entry_p_ids))
+                                p_riots = conn_s.execute(f"SELECT id, riot_id FROM players WHERE id IN ({placeholders})", entry_p_ids).fetchall()
+                                p_riot_map = {r[0]: r[1] for r in p_riots}
+
                             for e in entries:
                                 if e['player_id']:
                                     # Auto-complete stats from JSON if they are 0 and player has suggestion
                                     final_acs, final_k, final_d, final_a = e['acs'], e['kills'], e['deaths'], e['assists']
                                     final_agent = e['agent']
                                     
-                                    # Get Riot ID for this player to check suggestions
-                                    rp_info = conn_s.execute("SELECT riot_id FROM players WHERE id=?", (e['player_id'],)).fetchone()
-                                    if rp_info and rp_info[0]:
-                                        rid_key = str(rp_info[0]).strip()
-                                        if rid_key in sug and final_acs == 0 and final_k == 0:
-                                            s = sug[rid_key]
-                                            final_acs, final_k, final_d, final_a = s['acs'], s['k'], s['d'], s['a']
-                                            if not final_agent:
-                                                final_agent = s.get('agent')
+                                    # Get Riot ID for this player from pre-fetched map
+                                    rid_raw = p_riot_map.get(e['player_id'])
+                                    rid_key = str(rid_raw).strip().lower() if rid_raw else None
+                                    if rid_key and rid_key in sug and final_acs == 0 and final_k == 0:
+                                        s = sug[rid_key]
+                                        final_acs, final_k, final_d, final_a = s['acs'], s['k'], s['d'], s['a']
+                                        if not final_agent:
+                                            final_agent = s.get('agent')
 
                                     conn_s.execute(
                                         "INSERT INTO match_stats_map (match_id, map_index, team_id, player_id, is_sub, subbed_for_id, agent, acs, kills, deaths, assists) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -2728,19 +2820,10 @@ elif page == "Admin Panel":
 
         st.divider()
         st.subheader("Players Admin")
-        conn_pa = get_conn()
-        players_df = pd.read_sql(
-            """
-            SELECT p.id, p.name, p.riot_id, p.rank, t.name AS team
-            FROM players p
-            LEFT JOIN teams t ON p.default_team_id = t.id
-            ORDER BY p.name
-            """,
-            conn_pa
-        )
-        teams_list = pd.read_sql("SELECT id, name FROM teams ORDER BY name", conn_pa)
-        conn_pa.close()
-        team_names = teams_list['name'].tolist()
+        players_df = get_all_players_directory()
+        teams_list = get_teams_list()
+        
+        team_names = teams_list['name'].tolist() if not teams_list.empty else []
         team_map = dict(zip(teams_list['name'], teams_list['id']))
         rvals = ["Unranked","Iron","Bronze","Silver","Gold","Platinum","Diamond","Ascendant","Immortal","Radiant"]
         rvals_all = sorted(list(set(rvals + players_df['rank'].dropna().unique().tolist())))
@@ -2754,12 +2837,118 @@ elif page == "Admin Panel":
                 add_ok = st.form_submit_button("Create Player")
                 if add_ok and nm_new:
                     conn_add = get_conn()
+                    # Check for duplicates
+                    rid_clean = rid_new.strip() if rid_new else ""
+                    nm_clean = nm_new.strip()
+                    
+                    if rid_clean:
+                        existing_rid = pd.read_sql("SELECT name FROM players WHERE LOWER(riot_id) = ?", conn_add, params=(rid_clean.lower(),))
+                        if not existing_rid.empty:
+                            st.error(f"Error: A player ('{existing_rid.iloc[0]['name']}') already has Riot ID '{rid_clean}'.")
+                            conn_add.close()
+                            return
+                    
+                    existing_name = pd.read_sql("SELECT id FROM players WHERE LOWER(name) = ?", conn_add, params=(nm_clean.lower(),))
+                    if not existing_name.empty:
+                        st.error(f"Error: A player named '{nm_clean}' already exists.")
+                        conn_add.close()
+                        return
+
                     dtid_new = team_map.get(tmn_new) if tmn_new else None
-                    conn_add.execute("INSERT INTO players (name, riot_id, rank, default_team_id) VALUES (?, ?, ?, ?)", (nm_new, rid_new, rk_new, dtid_new))
+                    conn_add.execute("INSERT INTO players (name, riot_id, rank, default_team_id) VALUES (?, ?, ?, ?)", (nm_clean, rid_clean, rk_new, dtid_new))
                     conn_add.commit()
                     conn_add.close()
                     st.success("Player added")
                     st.rerun()
+            
+            if st.button("🔍 Cleanup Duplicate Players", help="Merge players with exact same Riot ID or case-insensitive name"):
+                conn_clean = get_conn()
+                try:
+                    players = pd.read_sql("SELECT id, name, riot_id FROM players", conn_clean)
+                    players['name_lower'] = players['name'].str.lower().str.strip()
+                    players['riot_lower'] = players['riot_id'].str.lower().str.strip().fillna("")
+                    
+                    merged_count = 0
+                    # 1. Exact Riot ID duplicates
+                    riot_dupes = players[players['riot_lower'] != ""][players.duplicated('riot_lower', keep=False)]
+                    for rid, group in riot_dupes.groupby('riot_lower'):
+                        group = group.sort_values('id')
+                        keep_id = group.iloc[0]['id']
+                        remove_ids = group.iloc[1:]['id'].tolist()
+                        for rid_to_rem in remove_ids:
+                            conn_clean.execute("UPDATE match_stats_map SET player_id = ? WHERE player_id = ?", (int(keep_id), int(rid_to_rem)))
+                            conn_clean.execute("UPDATE match_stats_map SET subbed_for_id = ? WHERE subbed_for_id = ?", (int(keep_id), int(rid_to_rem)))
+                            conn_clean.execute("DELETE FROM players WHERE id = ?", (int(rid_to_rem),))
+                            merged_count += 1
+                    
+                    # 2. Case-insensitive Name duplicates (only if Riot ID matches or one is empty)
+                    name_dupes = players[players.duplicated('name_lower', keep=False)]
+                    for name, group in name_dupes.groupby('name_lower'):
+                        group = group.sort_values('id')
+                        keep_id = group.iloc[0]['id']
+                        remove_ids = group.iloc[1:]['id'].tolist()
+                        for rid_to_rem in remove_ids:
+                            # Re-verify it still exists (might have been deleted by Riot ID check)
+                            exists = conn_clean.execute("SELECT id FROM players WHERE id=?", (int(rid_to_rem),)).fetchone()
+                            if exists:
+                                conn_clean.execute("UPDATE match_stats_map SET player_id = ? WHERE player_id = ?", (int(keep_id), int(rid_to_rem)))
+                                conn_clean.execute("UPDATE match_stats_map SET subbed_for_id = ? WHERE subbed_for_id = ?", (int(keep_id), int(rid_to_rem)))
+                                conn_clean.execute("DELETE FROM players WHERE id = ?", (int(rid_to_rem),))
+                                merged_count += 1
+                    
+                    conn_clean.commit()
+                    if merged_count > 0:
+                        st.success(f"Successfully merged {merged_count} duplicate records.")
+                        st.rerun()
+                    else:
+                        st.info("No duplicates found to merge.")
+                except Exception as e:
+                    st.error(f"Cleanup error: {e}")
+                finally:
+                    conn_clean.close()
+
+            st.markdown("---")
+            st.subheader("Delete Player")
+            with st.form("delete_player_admin"):
+                # Fetch all players for the dropdown
+                p_list_df = get_all_players()
+                
+                if not p_list_df.empty:
+                    # Vectorized player options creation
+                    has_rid = p_list_df['riot_id'].notna() & (p_list_df['riot_id'].str.strip() != "")
+                    p_list_df['display'] = p_list_df['name']
+                    p_list_df.loc[has_rid, 'display'] = p_list_df.loc[has_rid, 'name'] + " (" + p_list_df.loc[has_rid, 'riot_id'].astype(str) + ")"
+                    p_list_df.loc[~has_rid, 'display'] = p_list_df.loc[~has_rid, 'name'] + " (No Riot ID)"
+                    
+                    p_options = dict(zip(p_list_df['display'], p_list_df['id']))
+                    p_to_del_name = st.selectbox("Select Player to Delete", options=list(p_options.keys()))
+                    p_to_del_id = p_options[p_to_del_name]
+                    
+                    confirm_del = st.checkbox("I understand this will remove all stats associated with this player.")
+                    del_submitted = st.form_submit_button("Delete Player", type="primary")
+                    
+                    if del_submitted:
+                        if not confirm_del:
+                            st.warning("Please confirm the deletion.")
+                        else:
+                            conn_exec = get_conn()
+                            try:
+                                 # Clean up references in match_stats_map and match_stats
+                                 conn_exec.execute("DELETE FROM match_stats_map WHERE player_id = ?", (int(p_to_del_id),))
+                                 conn_exec.execute("DELETE FROM match_stats_map WHERE subbed_for_id = ?", (int(p_to_del_id),))
+                                 conn_exec.execute("DELETE FROM match_stats WHERE player_id = ?", (int(p_to_del_id),))
+                                 conn_exec.execute("DELETE FROM match_stats WHERE subbed_for_id = ?", (int(p_to_del_id),))
+                                 # Delete the player
+                                 conn_exec.execute("DELETE FROM players WHERE id = ?", (int(p_to_del_id),))
+                                conn_exec.commit()
+                                st.success(f"Player '{p_to_del_name}' deleted.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Deletion error: {e}")
+                            finally:
+                                conn_exec.close()
+                else:
+                    st.info("No players found to delete.")
         cfa, cfb, cfc = st.columns([2,2,2])
         with cfa:
             tf = st.multiselect("Team", [""] + team_names, default=[""] + team_names)
@@ -2772,7 +2961,10 @@ elif page == "Admin Panel":
         fdf = fdf[fdf['rank'].fillna("Unranked").isin(rf)]
         if q:
             s = q.lower()
-            fdf = fdf[fdf.apply(lambda r: s in str(r['name']).lower() or s in str(r['riot_id']).lower(), axis=1)]
+            fdf = fdf[
+                fdf['name'].str.lower().fillna("").str.contains(s) | 
+                fdf['riot_id'].str.lower().fillna("").str.contains(s)
+            ]
         edited = st.data_editor(
             fdf,
             num_rows=("dynamic" if st.session_state.get('role', 'admin') == 'dev' else "fixed"),
@@ -2783,31 +2975,86 @@ elif page == "Admin Panel":
         )
         if st.button("Save Players"):
             conn_up = get_conn()
-            for _, row in edited.iterrows():
-                pid = row.get('id')
-                if pd.isna(pid):
-                    if st.session_state.get('role', 'admin') == 'dev':
-                        nm = row.get('name')
-                        rk = row.get('rank') or "Unranked"
-                        tmn = row.get('team') or None
-                        dtid = team_map.get(tmn) if tmn else None
-                        conn_up.execute("INSERT INTO players (name, riot_id, rank, default_team_id) VALUES (?, ?, ?, ?)", (nm, row.get('riot_id'), rk, dtid))
-                else:
-                    nm = row.get('name')
-                    rk = row.get('rank') or "Unranked"
-                    tmn = (row.get('team') if pd.notna(row.get('team')) else None)
-                    dtid = team_map.get(tmn) if tmn else None
-                    conn_up.execute("UPDATE players SET name=?, riot_id=?, rank=?, default_team_id=? WHERE id=?", (nm, row.get('riot_id'), rk, dtid, int(pid)))
-            conn_up.commit()
+            # Get current state to check for duplicates
+            current_players = pd.read_sql("SELECT id, name, riot_id FROM players", conn_up)
+            current_players['name_lower'] = current_players['name'].str.lower().str.strip()
+            current_players['riot_lower'] = current_players['riot_id'].str.lower().str.strip().fillna("")
+            
+            # Vectorized duplicate check
+            error_found = False
+            if not edited.empty:
+                nm_lower = edited['name'].str.lower().str.strip()
+                rid_lower = edited['riot_id'].str.lower().str.strip().fillna("")
+                
+                # 1. Check internal duplicates in 'edited'
+                if nm_lower.duplicated().any():
+                    dup_name = edited.loc[nm_lower.duplicated(), 'name'].iloc[0]
+                    st.error(f"Error: Player name '{dup_name}' is duplicated in your edits.")
+                    error_found = True
+                elif rid_lower[rid_lower != ""].duplicated().any():
+                    dup_rid = edited.loc[rid_lower[rid_lower != ""].duplicated(), 'riot_id'].iloc[0]
+                    st.error(f"Error: Riot ID '{dup_rid}' is duplicated in your edits.")
+                    error_found = True
+                
+                if not error_found:
+                    # 2. Check duplicates against 'current_players'
+                    # We check each row in 'edited' against 'current_players' (excluding the same ID)
+                    for row in edited.itertuples():
+                        pid = getattr(row, 'id', None)
+                        nm = str(row.name).strip()
+                        rid = str(row.riot_id).strip() if pd.notna(row.riot_id) else ""
+                        
+                        nm_l = nm.lower()
+                        rid_l = rid.lower()
+                        
+                        # Find potential conflicts
+                        others = current_players[current_players['id'] != pid] if pd.notna(pid) else current_players
+                        
+                        if nm_l in others['name_lower'].values:
+                            st.error(f"Error: Player name '{nm}' already exists in the database. Changes not saved.")
+                            error_found = True
+                            break
+                        
+                        if rid_l and rid_l in others['riot_lower'].values:
+                            st.error(f"Error: Riot ID '{rid}' already exists in the database. Changes not saved.")
+                            error_found = True
+                            break
+            
+            if not error_found:
+                # Identify deleted players
+                original_ids = set(fdf['id'].dropna().astype(int).tolist())
+                edited_ids = set(edited['id'].dropna().astype(int).tolist())
+                deleted_ids = original_ids - edited_ids
+                
+                if deleted_ids:
+                    for pid in deleted_ids:
+                         conn_up.execute("DELETE FROM match_stats_map WHERE player_id = ?", (pid,))
+                         conn_up.execute("DELETE FROM match_stats_map WHERE subbed_for_id = ?", (pid,))
+                         conn_up.execute("DELETE FROM match_stats WHERE player_id = ?", (pid,))
+                         conn_up.execute("DELETE FROM match_stats WHERE subbed_for_id = ?", (pid,))
+                         conn_up.execute("DELETE FROM players WHERE id = ?", (pid,))
+
+                for row in edited.itertuples():
+                    pid = getattr(row, 'id', None)
+                    nm = str(row.name).strip()
+                    rid = str(row.riot_id).strip() if pd.notna(row.riot_id) else ""
+                    rk = getattr(row, 'rank', "Unranked") or "Unranked"
+                    tmn = getattr(row, 'team', None)
+                    dtid = team_map.get(tmn) if pd.notna(tmn) else None
+                    
+                    if pd.isna(pid):
+                        if st.session_state.get('role', 'admin') == 'dev':
+                            conn_up.execute("INSERT INTO players (name, riot_id, rank, default_team_id) VALUES (?, ?, ?, ?)", (nm, rid, rk, dtid))
+                    else:
+                        conn_up.execute("UPDATE players SET name=?, riot_id=?, rank=?, default_team_id=? WHERE id=?", (nm, rid, rk, dtid, int(pid)))
+                conn_up.commit()
+                st.success("Players saved")
+                st.rerun()
             conn_up.close()
-            st.success("Players saved")
-            st.rerun()
 
         st.divider()
         st.subheader("Schedule Manager")
-        conn_sm = get_conn()
-        teams_df = pd.read_sql("SELECT id, name, group_name FROM teams ORDER BY name", conn_sm)
-        conn_sm.close()
+        teams_df = get_teams_list_full()
         weeks = list(range(1, 11))
         w = st.selectbox("Week", weeks, index=0)
         gnames = sorted([x for x in teams_df['group_name'].dropna().unique().tolist()])
@@ -2827,6 +3074,8 @@ elif page == "Admin Panel":
             st.rerun()
 
 elif page == "Substitutions Log":
+    import pandas as pd
+    import plotly.express as px
     st.markdown('<h1 class="main-header">SUBSTITUTIONS LOG</h1>', unsafe_allow_html=True)
     
     df = get_substitutions_log()
@@ -2869,9 +3118,8 @@ elif page == "Substitutions Log":
         st.dataframe(df, use_container_width=True, hide_index=True)
 
 elif page == "Player Profile":
-    conn_pl = get_conn()
-    players_df = pd.read_sql("SELECT id, name FROM players ORDER BY name", conn_pl)
-    conn_pl.close()
+    import pandas as pd
+    players_df = get_all_players()
     
     st.markdown('<h1 class="main-header">PLAYER PROFILE</h1>', unsafe_allow_html=True)
     
@@ -2932,6 +3180,7 @@ elif page == "Player Profile":
             })
             
             # Plotly Bar Chart for comparison with dual axis
+            import plotly.graph_objects as go
             from plotly.subplots import make_subplots
             fig_cmp = make_subplots(specs=[[{"secondary_y": True}]])
             
