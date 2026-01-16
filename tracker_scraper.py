@@ -30,16 +30,22 @@ class TrackerScraper:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
 
-    def get_match_data(self, match_url):
+    def get_match_data(self, match_input):
         """
-        Scrapes match data from tracker.gg using the provided URL.
-        Includes a retry mechanism for robustness in cloud environments.
+        Scrapes match data from tracker.gg using either a URL or a Match ID.
         """
-        match_id_match = re.search(r'match/([a-zA-Z0-9\-]+)', match_url)
-        if not match_id_match:
-            return None, "Invalid Tracker.gg match URL"
+        match_id = match_input
+        if "tracker.gg" in match_input:
+            match_id_match = re.search(r'match/([a-zA-Z0-9\-]+)', match_input)
+            if not match_id_match:
+                return None, "Invalid Tracker.gg match URL"
+            match_id = match_id_match.group(1)
         
-        match_id = match_id_match.group(1)
+        # Ensure match_id is clean
+        match_id = re.sub(r'[^a-zA-Z0-9\-]', '', match_id)
+        if not match_id:
+            return None, "Invalid Match ID"
+
         api_url = f"https://api.tracker.gg/api/v2/valorant/standard/matches/{match_id}"
         
         headers = self.headers.copy()
@@ -68,6 +74,59 @@ class TrackerScraper:
                     continue
                 return None, f"Scraping error: {str(e)}"
         return None, "Scraping failed after multiple attempts."
+
+    def upload_match_to_github(self, match_id, jsdata, get_secret_func):
+        """
+        Uploads match JSON to GitHub matches/ folder.
+        Requires a function to get secrets (GH_OWNER, GH_REPO, etc.)
+        """
+        import base64
+        import requests
+        
+        owner = get_secret_func("GH_OWNER")
+        repo = get_secret_func("GH_REPO")
+        token = get_secret_func("GH_TOKEN")
+        branch = get_secret_func("GH_BRANCH", "main")
+        
+        if not owner or not repo or not token:
+            return False, "Missing GitHub configuration"
+            
+        path = f"matches/match_{match_id}.json"
+        url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
+        
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json"
+        }
+        
+        # 1. Check if file exists to get SHA
+        sha = None
+        try:
+            r = requests.get(url, headers=headers, params={"ref": branch}, timeout=10)
+            if r.status_code == 200:
+                sha = r.json().get("sha")
+        except Exception:
+            pass
+            
+        # 2. Upload
+        content = json.dumps(jsdata, indent=4)
+        payload = {
+            "message": f"Add match {match_id}",
+            "content": base64.b64encode(content.encode('utf-8')).decode('ascii'),
+            "branch": branch
+        }
+        if sha:
+            payload["sha"] = sha
+            payload["message"] = f"Update match {match_id}"
+            
+        try:
+            r = requests.put(url, headers=headers, json=payload, timeout=15)
+            if r.status_code in [200, 201]:
+                return True, f"Successfully uploaded match_{match_id}.json to GitHub"
+            else:
+                return False, f"GitHub upload failed: {r.status_code}"
+        except Exception as e:
+            return False, f"GitHub upload error: {str(e)}"
 
     def get_profile_data(self, profile_url):
         """

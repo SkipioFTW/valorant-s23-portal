@@ -348,9 +348,16 @@ def parse_tracker_json(jsdata, team1_id):
     # First pass: find team names/IDs to identify which Tracker team is which
     tracker_team_1_id = None
     team_segments = [s for s in segments if s.get("type") == "team-summary"]
+    
+    # Get all players for matching
+    all_players_df = get_all_players()
+    riot_id_to_name = {}
+    if not all_players_df.empty:
+        # Create a case-insensitive map of riot_id -> player name
+        riot_id_to_name = {str(r).strip().lower(): str(n) for r, n in zip(all_players_df['riot_id'], all_players_df['name']) if pd.notna(r)}
+
     if len(team_segments) >= 2:
         # Use Riot IDs to match teams
-        all_players_df = get_all_players()
         # Ensure team1_id is int for comparison
         t1_id_int = int(team1_id) if team1_id is not None else None
         t1_roster = all_players_df[all_players_df['default_team_id'] == t1_id_int]['riot_id'].dropna().tolist()
@@ -371,29 +378,50 @@ def parse_tracker_json(jsdata, team1_id):
 
     for seg in segments:
         if seg.get("type") == "player-summary":
-            rid = seg.get("metadata", {}).get("platformInfo", {}).get("platformUserIdentifier")
+            metadata = seg.get("metadata", {})
+            platform_info = metadata.get("platformInfo", {})
+            rid = platform_info.get("platformUserIdentifier")
+            
+            # Tracker sometimes puts the name in platformUserHandle or platformUserIdentifier
+            if not rid:
+                rid = platform_info.get("platformUserHandle")
+            
             if rid:
                 rid = str(rid).strip()
-            agent = seg.get("metadata", {}).get("agentName")
+            
+            agent = metadata.get("agentName")
             st_map = seg.get("stats", {})
             acs = st_map.get("scorePerRound", {}).get("value", 0)
             k = st_map.get("kills", {}).get("value", 0)
             d = st_map.get("deaths", {}).get("value", 0)
             a = st_map.get("assists", {}).get("value", 0)
-            t_id = seg.get("metadata", {}).get("teamId")
+            t_id = metadata.get("teamId")
             
             our_team_num = 1 if t_id == tracker_team_1_id else 2
             
             if rid:
                 rid_lower = rid.lower()
+                # Try to find a match in our DB if direct match fails
+                matched_name = riot_id_to_name.get(rid_lower)
+                
+                # If still no match, try matching the name part of rid (if it's Name#Tag) or rid itself against DB names
+                if not matched_name:
+                    name_part = rid.split('#')[0].lower()
+                    # We need a name-to-name map
+                    name_to_name = {str(n).lower(): str(n) for n in all_players_df['name']}
+                    matched_name = name_to_name.get(name_part) or name_to_name.get(rid_lower)
+                
+                # Store by riot_id but also provide the matched name if found
                 json_suggestions[rid_lower] = {
+                    'name': matched_name, # Found in DB or None
+                    'tracker_name': rid,  # Original name from Tracker
                     'acs': int(acs) if acs is not None else 0, 
                     'k': int(k) if k is not None else 0, 
                     'd': int(d) if d is not None else 0, 
                     'a': int(a) if a is not None else 0, 
                     'agent': agent,
                     'team_num': our_team_num,
-                    'conf': 100.0
+                    'conf': 100.0 if matched_name else 80.0
                 }
     
     # Extract map name and rounds
@@ -2474,6 +2502,16 @@ elif page == "Admin Panel":
                         nsel = st.selectbox(f"Name {i+1}", maps_catalog, index=(maps_catalog.index(pre_name) if pre_name in maps_catalog else 0), key=f"mname_{i}")
                         t1r = st.number_input(f"{m['t1_name']} rounds", min_value=0, value=pre_t1, key=f"t1r_{i}")
                         t2r = st.number_input(f"{m['t2_name']} rounds", min_value=0, value=pre_t2, key=f"t2r_{i}")
+                        
+                        # Forfeit option
+                        is_forfeit = st.checkbox(f"Forfeit", value=False, key=f"ff_{i}", help="Check if this map was a forfeit (13-0)")
+                        if is_forfeit:
+                            ff_winner = st.radio("Forfeit Winner", [m['t1_name'], m['t2_name']], key=f"ff_win_{i}", horizontal=True)
+                            if ff_winner == m['t1_name']:
+                                t1r, t2r = 13, 0
+                            else:
+                                t1r, t2r = 0, 13
+                        
                         wsel = st.selectbox("Winner", ["", m['t1_name'], m['t2_name']], index=(1 if pre_win==t1_id_val else (2 if pre_win==t2_id_val else 0)), key=f"win_{i}")
                         wid = None
                         if wsel == m['t1_name']:
@@ -2510,63 +2548,71 @@ elif page == "Admin Panel":
                 # Match ID or Link input for automatic pre-filling
                 col_json1, col_json2, col_json3 = st.columns([2, 1, 1])
                 with col_json1:
-                    match_input = st.text_input("Enter Tracker.gg Link or Match ID", key=f"mid_{m['id']}_{map_idx}", placeholder="https://tracker.gg/valorant/match/...")
+                    match_input = st.text_input("Enter Match ID", key=f"mid_{m['id']}_{map_idx}", placeholder="e.g. fef14b8b-ddc7-4b91-b91c-905327c74325")
                 with col_json2:
-                    if st.button("Force Apply", key=f"force_json_{m['id']}_{map_idx}"):
-                        st.session_state[f"force_apply_{m['id']}_{map_idx}"] = st.session_state.get(f"force_apply_{m['id']}_{map_idx}", 0) + 1
-                        st.rerun()
-                with col_json3:
-                    st.info("💡 **Tip:** Paste a Tracker.gg match link to automatically fetch rounds and stats!")
-
-                if match_input:
-                    jsdata = None
-                    # 1. Try if it's a URL
-                    if "tracker.gg" in match_input:
-                        if f"scraped_data_{m['id']}_{map_idx}" not in st.session_state or st.session_state.get(f"scraped_url_{m['id']}_{map_idx}") != match_input:
-                            with st.spinner("Scraping Tracker.gg..."):
-                                jsdata, err = scrape_tracker_match(match_input)
+                    if st.button("Scrape & Apply", key=f"force_json_{m['id']}_{map_idx}", use_container_width=True):
+                        if match_input:
+                            with st.spinner("Fetching data from Tracker.gg..."):
+                                # Clean Match ID if it's a URL
+                                match_id_to_scrape = match_input
+                                if "tracker.gg" in match_input:
+                                    mid_match = re.search(r'match/([a-zA-Z0-9\-]+)', match_input)
+                                    if mid_match: match_id_to_scrape = mid_match.group(1)
+                                
+                                jsdata, err = scrape_tracker_match(match_id_to_scrape)
                                 if err:
                                     st.error(err)
                                 else:
-                                    st.session_state[f"scraped_url_{m['id']}_{map_idx}"] = match_input
-                                    # Save to file for caching/offline use
-                                    match_id_match = re.search(r'match/([a-zA-Z0-9\-]+)', match_input)
-                                    if match_id_match:
-                                        mid = match_id_match.group(1)
-                                        if not os.path.exists("matches"): os.makedirs("matches")
-                                        with open(os.path.join("matches", f"match_{mid}.json"), 'w', encoding='utf-8') as f:
-                                            json.dump(jsdata, f, indent=4)
-                    else:
-                        # 2. Treat as Match ID and load from folder
-                        match_id_clean = re.sub(r'[^a-zA-Z0-9\-]', '', match_input)
-                        json_filename = f"match_{match_id_clean}.json"
-                        json_path = os.path.join("matches", json_filename)
-                        if os.path.exists(json_path):
-                            try:
-                                with open(json_path, 'r', encoding='utf-8') as f:
-                                    jsdata = json.load(f)
-                            except Exception as e:
-                                st.error(f"JSON Error: {str(e)}")
-                        else:
-                            st.warning(f"File '{json_filename}' not found in 'matches' folder.")
+                                    # 1. Save locally
+                                    match_id_clean = re.sub(r'[^a-zA-Z0-9\-]', '', match_id_to_scrape)
+                                    
+                                    if not os.path.exists("matches"): os.makedirs("matches")
+                                    with open(os.path.join("matches", f"match_{match_id_clean}.json"), 'w', encoding='utf-8') as f:
+                                        json.dump(jsdata, f, indent=4)
+                                    
+                                    # 2. Upload to GitHub
+                                    scraper = TrackerScraper()
+                                    ok, gmsg = scraper.upload_match_to_github(match_id_clean, jsdata, get_secret)
+                                    if ok:
+                                        st.toast(gmsg, icon="✅")
+                                    else:
+                                        st.toast(gmsg, icon="⚠️")
 
-                    if jsdata:
+                                    # 3. Process and apply
+                                    cur_t1_id = int(m.get('t1_id', m.get('team1_id')))
+                                    json_suggestions, map_name, t1_r, t2_r = parse_tracker_json(jsdata, cur_t1_id)
+                                    
+                                    st.session_state[f"ocr_{m['id']}_{map_idx}"] = json_suggestions
+                                    st.session_state[f"scraped_data_{m['id']}_{map_idx}"] = {
+                                        'map_name': map_name,
+                                        't1_rounds': int(t1_r),
+                                        't2_rounds': int(t2_r)
+                                    }
+                                    st.session_state[f"force_apply_{m['id']}_{map_idx}"] = st.session_state.get(f"force_apply_{m['id']}_{map_idx}", 0) + 1
+                                    st.success(f"Data for {map_name} loaded and uploaded!")
+                                    st.rerun()
+                        else:
+                            st.warning("Please enter a Match ID first.")
+                with col_json3:
+                    st.info("💡 **Tip:** Paste a Match ID to automatically fetch stats and sync with GitHub!")
+
+                # Auto-load if file exists but not in session
+                if match_input and f"ocr_{m['id']}_{map_idx}" not in st.session_state:
+                    match_id_clean = re.sub(r'[^a-zA-Z0-9\-]', '', match_input)
+                    if "tracker.gg" in match_input:
+                        mid_match = re.search(r'match/([a-zA-Z0-9\-]+)', match_input)
+                        if mid_match: match_id_clean = mid_match.group(1)
+                    
+                    json_path = os.path.join("matches", f"match_{match_id_clean}.json")
+                    if os.path.exists(json_path):
                         try:
+                            with open(json_path, 'r', encoding='utf-8') as f:
+                                jsdata = json.load(f)
                             cur_t1_id = int(m.get('t1_id', m.get('team1_id')))
                             json_suggestions, map_name, t1_r, t2_r = parse_tracker_json(jsdata, cur_t1_id)
-                            
                             st.session_state[f"ocr_{m['id']}_{map_idx}"] = json_suggestions
-                            st.session_state[f"scraped_data_{m['id']}_{map_idx}"] = {
-                                'map_name': map_name,
-                                't1_rounds': int(t1_r),
-                                't2_rounds': int(t2_r)
-                            }
-                            # Trigger force apply
-                            st.session_state[f"force_apply_{m['id']}_{map_idx}"] = st.session_state.get(f"force_apply_{m['id']}_{map_idx}", 0) + 1
-                            st.success("Data loaded! Rounds and scoreboard pre-filled.")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Processing Error: {str(e)}")
+                            st.session_state[f"scraped_data_{m['id']}_{map_idx}"] = {'map_name': map_name, 't1_rounds': int(t1_r), 't2_rounds': int(t2_r)}
+                        except: pass
                 
                 force_apply = st.session_state.get(f"force_apply_{m['id']}_{map_idx}", False)
 
@@ -2669,9 +2715,21 @@ elif page == "Admin Panel":
                             l_rid = rid.lower()
                             db_label = riot_to_label.get(l_rid)
                             
-                            if db_label in roster_labels:
+                            # If direct riot_id match fails, try using the matched name from parse_tracker_json
+                            if not db_label and s.get('name'):
+                                matched_name = s.get('name')
+                                # Find the display label for this name
+                                for label in global_list:
+                                    if label == matched_name or label.startswith(matched_name + " ("):
+                                        db_label = label
+                                        break
+                            
+                            # A player is a roster match only if they are in THIS team's roster
+                            if db_label and db_label in roster_labels:
                                 json_roster_matches.append((rid, db_label, s))
                             else:
+                                # If they are in DB but not on THIS roster, they are a sub
+                                # If they are NOT in DB, they are still a sub (but with no label)
                                 json_subs.append((rid, db_label, s))
                         
                         used_roster_labels = [m[1] for m in json_roster_matches]
@@ -2831,9 +2889,12 @@ elif page == "Admin Panel":
         
         team_names = teams_list['name'].tolist() if not teams_list.empty else []
         team_map = dict(zip(teams_list['name'], teams_list['id']))
-        rvals = ["Unranked","Iron","Bronze","Silver","Gold","Platinum","Diamond","Ascendant","Immortal","Radiant"]
+        rvals = ["Unranked", "Iron/Bronze", "Silver", "Gold", "Platinum", "Diamond", "Ascendant", "Immortal 1/2", "Immortal 3/Radiant"]
         rvals_all = sorted(list(set(rvals + players_df['rank'].dropna().unique().tolist())))
-        if st.session_state.get('role', 'admin') == 'dev':
+        
+        # Allow both admin and dev to manage players
+        user_role = st.session_state.get('role', 'admin')
+        if user_role in ['admin', 'dev']:
             st.subheader("Add Player")
             with st.form("add_player_admin"):
                 nm_new = st.text_input("Name")
@@ -2976,11 +3037,14 @@ elif page == "Admin Panel":
             ]
         edited = st.data_editor(
             fdf,
-            num_rows=("dynamic" if st.session_state.get('role', 'admin') == 'dev' else "fixed"),
+            num_rows=("dynamic" if user_role in ['admin', 'dev'] else "fixed"),
             use_container_width=True,
             column_config={
-                "team": st.column_config.SelectboxColumn(options=[""] + team_names, required=False)
-            }
+                "id": st.column_config.NumberColumn("ID", disabled=True),
+                "team": st.column_config.SelectboxColumn("Team", options=[""] + team_names, required=False),
+                "rank": st.column_config.SelectboxColumn("Rank", options=rvals, required=False)
+            },
+            key="player_editor_main"
         )
         if st.button("Save Players"):
             conn_up = get_conn()
@@ -3052,7 +3116,7 @@ elif page == "Admin Panel":
                     dtid = team_map.get(tmn) if pd.notna(tmn) else None
                     
                     if pd.isna(pid):
-                        if st.session_state.get('role', 'admin') == 'dev':
+                        if user_role in ['admin', 'dev']:
                             conn_up.execute("INSERT INTO players (name, riot_id, rank, default_team_id) VALUES (?, ?, ?, ?)", (nm, rid, rk, dtid))
                     else:
                         conn_up.execute("UPDATE players SET name=?, riot_id=?, rank=?, default_team_id=? WHERE id=?", (nm, rid, rk, dtid, int(pid)))
