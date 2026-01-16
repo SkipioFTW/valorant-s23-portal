@@ -18,6 +18,11 @@ st.set_page_config(page_title="S23 Portal", layout="wide")
 if 'app_mode' not in st.session_state:
     st.session_state['app_mode'] = 'portal'
 
+# Initialize session activity table
+init_session_activity_table()
+# Track current user activity
+track_user_activity()
+
 # Hide standard sidebar navigation and other streamlit elements
 st.markdown("""<link href='https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Rajdhani:wght@400;600&family=Inter:wght@400;700&display=swap' rel='stylesheet'>""", unsafe_allow_html=True)
 
@@ -479,6 +484,77 @@ def init_admin_table(conn=None):
     if should_close:
         conn.commit()
         conn.close()
+
+def init_session_activity_table(conn=None):
+    should_close = False
+    if conn is None:
+        conn = get_conn()
+        should_close = True
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS session_activity (
+            session_id TEXT PRIMARY KEY,
+            username TEXT,
+            role TEXT,
+            last_activity REAL
+        )
+        """
+    )
+    if should_close:
+        conn.commit()
+        conn.close()
+
+def track_user_activity():
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+        ctx = get_script_run_ctx()
+        if not ctx:
+            return
+        session_id = ctx.session_id
+        
+        username = st.session_state.get('username')
+        is_admin = st.session_state.get('is_admin', False)
+        app_mode = st.session_state.get('app_mode', 'portal')
+        
+        role = 'visitor'
+        if is_admin:
+            role = st.session_state.get('role', 'admin')
+        elif app_mode == 'admin':
+            role = 'visitor' # Attempting to login
+            
+        conn = get_conn()
+        conn.execute(
+            "INSERT OR REPLACE INTO session_activity (session_id, username, role, last_activity) VALUES (?, ?, ?, ?)",
+            (session_id, username, role, time.time())
+        )
+        # Cleanup old sessions (older than 30 minutes)
+        conn.execute("DELETE FROM session_activity WHERE last_activity < ?", (time.time() - 1800,))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def get_active_user_count():
+    conn = get_conn()
+    # Active in last 5 minutes
+    res = conn.execute("SELECT COUNT(*) FROM session_activity WHERE last_activity > ?", (time.time() - 300,)).fetchone()
+    conn.close()
+    return res[0] if res else 0
+
+def get_active_admin_session():
+    conn = get_conn()
+    # Check for active admin/dev sessions in last 2 minutes
+    # Exclude current session
+    from streamlit.runtime.scriptrunner import get_script_run_ctx
+    ctx = get_script_run_ctx()
+    curr_session_id = ctx.session_id if ctx else None
+    
+    res = conn.execute(
+        "SELECT username, role FROM session_activity WHERE (role='admin' OR role='dev') AND last_activity > ? AND session_id != ?", 
+        (time.time() - 120, curr_session_id)
+    ).fetchone()
+    conn.close()
+    return res
 
 def ensure_base_schema(conn=None):
     should_close = False
@@ -1421,26 +1497,34 @@ if st.session_state['app_mode'] == 'admin' and not st.session_state.get('is_admi
             p = st.text_input("Password", type="password")
             tok = st.text_input("Admin Token", type="password")
             if st.form_submit_button("LOGIN TO ADMIN PANEL", use_container_width=True):
-                env_tok = get_secret("ADMIN_LOGIN_TOKEN", None)
-                
-                if env_tok is None or env_tok == "":
-                    st.error("Security Error: ADMIN_LOGIN_TOKEN not configured in environment.")
-                    st.session_state['last_login_attempt'] = time.time()
-                    st.session_state['login_attempts'] += 1
+                # Check for active admin sessions first
+                active_admin = get_active_admin_session()
+                if active_admin:
+                    st.error(f"Access Denied: Someone is actively working on the admin panel.")
+                    st.warning(f"Active User: {active_admin[0]} ({active_admin[1]})")
                 else:
-                    auth_res = authenticate(u, p)
-                    if auth_res and hmac.compare_digest(tok or "", env_tok):
-                        st.session_state['is_admin'] = True
-                        st.session_state['username'] = auth_res['username']
-                        st.session_state['role'] = auth_res['role']
-                        st.session_state['page'] = "Admin Panel"
-                        st.session_state['login_attempts'] = 0
-                        st.success("Access Granted")
-                        st.rerun()
-                    else:
+                    env_tok = get_secret("ADMIN_LOGIN_TOKEN", None)
+                    
+                    if env_tok is None or env_tok == "":
+                        st.error("Security Error: ADMIN_LOGIN_TOKEN not configured in environment.")
                         st.session_state['last_login_attempt'] = time.time()
                         st.session_state['login_attempts'] += 1
-                        st.error(f"Invalid credentials (Attempt {st.session_state['login_attempts']}/5)")
+                    else:
+                        auth_res = authenticate(u, p)
+                        if auth_res and hmac.compare_digest(tok or "", env_tok):
+                            st.session_state['is_admin'] = True
+                            st.session_state['username'] = auth_res['username']
+                            st.session_state['role'] = auth_res['role']
+                            st.session_state['page'] = "Admin Panel"
+                            st.session_state['login_attempts'] = 0
+                            # Update activity immediately with new role
+                            track_user_activity()
+                            st.success("Access Granted")
+                            st.rerun()
+                        else:
+                            st.session_state['last_login_attempt'] = time.time()
+                            st.session_state['login_attempts'] += 1
+                            st.error(f"Invalid credentials (Attempt {st.session_state['login_attempts']}/5)")
         if st.button("← BACK TO SELECTION"):
             st.session_state['app_mode'] = 'portal'
             st.rerun()
@@ -2452,6 +2536,39 @@ elif page == "Admin Panel":
     if not st.session_state.get('is_admin'):
         st.warning("Admin only")
     else:
+        # Active User Count and System Status
+        active_users = get_active_user_count()
+        
+        m1, m2, m3 = st.columns(3)
+        with m1:
+            st.markdown(f"""
+            <div class="custom-card" style="text-align: center;">
+                <h4 style="color: var(--primary-blue); margin-bottom: 0;">LIVE USERS</h4>
+                <p style="font-size: 2rem; font-family: 'Orbitron'; margin: 10px 0;">{active_users}</p>
+                <p style="color: var(--text-dim); font-size: 0.8rem;">Currently on website</p>
+            </div>
+            """, unsafe_allow_html=True)
+        with m2:
+            st.markdown(f"""
+            <div class="custom-card" style="text-align: center;">
+                <h4 style="color: #00ff88; margin-bottom: 0;">SYSTEM STATUS</h4>
+                <p style="font-size: 1.2rem; font-family: 'Orbitron'; margin: 18px 0;">ONLINE</p>
+                <p style="color: var(--text-dim); font-size: 0.8rem;">All systems operational</p>
+            </div>
+            """, unsafe_allow_html=True)
+        with m3:
+            # Show current admin role
+            role = st.session_state.get('role', 'admin').upper()
+            st.markdown(f"""
+            <div class="custom-card" style="text-align: center;">
+                <h4 style="color: var(--primary-red); margin-bottom: 0;">SESSION ROLE</h4>
+                <p style="font-size: 1.5rem; font-family: 'Orbitron'; margin: 15px 0;">{role}</p>
+                <p style="color: var(--text-dim); font-size: 0.8rem;">{st.session_state.get('username')}</p>
+            </div>
+            """, unsafe_allow_html=True)
+
+        st.markdown('<div style="margin-top: 30px;"></div>', unsafe_allow_html=True)
+
         if st.session_state.get('role', 'admin') == 'dev':
             st.subheader("Database Reset")
             do_reset = st.checkbox("Confirm reset all tables")
