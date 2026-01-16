@@ -53,13 +53,34 @@ def init_session_activity_table(conn=None):
             session_id TEXT PRIMARY KEY,
             username TEXT,
             role TEXT,
-            last_activity REAL
+            last_activity REAL,
+            ip_address TEXT
         )
         """
     )
+    # Check if ip_address column exists (for existing databases)
+    cursor = conn.execute("PRAGMA table_info(session_activity)")
+    columns = [row[1] for row in cursor.fetchall()]
+    if 'ip_address' not in columns:
+        conn.execute("ALTER TABLE session_activity ADD COLUMN ip_address TEXT")
+        
     if should_close:
         conn.commit()
         conn.close()
+
+def get_visitor_ip():
+    try:
+        from streamlit.web.server.websocket_headers import _get_websocket_headers
+        headers = _get_websocket_headers()
+        if headers:
+            # Check common proxy headers
+            ip = headers.get("X-Forwarded-For")
+            if ip:
+                return ip.split(",")[0].strip()
+            return headers.get("Remote-Addr", "unknown")
+    except Exception:
+        pass
+    return "unknown"
 
 def track_user_activity():
     try:
@@ -79,10 +100,11 @@ def track_user_activity():
         elif app_mode == 'admin':
             role = 'visitor' # Attempting to login
             
+        ip_address = get_visitor_ip()
         conn = get_conn()
         conn.execute(
-            "INSERT OR REPLACE INTO session_activity (session_id, username, role, last_activity) VALUES (?, ?, ?, ?)",
-            (session_id, username, role, time.time())
+            "INSERT OR REPLACE INTO session_activity (session_id, username, role, last_activity, ip_address) VALUES (?, ?, ?, ?, ?)",
+            (session_id, username, role, time.time(), ip_address)
         )
         # Cleanup old sessions (older than 30 minutes)
         conn.execute("DELETE FROM session_activity WHERE last_activity < ?", (time.time() - 1800,))
@@ -93,22 +115,25 @@ def track_user_activity():
 
 def get_active_user_count():
     conn = get_conn()
-    # Active in last 5 minutes
-    res = conn.execute("SELECT COUNT(*) FROM session_activity WHERE last_activity > ?", (time.time() - 300,)).fetchone()
+    # Count distinct IPs active in last 5 minutes to avoid double-counting refreshes
+    res = conn.execute("SELECT COUNT(DISTINCT ip_address) FROM session_activity WHERE last_activity > ?", (time.time() - 300,)).fetchone()
     conn.close()
     return res[0] if res else 0
 
 def get_active_admin_session():
     conn = get_conn()
     # Check for active admin/dev sessions in last 2 minutes
-    # Exclude current session
+    # Exclude current session AND same IP (to allow refreshes)
     from streamlit.runtime.scriptrunner import get_script_run_ctx
     ctx = get_script_run_ctx()
     curr_session_id = ctx.session_id if ctx else None
+    curr_ip = get_visitor_ip()
     
+    # We block only if the active session has a DIFFERENT session_id AND DIFFERENT IP
+    # If the IP is the same, we assume it's the same person refreshing or using another tab
     res = conn.execute(
-        "SELECT username, role FROM session_activity WHERE (role='admin' OR role='dev') AND last_activity > ? AND session_id != ?", 
-        (time.time() - 120, curr_session_id)
+        "SELECT username, role FROM session_activity WHERE (role='admin' OR role='dev') AND last_activity > ? AND session_id != ? AND ip_address != ?", 
+        (time.time() - 120, curr_session_id, curr_ip)
     ).fetchone()
     conn.close()
     return res
