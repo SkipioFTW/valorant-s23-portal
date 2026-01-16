@@ -28,7 +28,7 @@ If you see an "Access Denied" message, someone is already logged in. You have tw
 1.  Navigate to the **Match Editor** section at the bottom of the page.
 2.  Select the **Week** of the tournament.
 3.  Select the specific **Match** from the dropdown list.
-4.  Enter the overall scores for Team 1 and Team 2.
+4.  Enter the overall scores for Team 1 and Team 2.(or use the match id feature that's above the scoreboards)
 5.  **Forfeits**: If a match was a forfeit (13-0), check the "Match-level Forfeit" box and select the winner.
 
 ### **2. Importing Data from Tracker.gg**
@@ -38,8 +38,8 @@ Currently, the scraper works best when provided with the **Match ID** only.
 - **Match ID**: `0a6ecd9e-c88f-41c4-ab49-58c0c5c8fd7d` (The last part of the URL).
 
 **Steps**:
-1.  In the **Match Editor** (Admin Panel), open a "Map" expander (e.g., Map 1).
-2.  Paste the **Match ID** into the "Tracker.gg Link" field.
+1.  In the **Per-Map Scoreboard* (Admin Panel).
+2.  Paste the **Match ID** into the "Enter Match ID" field.
 3.  The system will automatically scrape the map name, round scores, and all player statistics (ACS, K/D/A, Agents).
 4.  Review the auto-filled scoreboard and click **Save Match**.
 
@@ -66,4 +66,4 @@ Currently, the scraper works best when provided with the **Match ID** only.
 
 ## **Admin Roles**
 - **Admin**: Standard access for managing matches, players, and teams.
-- **Dev**: Full access including database resets, account creation for other admins, and manual SQL imports.
+- **Dev**: Full acc*ess including database resets, account creation for other admins, and manual SQL imports.
