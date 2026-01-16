@@ -853,6 +853,7 @@ def ensure_upgrade_schema(conn=None):
     ensure_column("matches", "playoff_round", "playoff_round INTEGER", conn=conn)
     ensure_column("matches", "bracket_pos", "bracket_pos INTEGER", conn=conn)
     ensure_column("matches", "is_forfeit", "is_forfeit BOOLEAN DEFAULT 0", conn=conn)
+    ensure_column("matches", "bracket_label", "bracket_label TEXT", conn=conn)
     
     try:
         c.execute("INSERT OR IGNORE INTO seasons (id, name, is_active) VALUES (22, 'Season 22', 0)")
@@ -1439,6 +1440,7 @@ def get_playoff_matches():
     df = pd.read_sql_query(
         """
         SELECT m.id, m.playoff_round, m.bracket_pos, m.status, m.format, m.maps_played, m.is_forfeit,
+               m.bracket_label,
                t1.name as t1_name, t2.name as t2_name,
                m.score_t1, m.score_t2, t1.id as t1_id, t2.id as t2_id,
                m.winner_id,
@@ -1944,7 +1946,7 @@ if page == "Overview & Standings":
                     "Points": st.column_config.NumberColumn("Points", help="Match Win (15) + Rounds Won + OT Bonus (12 if loss in OT)")
                 }
             )
-            st.caption("🏆 Top teams from each group qualify for Playoffs.")
+            st.caption("🏆 Top 6 teams from each group qualify for Playoffs (Top 2 get R1 BYE).")
             st.markdown("---")
     else:
         st.info("No standings data available yet.")
@@ -1970,20 +1972,46 @@ elif page == "Matches":
             cols = st.columns(len(rounds))
             for i, r_num in enumerate(rounds):
                 with cols[i]:
-                    r_name = {1: "Quarter-Finals", 2: "Semi-Finals", 3: "Grand Finals"}.get(r_num, f"Round {r_num}")
+                    r_name = {
+                        1: "Round of 24",
+                        2: "Round of 16",
+                        3: "Quarter-Finals",
+                        4: "Semi-Finals",
+                        5: "Grand Finals"
+                    }.get(r_num, f"Round {r_num}")
                     st.markdown(f"<h4 style='text-align: center; color: var(--primary-red);'>{r_name}</h4>", unsafe_allow_html=True)
+                    # If Round 1, show BYEs
+                    if r_num == 1:
+                        standings = get_standings()
+                        if not standings.empty:
+                            # Group by group_name and get top 2
+                            for g_name, g_df in standings.groupby('group_name'):
+                                g_df = g_df.sort_values(['Points', 'RD'], ascending=False).head(2)
+                                for team in g_df.itertuples():
+                                    st.markdown(f"""<div class="custom-card" style="margin-bottom: 10px; padding: 10px; border-left: 3px solid var(--primary-blue); opacity: 0.8;">
+<div style="display: flex; justify-content: space-between; font-size: 0.9rem;">
+<span style="color: var(--primary-blue); font-weight: bold;">{html.escape(str(team.name))}</span>
+<span style="font-family: 'Orbitron'; color: var(--text-dim); font-size: 0.7rem;">BYE</span>
+</div>
+<div style="text-align: center; font-size: 0.6rem; color: var(--text-dim); margin-top: 5px;">ADVANCES TO R16</div>
+</div>""", unsafe_allow_html=True)
+
                     r_matches = df[df['playoff_round'] == r_num].sort_values('bracket_pos')
                     for m in r_matches.itertuples():
                         winner_color_1 = "var(--primary-blue)" if m.status == 'completed' and m.winner_id == m.t1_id else "var(--text-main)"
                         winner_color_2 = "var(--primary-red)" if m.status == 'completed' and m.winner_id == m.t2_id else "var(--text-main)"
                         
+                        # Use bracket label if names are TBD
+                        t1_display = m.t1_name if m.t1_name else (m.bracket_label.split(' vs ')[0] if m.bracket_label and ' vs ' in m.bracket_label else "TBD")
+                        t2_display = m.t2_name if m.t2_name else (m.bracket_label.split(' vs ')[1] if m.bracket_label and ' vs ' in m.bracket_label else "TBD")
+
                         st.markdown(f"""<div class="custom-card" style="margin-bottom: 10px; padding: 10px; border-left: 3px solid {winner_color_1 if m.winner_id == m.t1_id else winner_color_2};">
 <div style="display: flex; justify-content: space-between; font-size: 0.9rem;">
-<span style="color: {winner_color_1}; font-weight: {'bold' if m.winner_id == m.t1_id else 'normal'};">{html.escape(str(m.t1_name or "TBD"))}</span>
+<span style="color: {winner_color_1}; font-weight: {'bold' if m.winner_id == m.t1_id else 'normal'};">{html.escape(str(t1_display))}</span>
 <span style="font-family: 'Orbitron';">{int(m.score_t1) if m.status == 'completed' else '-'}</span>
 </div>
 <div style="display: flex; justify-content: space-between; font-size: 0.9rem; margin-top: 5px;">
-<span style="color: {winner_color_2}; font-weight: {'bold' if m.winner_id == m.t2_id else 'normal'};">{html.escape(str(m.t2_name or "TBD"))}</span>
+<span style="color: {winner_color_2}; font-weight: {'bold' if m.winner_id == m.t2_id else 'normal'};">{html.escape(str(t2_display))}</span>
 <span style="font-family: 'Orbitron';">{int(m.score_t2) if m.status == 'completed' else '-'}</span>
 </div>
 <div style="text-align: center; font-size: 0.6rem; color: var(--text-dim); margin-top: 5px;">{html.escape(str(m.format))}</div>
@@ -2576,7 +2604,7 @@ elif page == "Playoffs":
         with st.form("add_playoff_match"):
             c1, c2, c3 = st.columns(3)
             round_idx = c1.selectbox("Round", [1, 2, 3, 4, 5], format_func=lambda x: {
-                1: "Round 1 (Play-ins)", 
+                1: "Round of 24", 
                 2: "Round of 16", 
                 3: "Quarter-finals", 
                 4: "Semi-finals", 
@@ -2585,9 +2613,10 @@ elif page == "Playoffs":
             pos = c2.number_input("Bracket Position", min_value=1, max_value=8, value=1)
             fmt = c3.selectbox("Format", ["BO1", "BO3", "BO5"], index=1)
             
-            c4, c5 = st.columns(2)
+            c4, c5, c6 = st.columns([2, 2, 2])
             t1 = c4.selectbox("Team 1", tnames)
             t2 = c5.selectbox("Team 2", tnames)
+            label = c6.text_input("Bracket Label (e.g. OMEGA#5 vs ALPHA#4)", help="Shown if teams are TBD")
             
             if st.form_submit_button("Add/Update Playoff Match"):
                 conn = get_conn()
@@ -2596,10 +2625,17 @@ elif page == "Playoffs":
                 
                 # Check if exists
                 existing = conn.execute("SELECT id FROM matches WHERE match_type='playoff' AND playoff_round=? AND bracket_pos=?", (round_idx, pos)).fetchone()
+                
                 if existing:
-                    conn.execute("UPDATE matches SET team1_id=?, team2_id=?, format=? WHERE id=?", (t1_id, t2_id, fmt, existing[0]))
+                    conn.execute("""
+                        UPDATE matches SET team1_id=?, team2_id=?, format=?, bracket_label=?
+                        WHERE id=?
+                    """, (t1_id, t2_id, fmt, label, existing[0]))
                 else:
-                    conn.execute("INSERT INTO matches (match_type, playoff_round, bracket_pos, team1_id, team2_id, format, status, score_t1, score_t2) VALUES ('playoff', ?, ?, ?, ?, ?, 'scheduled', 0, 0)", (round_idx, pos, t1_id, t2_id, fmt))
+                    conn.execute("""
+                        INSERT INTO matches (match_type, playoff_round, bracket_pos, team1_id, team2_id, format, status, score_t1, score_t2, bracket_label)
+                        VALUES ('playoff', ?, ?, ?, ?, ?, 'scheduled', 0, 0, ?)
+                    """, (round_idx, pos, t1_id, t2_id, fmt, label))
                 conn.commit()
                 conn.close()
                 st.success("Playoff match updated")
@@ -2913,7 +2949,7 @@ elif page == "Playoffs":
 
         # Define Rounds
         rounds = {
-            1: "Round 1",
+            1: "Round of 24",
             2: "Round of 16",
             3: "Quarter-finals",
             4: "Semi-finals",
