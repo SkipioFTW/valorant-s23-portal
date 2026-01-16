@@ -7,6 +7,8 @@ import re
 import pandas as pd
 import hmac
 import time
+import base64
+import requests
 from tracker_scraper import TrackerScraper
 
 # Set page config immediately as the first streamlit command
@@ -411,7 +413,6 @@ def parse_tracker_json(jsdata, team1_id):
 
 @st.cache_data(ttl=3600)
 def get_base64_image(image_path):
-    import base64
     if not image_path or not is_safe_path(image_path) or not os.path.exists(image_path):
         return None
     try:
