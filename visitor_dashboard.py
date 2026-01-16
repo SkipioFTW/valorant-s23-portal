@@ -20,7 +20,7 @@ def get_secret(key, default=None):
 DB_PATH = get_secret("DB_PATH", "valorant_s23.db")
 
 # Valorant Map Catalog
-maps_catalog = ["Abyss", "Ascent", "Bind", "Breeze", "Fracture", "Haven", "Icebox", "Lotus", "Pearl", "Split", "Sunset"]
+maps_catalog = ["Abyss", "Ascent", "Bind", "Breeze", "Fracture", "Haven", "Icebox", "Lotus", "Pearl", "Split", "Sunset", "Corrode"]
 
 def get_conn():
     return sqlite3.connect(DB_PATH)
