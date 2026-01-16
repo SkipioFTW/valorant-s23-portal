@@ -27,7 +27,20 @@ def get_secret(key, default=None):
 
 # Use data folder for database
 DEFAULT_DB_PATH = os.path.join(ROOT_DIR, "data", "valorant_s23.db")
-DB_PATH = get_secret("DB_PATH", DEFAULT_DB_PATH)
+SECRET_DB_PATH = get_secret("DB_PATH")
+
+if SECRET_DB_PATH:
+    # If the secret path exists as is, use it
+    if os.path.exists(SECRET_DB_PATH):
+        DB_PATH = SECRET_DB_PATH
+    # If it's just a filename and exists in the data folder, use that
+    elif os.path.exists(os.path.join(ROOT_DIR, "data", os.path.basename(SECRET_DB_PATH))):
+        DB_PATH = os.path.join(ROOT_DIR, "data", os.path.basename(SECRET_DB_PATH))
+    # Otherwise, fallback to secret but it might create an empty DB
+    else:
+        DB_PATH = SECRET_DB_PATH
+else:
+    DB_PATH = DEFAULT_DB_PATH
 
 # Valorant Map Catalog
 maps_catalog = ["Abyss", "Ascent", "Bind", "Breeze", "Fracture", "Haven", "Icebox", "Lotus", "Pearl", "Split", "Sunset", "Corrode"]
@@ -722,7 +735,7 @@ def fetch_match_from_github(match_id):
         
     # Use API for both public and private repos if token is available
     if token:
-        url = f"https://api.github.com/repos/{owner}/{repo}/contents/matches/match_{match_id}.json?ref={branch}"
+        url = f"https://api.github.com/repos/{owner}/{repo}/contents/assets/matches/match_{match_id}.json?ref={branch}"
         headers = {
             "Authorization": f"Bearer {token}",
             "Accept": "application/vnd.github.raw"
@@ -737,7 +750,7 @@ def fetch_match_from_github(match_id):
             return None, f"GitHub API fetch error: {str(e)}"
     else:
         # Fallback to public raw URL
-        raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/matches/match_{match_id}.json"
+        raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/assets/matches/match_{match_id}.json"
         try:
             r = requests.get(raw_url, timeout=10)
             if r.status_code == 200:

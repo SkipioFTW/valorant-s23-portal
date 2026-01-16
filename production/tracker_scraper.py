@@ -95,7 +95,7 @@ class TrackerScraper:
         if not owner or not repo or not token:
             return False, "Missing GitHub configuration"
             
-        path = f"matches/match_{match_id}.json"
+        path = f"assets/matches/match_{match_id}.json"
         url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
         
         headers = {
