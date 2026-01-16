@@ -40,3 +40,6 @@ wheels/
 # OS
 .DS_Store
 Thumbs.db
+
+# Backup
+assets/teams_backup/
