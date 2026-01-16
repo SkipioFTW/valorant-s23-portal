@@ -738,7 +738,7 @@ def get_substitutions_log():
             LEFT JOIN teams t ON msm.team_id = t.id
             LEFT JOIN players p ON msm.player_id = p.id
             LEFT JOIN players sp ON msm.subbed_for_id = sp.id
-            WHERE msm.is_sub = 1
+            WHERE msm.is_sub = 1 AND m.status = 'completed'
             ORDER BY m.week, msm.match_id, msm.map_index
             """,
             conn,
@@ -780,7 +780,7 @@ def get_player_profile(player_id):
             SELECT msm.match_id, msm.map_index, msm.agent, msm.acs, msm.kills, msm.deaths, msm.assists, msm.is_sub, m.week
             FROM match_stats_map msm
             JOIN matches m ON msm.match_id = m.id
-            WHERE msm.player_id=?
+            WHERE msm.player_id=? AND m.status = 'completed'
             """,
             conn,
             params=(int(player_id),),
@@ -796,7 +796,9 @@ def get_player_profile(player_id):
                 AVG(CASE WHEN p.rank = ? THEN msm.deaths ELSE NULL END) as r_d,
                 AVG(CASE WHEN p.rank = ? THEN msm.assists ELSE NULL END) as r_a
             FROM match_stats_map msm
+            JOIN matches m ON msm.match_id = m.id
             JOIN players p ON msm.player_id = p.id
+            WHERE m.status = 'completed'
             """,
             conn,
             params=(rank_val, rank_val, rank_val, rank_val)
@@ -1112,8 +1114,10 @@ def get_player_leaderboard():
                    SUM(msm.deaths) as total_deaths,
                    SUM(msm.assists) as total_assists
             FROM match_stats_map msm
+            JOIN matches m ON msm.match_id = m.id
             JOIN players p ON msm.player_id = p.id
             LEFT JOIN teams t ON p.default_team_id = t.id
+            WHERE m.status = 'completed'
             GROUP BY p.id, p.name, p.riot_id
             HAVING games > 0
             """,
