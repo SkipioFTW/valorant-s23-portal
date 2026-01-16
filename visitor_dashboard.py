@@ -69,7 +69,23 @@ def init_session_activity_table(conn=None):
         conn.close()
 
 def get_visitor_ip():
-    # 1. Try st.context (Streamlit 1.34+)
+    # 1. Try a fingerprint-based pseudo-IP FIRST for maximum stability
+    # This fingerprint stays the same across refreshes on the same browser/device
+    # even if the IP rotates or session_state is cleared.
+    try:
+        from streamlit.web.server.websocket_headers import _get_websocket_headers
+        h = _get_websocket_headers()
+        if h:
+            import hashlib
+            # Combine User-Agent, Accept-Language, and Accept headers
+            # to create a persistent ID for this specific browser.
+            fingerprint_str = f"{h.get('User-Agent', '')}{h.get('Accept-Language', '')}{h.get('Accept', '')}"
+            if fingerprint_str.strip():
+                return f"fp_{hashlib.md5(fingerprint_str.encode()).hexdigest()[:12]}"
+    except Exception:
+        pass
+
+    # 2. Fallback to st.context (Streamlit 1.34+)
     try:
         if hasattr(st, "context"):
             if hasattr(st.context, "remote_ip") and st.context.remote_ip:
@@ -83,7 +99,7 @@ def get_visitor_ip():
     except Exception:
         pass
 
-    # 2. Fallback to internal websocket headers
+    # 3. Fallback to internal websocket headers
     try:
         from streamlit.web.server.websocket_headers import _get_websocket_headers
         headers = _get_websocket_headers()
@@ -92,22 +108,6 @@ def get_visitor_ip():
                 val = headers.get(header)
                 if val:
                     return val.split(",")[0].strip()
-    except Exception:
-        pass
-    
-    # 3. Final fallback: use a fingerprint-based pseudo-IP
-    # This fingerprint stays the same across refreshes on the same browser/device
-    # even if session_state is cleared.
-    try:
-        from streamlit.web.server.websocket_headers import _get_websocket_headers
-        h = _get_websocket_headers()
-        if h:
-            import hashlib
-            # Combine User-Agent, Accept-Language, and potentially other stable headers
-            # to create a persistent ID for this specific browser.
-            fingerprint_str = f"{h.get('User-Agent', '')}{h.get('Accept-Language', '')}{h.get('Accept', '')}"
-            if fingerprint_str.strip():
-                return f"fp_{hashlib.md5(fingerprint_str.encode()).hexdigest()[:12]}"
     except Exception:
         pass
             
@@ -1576,10 +1576,14 @@ if st.session_state['app_mode'] == 'admin' and not st.session_state.get('is_admi
                         st.error(f"Error: {str(e)}")
                 
                 st.write("---")
-                st.write("### Option 2: Force Unlock Everything (Requires Token)")
-                force_token = st.text_input("Admin Token to Force Unlock", type="password", key="force_token_input")
+                st.write("### Option 2: Force Unlock Everything (Requires Special Token)")
+                force_token = st.text_input("Force Unlock Token", type="password", key="force_token_input")
                 if st.button("☢️ FORCE UNLOCK EVERYTHING", use_container_width=True):
-                    env_tok = get_secret("ADMIN_LOGIN_TOKEN", None)
+                    env_tok = get_secret("FORCE_UNLOCK_TOKEN", None)
+                    # If FORCE_UNLOCK_TOKEN is not set, fallback to ADMIN_LOGIN_TOKEN as a safety measure
+                    if env_tok is None:
+                        env_tok = get_secret("ADMIN_LOGIN_TOKEN", None)
+                        
                     if env_tok and hmac.compare_digest(force_token or "", env_tok):
                         try:
                             conn = get_conn()
@@ -1592,7 +1596,7 @@ if st.session_state['app_mode'] == 'admin' and not st.session_state.get('is_admi
                         except Exception as e:
                             st.error(f"Error: {str(e)}")
                     else:
-                        st.error("Invalid token.")
+                        st.error("Invalid Force Unlock Token.")
             st.markdown("---")
         
         # EMERGENCY CLEAR (IP-based) - Removed as it is now inside the expander for cleaner UI
