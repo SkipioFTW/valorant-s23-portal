@@ -16,6 +16,15 @@ streamlit run production/visitor_dashboard.py
 streamlit run staging/visitor_dashboard.py
 ```
 
+### To run the Tracker Scraper (Bulk Scraper):
+```powershell
+# For production data
+streamlit run production/get_tracker_json.py
+
+# For staging data
+streamlit run staging/get_tracker_json.py
+```
+
 ---
 
 ## 2. Development Workflow (Staging to Production)
@@ -27,6 +36,7 @@ Run these commands in your terminal:
 ```powershell
 copy staging/visitor_dashboard.py production/visitor_dashboard.py
 copy staging/tracker_scraper.py production/tracker_scraper.py
+copy staging/get_tracker_json.py production/get_tracker_json.py
 ```
 
 ### Step B: (Optional) Sync Databases

@@ -210,7 +210,7 @@ def get_active_admin_session():
     return None
 
 # Set page config immediately as the first streamlit command
-st.set_page_config(page_title="S23 Portal", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="S23 Portal v0.8.0", layout="wide", initial_sidebar_state="collapsed")
 
 def ensure_base_schema(conn=None):
     should_close = False
