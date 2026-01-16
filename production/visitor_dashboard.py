@@ -164,14 +164,7 @@ def track_user_activity():
         ip_address = get_visitor_ip()
         conn = get_conn()
         
-        # LOGIC: If this is a fresh refresh (no is_admin in session state),
-        # clear any admin locks for this IP. This is the "logout on refresh" fix.
-        if not is_admin:
-            conn.execute(
-                "DELETE FROM session_activity WHERE ip_address = ? AND (role = 'admin' OR role = 'dev')",
-                (ip_address,)
-            )
-            
+        # Always update current session
         conn.execute(
             "INSERT OR REPLACE INTO session_activity (session_id, username, role, last_activity, ip_address) VALUES (?, ?, ?, ?, ?)",
             (session_id, username, role, time.time(), ip_address)
@@ -192,13 +185,13 @@ def get_active_user_count():
 
 def get_active_admin_session():
     conn = get_conn()
-    # Check for active admin/dev sessions in last 60 seconds
+    # Check for active admin/dev sessions in last 300 seconds (5 mins)
     curr_ip = get_visitor_ip()
     
     # Get all active admin sessions
     res = conn.execute(
         "SELECT username, role, ip_address FROM session_activity WHERE (role='admin' OR role='dev') AND last_activity > ?", 
-        (time.time() - 60,)
+        (time.time() - 300,)
     ).fetchall()
     conn.close()
     
@@ -383,6 +376,16 @@ def init_match_stats_map_table(conn=None):
 # App Mode Logic
 if 'app_mode' not in st.session_state:
     st.session_state['app_mode'] = 'portal'
+if 'is_admin' not in st.session_state:
+    st.session_state['is_admin'] = False
+if 'username' not in st.session_state:
+    st.session_state['username'] = None
+if 'login_attempts' not in st.session_state:
+    st.session_state['login_attempts'] = 0
+if 'last_login_attempt' not in st.session_state:
+    st.session_state['last_login_attempt'] = 0
+if 'page' not in st.session_state:
+    st.session_state['page'] = "Overview & Standings"
 
 # Initialize session activity table
 init_session_activity_table()
@@ -1831,14 +1834,6 @@ if st.session_state['app_mode'] == 'admin' and not st.session_state.get('is_admi
             st.rerun()
     st.stop()
 
-if 'is_admin' not in st.session_state:
-    st.session_state['is_admin'] = False
-if 'username' not in st.session_state:
-    st.session_state['username'] = None
-
-if 'page' not in st.session_state:
-    st.session_state['page'] = "Overview & Standings"
-
 pages = [
     "Overview & Standings",
     "Matches",
@@ -1851,7 +1846,8 @@ pages = [
     "Player Profile",
 ]
 if st.session_state['is_admin']:
-    pages.insert(pages.index("Admin Panel") if "Admin Panel" in pages else len(pages), "Playoffs")
+    if "Playoffs" not in pages:
+        pages.insert(pages.index("Admin Panel") if "Admin Panel" in pages else len(pages), "Playoffs")
     if "Admin Panel" not in pages:
         pages.append("Admin Panel")
 
