@@ -69,11 +69,13 @@ def init_session_activity_table(conn=None):
         conn.close()
 
 def get_visitor_ip():
-    # Try the modern Streamlit 1.34+ context first
+    # 1. Try st.context (Streamlit 1.34+)
     try:
-        if hasattr(st, "context") and hasattr(st.context, "headers"):
+        if hasattr(st, "context"):
+            if hasattr(st.context, "remote_ip") and st.context.remote_ip:
+                return st.context.remote_ip
+            
             headers = st.context.headers
-            # Check standard proxy headers
             for header in ["X-Forwarded-For", "X-Real-IP", "Forwarded"]:
                 val = headers.get(header)
                 if val:
@@ -81,7 +83,7 @@ def get_visitor_ip():
     except Exception:
         pass
 
-    # Fallback to internal websocket headers
+    # 2. Fallback to internal websocket headers
     try:
         from streamlit.web.server.websocket_headers import _get_websocket_headers
         headers = _get_websocket_headers()
@@ -93,11 +95,26 @@ def get_visitor_ip():
     except Exception:
         pass
     
-    # Final fallback: use a session-based pseudo-IP if real IP is blocked/missing
-    # This ensures that even if IP is unknown, the same browser session can be tracked
+    # 3. Final fallback: use a fingerprint-based pseudo-IP
+    # This fingerprint stays the same across refreshes on the same browser/device
+    # even if session_state is cleared.
+    try:
+        from streamlit.web.server.websocket_headers import _get_websocket_headers
+        h = _get_websocket_headers()
+        if h:
+            import hashlib
+            # Combine User-Agent, Accept-Language, and potentially other stable headers
+            # to create a persistent ID for this specific browser.
+            fingerprint_str = f"{h.get('User-Agent', '')}{h.get('Accept-Language', '')}{h.get('Accept', '')}"
+            if fingerprint_str.strip():
+                return f"fp_{hashlib.md5(fingerprint_str.encode()).hexdigest()[:12]}"
+    except Exception:
+        pass
+            
+    # Absolute last resort (will change on refresh)
     if 'pseudo_ip' not in st.session_state:
         import uuid
-        st.session_state['pseudo_ip'] = f"session_{uuid.uuid4().hex[:8]}"
+        st.session_state['pseudo_ip'] = f"tmp_{uuid.uuid4().hex[:8]}"
     return st.session_state['pseudo_ip']
 
 def track_user_activity():
@@ -149,17 +166,22 @@ def get_active_user_count():
 
 def get_active_admin_session():
     conn = get_conn()
-    # Check for active admin/dev sessions in last 60 seconds (shorter for faster recovery)
+    # Check for active admin/dev sessions in last 60 seconds
     curr_ip = get_visitor_ip()
     
-    # We block ONLY if there's an active admin from a DIFFERENT IP address.
-    # This allows the same user to reconnect immediately after refresh.
+    # Get all active admin sessions
     res = conn.execute(
-        "SELECT username, role FROM session_activity WHERE (role='admin' OR role='dev') AND last_activity > ? AND ip_address != ?", 
-        (time.time() - 60, curr_ip)
-    ).fetchone()
+        "SELECT username, role, ip_address FROM session_activity WHERE (role='admin' OR role='dev') AND last_activity > ?", 
+        (time.time() - 60,)
+    ).fetchall()
     conn.close()
-    return res
+    
+    # Filter out current IP manually to handle potential logic issues
+    for row in res:
+        if row[2] != curr_ip:
+            return row # Return the first session that isn't us
+            
+    return None
 
 # Set page config immediately as the first streamlit command
 st.set_page_config(page_title="S23 Portal", layout="wide")
@@ -1528,20 +1550,53 @@ if st.session_state['app_mode'] == 'admin' and not st.session_state.get('is_admi
     with col1:
         st.info("Please enter your administrator credentials to proceed.")
         
-        # EMERGENCY CLEAR: If the user is stuck after a refresh, let them clear their own IP's locks
-        if st.button("⚠️ UNLOCK MY ACCESS", help="Use this if you refreshed and are blocked by your own session."):
-            try:
-                ip = get_visitor_ip()
-                conn = get_conn()
-                conn.execute("DELETE FROM session_activity WHERE ip_address = ? AND (role = 'admin' OR role = 'dev')", (ip,))
-                conn.commit()
-                conn.close()
-                st.success("Your previous session locks have been cleared. You can now login.")
-                time.sleep(1)
-                st.rerun()
-            except Exception:
-                pass
-
+        # Check for active admin sessions first
+        active_admin = get_active_admin_session()
+        
+        if active_admin:
+            st.error(f"Access Denied: Someone is actively working on the admin panel.")
+            st.warning(f"Active User: {active_admin[0]} ({active_admin[1]})")
+            
+            with st.expander("🔍 UNLOCK ACCESS (Click here if you are stuck)"):
+                curr_ip = get_visitor_ip()
+                st.write(f"**Your Current ID:** `{curr_ip}`")
+                st.write(f"**Blocking ID:** `{active_admin[2]}`")
+                st.write("---")
+                st.write("### Option 1: Unlock your specific ID")
+                if st.button("🔓 UNLOCK MY ID", use_container_width=True):
+                    try:
+                        conn = get_conn()
+                        conn.execute("DELETE FROM session_activity WHERE ip_address = ? AND (role = 'admin' OR role = 'dev')", (curr_ip,))
+                        conn.commit()
+                        conn.close()
+                        st.success("Your ID has been cleared. Try logging in below.")
+                        time.sleep(1)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error: {str(e)}")
+                
+                st.write("---")
+                st.write("### Option 2: Force Unlock Everything (Requires Token)")
+                force_token = st.text_input("Admin Token to Force Unlock", type="password", key="force_token_input")
+                if st.button("☢️ FORCE UNLOCK EVERYTHING", use_container_width=True):
+                    env_tok = get_secret("ADMIN_LOGIN_TOKEN", None)
+                    if env_tok and hmac.compare_digest(force_token or "", env_tok):
+                        try:
+                            conn = get_conn()
+                            conn.execute("DELETE FROM session_activity WHERE role = 'admin' OR role = 'dev'")
+                            conn.commit()
+                            conn.close()
+                            st.success("ALL admin sessions cleared. You can now login.")
+                            time.sleep(1)
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error: {str(e)}")
+                    else:
+                        st.error("Invalid token.")
+            st.markdown("---")
+        
+        # EMERGENCY CLEAR (IP-based) - Removed as it is now inside the expander for cleaner UI
+        
         # Simple rate limiting
         if st.session_state['login_attempts'] >= 5:
             time_since_last = time.time() - st.session_state['last_login_attempt']
