@@ -1025,6 +1025,11 @@ def get_standings():
 
     # Calculate match-level stats
     m = matches_df.copy()
+    
+    # Ensure scores are numeric to prevent alignment/broadcasting errors
+    m['score_t1'] = pd.to_numeric(m['score_t1'], errors='coerce').fillna(0)
+    m['score_t2'] = pd.to_numeric(m['score_t2'], errors='coerce').fillna(0)
+    
     m['is_ot'] = (m['score_t1'] >= 12) & (m['score_t2'] >= 12)
     
     # Points for Team 1
@@ -2534,6 +2539,7 @@ elif page == "Admin Panel":
                     conn_u.execute("UPDATE matches SET score_t1=?, score_t2=?, winner_id=?, status=?, format=?, maps_played=? WHERE id=?", (int(s1), int(s2), winner_id, 'completed', fmt, int(played), int(m['id'])))
                     conn_u.commit()
                     conn_u.close()
+                    st.cache_data.clear() # Clear cache to show new scores immediately
                     st.success("Saved match and maps")
                     st.rerun()
 
@@ -2860,41 +2866,56 @@ elif page == "Admin Panel":
                         submit = st.form_submit_button("Save Scoreboard")
                         if submit:
                             conn_s = get_conn()
-                            conn_s.execute("DELETE FROM match_stats_map WHERE match_id=? AND map_index=? AND team_id=?", (int(m['id']), map_idx, team_id))
-                            
-                            # Pre-fetch all player Riot IDs for the entries to avoid queries in loop
-                            entry_p_ids = [e['player_id'] for e in entries if e['player_id']]
-                            p_riot_map = {}
-                            if entry_p_ids:
-                                placeholders = ",".join(["?"] * len(entry_p_ids))
-                                p_riots = conn_s.execute(f"SELECT id, riot_id FROM players WHERE id IN ({placeholders})", entry_p_ids).fetchall()
-                                p_riot_map = {r[0]: r[1] for r in p_riots}
+                            try:
+                                conn_s.execute("DELETE FROM match_stats_map WHERE match_id=? AND map_index=? AND team_id=?", (int(m['id']), map_idx, team_id))
+                                
+                                # Pre-fetch all player Riot IDs for the entries to avoid queries in loop
+                                entry_p_ids = [e['player_id'] for e in entries if e['player_id']]
+                                p_riot_map = {}
+                                if entry_p_ids:
+                                    placeholders = ",".join(["?"] * len(entry_p_ids))
+                                    p_riots = conn_s.execute(f"SELECT id, riot_id FROM players WHERE id IN ({placeholders})", entry_p_ids).fetchall()
+                                    p_riot_map = {r[0]: r[1] for r in p_riots}
 
-                            for e in entries:
-                                if e['player_id']:
-                                    # Auto-complete stats from JSON if they are 0 and player has suggestion
-                                    final_acs, final_k, final_d, final_a = e['acs'], e['kills'], e['deaths'], e['assists']
-                                    final_agent = e['agent']
-                                    
-                                    # Get Riot ID for this player from pre-fetched map
-                                    rid_raw = p_riot_map.get(e['player_id'])
-                                    rid_key = str(rid_raw).strip().lower() if rid_raw else None
-                                    if rid_key and rid_key in sug and final_acs == 0 and final_k == 0:
-                                        s = sug[rid_key]
-                                        final_acs, final_k, final_d, final_a = s['acs'], s['k'], s['d'], s['a']
-                                        if not final_agent:
-                                            final_agent = s.get('agent')
+                                for e in entries:
+                                    if e['player_id']:
+                                        # Auto-complete stats from JSON if they are 0 and player has suggestion
+                                        final_acs, final_k, final_d, final_a = e['acs'], e['kills'], e['deaths'], e['assists']
+                                        final_agent = e['agent']
+                                        
+                                        # Get Riot ID for this player from pre-fetched map
+                                        rid_raw = p_riot_map.get(e['player_id'])
+                                        
+                                        # Find Riot ID from label map if not in DB
+                                        p_label = player_lookup.get(e['player_id'], {}).get('label')
+                                        entry_rid_from_label = label_to_riot.get(p_label)
+                                        entry_rid_key = entry_rid_from_label.lower() if entry_rid_from_label else (rid_raw.lower() if rid_raw else None)
+                                        
+                                        if entry_rid_key and entry_rid_key in sug and final_acs == 0 and final_k == 0:
+                                            s = sug[entry_rid_key]
+                                            final_acs, final_k, final_d, final_a = s['acs'], s['k'], s['d'], s['a']
+                                            if not final_agent:
+                                                final_agent = s.get('agent')
 
-                                    conn_s.execute(
-                                        "INSERT INTO match_stats_map (match_id, map_index, team_id, player_id, is_sub, subbed_for_id, agent, acs, kills, deaths, assists) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                                        (int(m['id']), map_idx, team_id, e['player_id'], e['is_sub'], e['subbed_for_id'], final_agent, final_acs, final_k, final_d, final_a)
-                                    )
-                            conn_s.commit()
-                            conn_s.close()
-                            st.success("Scoreboard saved (stats auto-filled from JSON if they were 0)")
-                            if f"force_apply_{m['id']}_{map_idx}" in st.session_state:
-                                del st.session_state[f"force_apply_{m['id']}_{map_idx}"]
-                            st.rerun()
+                                        conn_s.execute("""
+                                            INSERT INTO match_stats_map (match_id, map_index, team_id, player_id, is_sub, subbed_for_id, agent, acs, kills, deaths, assists)
+                                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                        """, (int(m['id']), map_idx, team_id, e['player_id'], e['is_sub'], e['subbed_for_id'], final_agent, final_acs, final_k, final_d, final_a))
+                                        
+                                        # Sync Riot ID if it was missing in DB but present in label
+                                        if not rid_raw and entry_rid_from_label:
+                                            conn_s.execute("UPDATE players SET riot_id=? WHERE id=?", (entry_rid_from_label, e['player_id']))
+
+                                conn_s.commit()
+                                st.cache_data.clear()
+                                st.success("Scoreboard saved!")
+                                if f"force_apply_{m['id']}_{map_idx}" in st.session_state:
+                                    del st.session_state[f"force_apply_{m['id']}_{map_idx}"]
+                                st.rerun()
+                            except Exception as ex:
+                                st.error(f"Save failed: {ex}")
+                            finally:
+                                conn_s.close()
 
         st.divider()
         st.subheader("Players Admin")
@@ -3135,6 +3156,7 @@ elif page == "Admin Panel":
                     else:
                         conn_up.execute("UPDATE players SET name=?, riot_id=?, rank=?, default_team_id=? WHERE id=?", (nm, rid, rk, dtid, int(pid)))
                 conn_up.commit()
+                st.cache_data.clear() # Clear cache to show player changes immediately
                 st.success("Players saved")
                 st.rerun()
             conn_up.close()
