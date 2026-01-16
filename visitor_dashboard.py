@@ -2472,10 +2472,62 @@ elif page == "Playoffs":
                 maps_data = []
                 for i in range(max_maps):
                     with st.expander(f"Map {i+1}"):
+                        # Match ID input for automatic pre-filling
+                        mid_input = st.text_input(f"Match ID for Map {i+1}", key=f"po_mid_map_{m['id']}_{i}", placeholder="e.g. fef14b8b-ddc7-4b91-b91c-905327c74325")
+                        
                         pre_name = ""
                         pre_t1 = 0
                         pre_t2 = 0
                         pre_win = None
+                        
+                        # Check if we just scraped this map
+                        if mid_input:
+                            if f"scraped_data_po_{m['id']}_{i}" not in st.session_state or st.session_state.get(f"scraped_mid_po_{m['id']}_{i}") != mid_input:
+                                with st.spinner("Fetching Tracker.gg data..."):
+                                    # Clean Match ID
+                                    match_id_clean = mid_input
+                                    if "tracker.gg" in mid_input:
+                                        mid_match = re.search(r'match/([a-zA-Z0-9\-]+)', mid_input)
+                                        if mid_match: match_id_clean = mid_match.group(1)
+                                    match_id_clean = re.sub(r'[^a-zA-Z0-9\-]', '', match_id_clean)
+                                    
+                                    json_path = os.path.join("matches", f"match_{match_id_clean}.json")
+                                    jsdata = None
+                                    
+                                    # 1. Try local file first
+                                    if os.path.exists(json_path):
+                                        try:
+                                            with open(json_path, 'r', encoding='utf-8') as f:
+                                                jsdata = json.load(f)
+                                        except Exception as e:
+                                            st.error(f"Error reading local file: {e}")
+                                    
+                                    # 2. If not found locally, attempt live scrape
+                                    if not jsdata:
+                                        jsdata, err = scrape_tracker_match(match_id_clean)
+                                        if err:
+                                            st.error(f"Scrape failed: {err}")
+                                        else:
+                                            # Save locally for future use
+                                            if not os.path.exists("matches"): os.makedirs("matches")
+                                            with open(json_path, 'w', encoding='utf-8') as f:
+                                                json.dump(jsdata, f, indent=4)
+                                    
+                                    if jsdata:
+                                        # Process and apply
+                                        json_suggestions, map_name, t1_r, t2_r = parse_tracker_json(jsdata, t1_id_val)
+                                        
+                                        st.session_state[f"ocr_po_{m['id']}_{i}"] = json_suggestions
+                                        st.session_state[f"scraped_data_po_{m['id']}_{i}"] = {
+                                            'map_name': map_name,
+                                            't1_rounds': int(t1_r),
+                                            't2_rounds': int(t2_r)
+                                        }
+                                        st.session_state[f"scraped_mid_po_{m['id']}_{i}"] = mid_input
+                                        st.success(f"Map data ({map_name}) loaded!")
+
+                        scraped = st.session_state.get(f"scraped_data_po_{m['id']}_{i}")
+
                         if not existing_maps_df.empty:
                             rowx = existing_maps_df[existing_maps_df['map_index'] == i]
                             if not rowx.empty:
@@ -2483,6 +2535,16 @@ elif page == "Playoffs":
                                 pre_t1 = int(rowx.iloc[0]['team1_rounds'])
                                 pre_t2 = int(rowx.iloc[0]['team2_rounds'])
                                 pre_win = int(rowx.iloc[0]['winner_id']) if pd.notna(rowx.iloc[0]['winner_id']) else None
+                        
+                        # Override with scraped data if available
+                        if scraped:
+                            pre_name = scraped['map_name']
+                            pre_t1 = scraped['t1_rounds']
+                            pre_t2 = scraped['t2_rounds']
+                            if pre_t1 > pre_t2:
+                                pre_win = t1_id_val
+                            elif pre_t2 > pre_t1:
+                                pre_win = t2_id_val
                         nsel = st.selectbox(f"Name {i+1}", maps_catalog, index=(maps_catalog.index(pre_name) if pre_name in maps_catalog else 0), key=f"po_mname_{i}")
                         t1r = st.number_input(f"{m['t1_name']} rounds", min_value=0, value=pre_t1, key=f"po_t1r_{i}")
                         t2r = st.number_input(f"{m['t2_name']} rounds", min_value=0, value=pre_t2, key=f"po_t2r_{i}")
@@ -2805,8 +2867,8 @@ elif page == "Admin Panel":
                     maps_data = []
                     for i in range(max_maps):
                         with st.expander(f"Map {i+1}"):
-                            # Tracker.gg link for this map
-                            turl = st.text_input(f"Tracker.gg Link for Map {i+1}", key=f"turl_map_{m['id']}_{i}", placeholder="https://tracker.gg/valorant/match/...")
+                            # Match ID input for automatic pre-filling
+                            mid_input = st.text_input(f"Match ID for Map {i+1}", key=f"mid_map_{m['id']}_{i}", placeholder="e.g. fef14b8b-ddc7-4b91-b91c-905327c74325")
                             
                             pre_name = ""
                             pre_t1 = 0
@@ -2814,14 +2876,40 @@ elif page == "Admin Panel":
                             pre_win = None
                             
                             # Check if we just scraped this map
-                            if turl:
-                                if f"scraped_data_{m['id']}_{i}" not in st.session_state or st.session_state.get(f"scraped_url_{m['id']}_{i}") != turl:
-                                    with st.spinner("Scraping Tracker.gg..."):
-                                        jsdata, err = scrape_tracker_match(turl)
-                                        if err:
-                                            st.error(err)
-                                        else:
-                                            # Save to session state for scoreboard reuse
+                            if mid_input:
+                                if f"scraped_data_{m['id']}_{i}" not in st.session_state or st.session_state.get(f"scraped_mid_{m['id']}_{i}") != mid_input:
+                                    with st.spinner("Fetching Tracker.gg data..."):
+                                        # Clean Match ID
+                                        match_id_clean = mid_input
+                                        if "tracker.gg" in mid_input:
+                                            mid_match = re.search(r'match/([a-zA-Z0-9\-]+)', mid_input)
+                                            if mid_match: match_id_clean = mid_match.group(1)
+                                        match_id_clean = re.sub(r'[^a-zA-Z0-9\-]', '', match_id_clean)
+                                        
+                                        json_path = os.path.join("matches", f"match_{match_id_clean}.json")
+                                        jsdata = None
+                                        
+                                        # 1. Try local file first
+                                        if os.path.exists(json_path):
+                                            try:
+                                                with open(json_path, 'r', encoding='utf-8') as f:
+                                                    jsdata = json.load(f)
+                                            except Exception as e:
+                                                st.error(f"Error reading local file: {e}")
+                                        
+                                        # 2. If not found locally, attempt live scrape
+                                        if not jsdata:
+                                            jsdata, err = scrape_tracker_match(match_id_clean)
+                                            if err:
+                                                st.error(f"Scrape failed: {err}")
+                                            else:
+                                                # Save locally for future use
+                                                if not os.path.exists("matches"): os.makedirs("matches")
+                                                with open(json_path, 'w', encoding='utf-8') as f:
+                                                    json.dump(jsdata, f, indent=4)
+                                        
+                                        if jsdata:
+                                            # Process and apply
                                             json_suggestions, map_name, t1_r, t2_r = parse_tracker_json(jsdata, t1_id_val)
                                             
                                             st.session_state[f"ocr_{m['id']}_{i}"] = json_suggestions
@@ -2830,17 +2918,8 @@ elif page == "Admin Panel":
                                                 't1_rounds': int(t1_r),
                                                 't2_rounds': int(t2_r)
                                             }
-                                            st.session_state[f"scraped_url_{m['id']}_{i}"] = turl
-
-                                            # Save to file for caching
-                                            mid_match = re.search(r'match/([a-zA-Z0-9\-]+)', turl)
-                                            if mid_match:
-                                                mid = mid_match.group(1)
-                                                if not os.path.exists("matches"): os.makedirs("matches")
-                                                with open(os.path.join("matches", f"match_{mid}.json"), 'w', encoding='utf-8') as f:
-                                                    json.dump(jsdata, f, indent=4)
-                                            
-                                            st.success("Map data scraped and scoreboard pre-filled!")
+                                            st.session_state[f"scraped_mid_{m['id']}_{i}"] = mid_input
+                                            st.success(f"Map data ({map_name}) loaded!")
 
                             scraped = st.session_state.get(f"scraped_data_{m['id']}_{i}")
                             
@@ -2851,6 +2930,16 @@ elif page == "Admin Panel":
                                     pre_t1 = int(rowx.iloc[0]['team1_rounds'])
                                     pre_t2 = int(rowx.iloc[0]['team2_rounds'])
                                     pre_win = int(rowx.iloc[0]['winner_id']) if pd.notna(rowx.iloc[0]['winner_id']) else None
+                            
+                            # Override with scraped data if available
+                            if scraped:
+                                pre_name = scraped['map_name']
+                                pre_t1 = scraped['t1_rounds']
+                                pre_t2 = scraped['t2_rounds']
+                                if pre_t1 > pre_t2:
+                                    pre_win = t1_id_val
+                                elif pre_t2 > pre_t1:
+                                    pre_win = t2_id_val
                             
                             # Override with scraped data if available
                             if scraped:
