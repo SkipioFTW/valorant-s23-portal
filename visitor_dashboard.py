@@ -603,6 +603,7 @@ def ensure_upgrade_schema(conn=None):
     ensure_column("matches", "match_type", "match_type TEXT DEFAULT 'regular'", conn=conn)
     ensure_column("matches", "playoff_round", "playoff_round INTEGER", conn=conn)
     ensure_column("matches", "bracket_pos", "bracket_pos INTEGER", conn=conn)
+    ensure_column("matches", "is_forfeit", "is_forfeit BOOLEAN DEFAULT 0", conn=conn)
     
     try:
         c.execute("INSERT OR IGNORE INTO seasons (id, name, is_active) VALUES (22, 'Season 22', 0)")
@@ -1143,7 +1144,7 @@ def get_week_matches(week):
     conn = get_conn()
     df = pd.read_sql_query(
         """
-        SELECT m.id, m.week, m.group_name, m.status, m.format, m.maps_played,
+        SELECT m.id, m.week, m.group_name, m.status, m.format, m.maps_played, m.is_forfeit,
                t1.name as t1_name, t2.name as t2_name,
                m.score_t1, m.score_t2, t1.id as t1_id, t2.id as t2_id
         FROM matches m
@@ -1164,7 +1165,7 @@ def get_playoff_matches():
     conn = get_conn()
     df = pd.read_sql_query(
         """
-        SELECT m.id, m.playoff_round, m.bracket_pos, m.status, m.format, m.maps_played,
+        SELECT m.id, m.playoff_round, m.bracket_pos, m.status, m.format, m.maps_played, m.is_forfeit,
                t1.name as t1_name, t2.name as t2_name,
                m.score_t1, m.score_t2, t1.id as t1_id, t2.id as t2_id,
                m.winner_id
@@ -1619,7 +1620,10 @@ elif page == "Matches":
                 winner_color_1 = "var(--primary-blue)" if m.score_t1 > m.score_t2 else "var(--text-main)"
                 winner_color_2 = "var(--primary-red)" if m.score_t2 > m.score_t1 else "var(--text-main)"
                 
+                forfeit_badge = '<div style="text-align: center; margin-bottom: 5px;"><span style="background: rgba(255, 70, 85, 0.2); color: var(--primary-red); padding: 2px 8px; border-radius: 4px; font-size: 0.7rem; font-weight: bold; border: 1px solid var(--primary-red);">FORFEIT</span></div>' if getattr(m, 'is_forfeit', 0) else ''
+                
                 st.markdown(f"""<div class="custom-card" style="border-left: 4px solid {'var(--primary-blue)' if m.score_t1 > m.score_t2 else 'var(--primary-red)'};">
+{forfeit_badge}
 <div style="display: flex; justify-content: space-between; align-items: center;">
 <div style="flex: 1; text-align: right;">
 <span style="font-weight: bold; color: {winner_color_1};">{html.escape(str(m.t1_name))}</span>
@@ -1672,7 +1676,10 @@ elif page == "Match Summary":
         m = df.iloc[sel]
         
         # Match Score Card
+        forfeit_badge = '<div style="text-align: center; margin-bottom: 10px;"><span style="background: rgba(255, 70, 85, 0.2); color: var(--primary-red); padding: 4px 12px; border-radius: 4px; font-size: 0.8rem; font-weight: bold; border: 1px solid var(--primary-red); letter-spacing: 2px;">FORFEIT MATCH</span></div>' if m.get('is_forfeit', 0) else ''
+        
         st.markdown(f"""<div class="custom-card" style="margin-bottom: 2rem; border-bottom: 4px solid {'var(--primary-blue)' if m['score_t1'] > m['score_t2'] else 'var(--primary-red)'};">
+{forfeit_badge}
 <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 0;">
 <div style="flex: 1; text-align: right;">
 <h2 style="margin: 0; color: {'var(--primary-blue)' if m['score_t1'] > m['score_t2'] else 'var(--text-main)'}; font-family: 'Orbitron';">{html.escape(str(m['t1_name']))}</h2>
@@ -2214,62 +2221,86 @@ elif page == "Playoffs":
             c0, c1, c2 = st.columns([1,1,1])
             with c0:
                 fmt = st.selectbox("Format", ["BO1","BO3","BO5"], index=["BO1","BO3","BO5"].index(str(m['format'] or "BO3").upper()), key="po_fmt")
-            with c1:
-                s1 = st.number_input(m['t1_name'], min_value=0, value=int(m['score_t1'] or 0), key="po_s1")
-            with c2:
-                s2 = st.number_input(m['t2_name'], min_value=0, value=int(m['score_t2'] or 0), key="po_s2")
-
-            st.caption("Per-Map Scores")
-            maps_catalog = ["Ascent","Bind","Breeze","Corrode","Fracture","Haven","Icebox","Lotus","Pearl","Split","Sunset"]
-            fmt_constraints = {"BO1": (1,1), "BO3": (2,3), "BO5": (3,5)}
-            min_maps, max_maps = fmt_constraints.get(fmt, (1,1))
-            existing_maps_df = get_match_maps(int(m['id']))
-            maps_data = []
-            for i in range(max_maps):
-                with st.expander(f"Map {i+1}"):
-                    pre_name = ""
-                    pre_t1 = 0
-                    pre_t2 = 0
-                    pre_win = None
-                    if not existing_maps_df.empty:
-                        rowx = existing_maps_df[existing_maps_df['map_index'] == i]
-                        if not rowx.empty:
-                            pre_name = rowx.iloc[0]['map_name']
-                            pre_t1 = int(rowx.iloc[0]['team1_rounds'])
-                            pre_t2 = int(rowx.iloc[0]['team2_rounds'])
-                            pre_win = int(rowx.iloc[0]['winner_id']) if pd.notna(rowx.iloc[0]['winner_id']) else None
-                    nsel = st.selectbox(f"Name {i+1}", maps_catalog, index=(maps_catalog.index(pre_name) if pre_name in maps_catalog else 0), key=f"po_mname_{i}")
-                    t1r = st.number_input(f"{m['t1_name']} rounds", min_value=0, value=pre_t1, key=f"po_t1r_{i}")
-                    t2r = st.number_input(f"{m['t2_name']} rounds", min_value=0, value=pre_t2, key=f"po_t2r_{i}")
-                    t1_id_val = int(m.get('t1_id', m.get('team1_id')))
-                    t2_id_val = int(m.get('t2_id', m.get('team2_id')))
-                    wsel = st.selectbox("Winner", ["", m['t1_name'], m['t2_name']], index=(1 if pre_win==t1_id_val else (2 if pre_win==t2_id_val else 0)), key=f"po_win_{i}")
-                    wid = None
-                    if wsel == m['t1_name']:
-                        wid = t1_id_val
-                    elif wsel == m['t2_name']:
-                        wid = t2_id_val
-                    maps_data.append({"map_index": i, "map_name": nsel, "team1_rounds": int(t1r), "team2_rounds": int(t2r), "winner_id": wid})
             
-            if st.button("Save Playoff Match & Maps"):
-                played = 0
-                for i, md in enumerate(maps_data):
-                    if i < max_maps and (i < min_maps or (md['team1_rounds']+md['team2_rounds']>0)):
-                        played += 1
-                upsert_match_maps(int(m['id']), maps_data[:max_maps])
-                conn_u = get_conn()
-                t1_id_val = int(m.get('t1_id', m.get('team1_id')))
-                t2_id_val = int(m.get('t2_id', m.get('team2_id')))
-                winner_id = None
-                if s1 > s2:
-                    winner_id = t1_id_val
-                elif s2 > s1:
-                    winner_id = t2_id_val
-                conn_u.execute("UPDATE matches SET score_t1=?, score_t2=?, winner_id=?, status=?, format=?, maps_played=? WHERE id=?", (int(s1), int(s2), winner_id, 'completed' if played > 0 else 'scheduled', fmt, int(played), int(m['id'])))
-                conn_u.commit()
-                conn_u.close()
-                st.success("Saved playoff match data")
-                st.rerun()
+            # Pre-define IDs for both FF and regular logic
+            t1_id_val = int(m.get('t1_id', m.get('team1_id')))
+            t2_id_val = int(m.get('t2_id', m.get('team2_id')))
+            
+            # Match-level Forfeit
+            is_match_ff = st.checkbox("Match-level Forfeit", value=bool(m.get('is_forfeit', 0)), key=f"po_match_ff_{m['id']}", help="Check if the entire match was a forfeit (13-0 result)")
+            
+            if is_match_ff:
+                ff_winner_team = st.radio("Match Winner", [m['t1_name'], m['t2_name']], index=0 if m['score_t1'] >= m['score_t2'] else 1, horizontal=True, key="po_ff_winner")
+                s1 = 13 if ff_winner_team == m['t1_name'] else 0
+                s2 = 13 if ff_winner_team == m['t2_name'] else 0
+                st.info(f"Forfeit Result: {m['t1_name']} {s1} - {s2} {m['t2_name']}")
+                
+                if st.button("Save Forfeit Playoff Match"):
+                    conn_u = get_conn()
+                    winner_id = t1_id_val if s1 > s2 else t2_id_val
+                    conn_u.execute("UPDATE matches SET score_t1=?, score_t2=?, winner_id=?, status=?, format=?, maps_played=?, is_forfeit=1 WHERE id=?", (int(s1), int(s2), winner_id, 'completed', fmt, 0, int(m['id'])))
+                    # Clear any existing maps/stats if it's now a forfeit
+                    conn_u.execute("DELETE FROM match_maps WHERE match_id=?", (int(m['id']),))
+                    conn_u.execute("DELETE FROM match_stats_map WHERE match_id=?", (int(m['id']),))
+                    conn_u.commit()
+                    conn_u.close()
+                    st.cache_data.clear()
+                    st.success("Saved forfeit playoff match")
+                    st.rerun()
+            else:
+                with c1:
+                    s1 = st.number_input(m['t1_name'], min_value=0, value=int(m['score_t1'] or 0), key="po_s1")
+                with c2:
+                    s2 = st.number_input(m['t2_name'], min_value=0, value=int(m['score_t2'] or 0), key="po_s2")
+
+                st.caption("Per-Map Scores")
+                maps_catalog = ["Ascent","Bind","Breeze","Corrode","Fracture","Haven","Icebox","Lotus","Pearl","Split","Sunset"]
+                fmt_constraints = {"BO1": (1,1), "BO3": (2,3), "BO5": (3,5)}
+                min_maps, max_maps = fmt_constraints.get(fmt, (1,1))
+                existing_maps_df = get_match_maps(int(m['id']))
+                maps_data = []
+                for i in range(max_maps):
+                    with st.expander(f"Map {i+1}"):
+                        pre_name = ""
+                        pre_t1 = 0
+                        pre_t2 = 0
+                        pre_win = None
+                        if not existing_maps_df.empty:
+                            rowx = existing_maps_df[existing_maps_df['map_index'] == i]
+                            if not rowx.empty:
+                                pre_name = rowx.iloc[0]['map_name']
+                                pre_t1 = int(rowx.iloc[0]['team1_rounds'])
+                                pre_t2 = int(rowx.iloc[0]['team2_rounds'])
+                                pre_win = int(rowx.iloc[0]['winner_id']) if pd.notna(rowx.iloc[0]['winner_id']) else None
+                        nsel = st.selectbox(f"Name {i+1}", maps_catalog, index=(maps_catalog.index(pre_name) if pre_name in maps_catalog else 0), key=f"po_mname_{i}")
+                        t1r = st.number_input(f"{m['t1_name']} rounds", min_value=0, value=pre_t1, key=f"po_t1r_{i}")
+                        t2r = st.number_input(f"{m['t2_name']} rounds", min_value=0, value=pre_t2, key=f"po_t2r_{i}")
+                        wsel = st.selectbox("Winner", ["", m['t1_name'], m['t2_name']], index=(1 if pre_win==t1_id_val else (2 if pre_win==t2_id_val else 0)), key=f"po_win_{i}")
+                        wid = None
+                        if wsel == m['t1_name']:
+                            wid = t1_id_val
+                        elif wsel == m['t2_name']:
+                            wid = t2_id_val
+                        maps_data.append({"map_index": i, "map_name": nsel, "team1_rounds": int(t1r), "team2_rounds": int(t2r), "winner_id": wid})
+                
+                if st.button("Save Playoff Match & Maps"):
+                    played = 0
+                    for i, md in enumerate(maps_data):
+                        if i < max_maps and (i < min_maps or (md['team1_rounds']+md['team2_rounds']>0)):
+                            played += 1
+                    upsert_match_maps(int(m['id']), maps_data[:max_maps])
+                    conn_u = get_conn()
+                    winner_id = None
+                    if s1 > s2:
+                        winner_id = t1_id_val
+                    elif s2 > s1:
+                        winner_id = t2_id_val
+                    conn_u.execute("UPDATE matches SET score_t1=?, score_t2=?, winner_id=?, status=?, format=?, maps_played=?, is_forfeit=0 WHERE id=?", (int(s1), int(s2), winner_id, 'completed' if played > 0 else 'scheduled', fmt, int(played), int(m['id'])))
+                    conn_u.commit()
+                    conn_u.close()
+                    st.cache_data.clear()
+                    st.success("Saved playoff match data")
+                    st.rerun()
 
     # Bracket Visualization
     if df.empty:
@@ -2385,19 +2416,22 @@ elif page == "Playoffs":
                         s1 = m['score_t1']
                         s2 = m['score_t2']
                         status = m['status']
+                        is_ff = m.get('is_forfeit', 0)
                         
                         t1_class = "team-winner" if status == 'completed' and s1 > s2 else ""
                         t2_class = "team-winner" if status == 'completed' and s2 > s1 else ""
+                        
+                        ff_marker = '<span style="color: var(--primary-red); font-size: 0.6rem; margin-left: 5px;">[FF]</span>' if is_ff else ''
                         
                         st.markdown(f"""
                         <div class="bracket-match">
                             <div class="match-team">
                                 <span class="{t1_class}">{t1_display}</span>
-                                <span style="font-family: 'Orbitron';">{s1}</span>
+                                <span style="font-family: 'Orbitron';">{s1}{ff_marker if s1 > s2 else ''}</span>
                             </div>
                             <div class="match-team">
                                 <span class="{t2_class}">{t2_display}</span>
-                                <span style="font-family: 'Orbitron';">{s2}</span>
+                                <span style="font-family: 'Orbitron';">{s2}{ff_marker if s2 > s1 else ''}</span>
                             </div>
                             <div class="match-info">
                                 {m['format']} • {status.upper()}
@@ -2487,124 +2521,148 @@ elif page == "Admin Panel":
                 c0, c1, c2 = st.columns([1,1,1])
                 with c0:
                     fmt = st.selectbox("Format", ["BO1","BO3","BO5"], index=["BO1","BO3","BO5"].index(str(m['format'] or "BO3").upper()))
-                with c1:
-                    s1 = st.number_input(m['t1_name'], min_value=0, value=int(m['score_t1'] or 0))
-                with c2:
-                    s2 = st.number_input(m['t2_name'], min_value=0, value=int(m['score_t2'] or 0))
-
-                st.caption("Per-Map Scores")
-                maps_catalog = ["Ascent","Bind","Breeze","Corrode","Fracture","Haven","Icebox","Lotus","Pearl","Split","Sunset"]
-                fmt_constraints = {"BO1": (1,1), "BO3": (2,3), "BO5": (3,5)}
-                min_maps, max_maps = fmt_constraints.get(fmt, (1,1))
-                existing_maps_df = get_match_maps(int(m['id']))
-                maps_data = []
-                for i in range(max_maps):
-                    with st.expander(f"Map {i+1}"):
-                        # Tracker.gg link for this map
-                        turl = st.text_input(f"Tracker.gg Link for Map {i+1}", key=f"turl_map_{m['id']}_{i}", placeholder="https://tracker.gg/valorant/match/...")
-                        
-                        pre_name = ""
-                        pre_t1 = 0
-                        pre_t2 = 0
-                        pre_win = None
-                        
-                        # Check if we just scraped this map
-                        if turl:
-                            if f"scraped_data_{m['id']}_{i}" not in st.session_state or st.session_state.get(f"scraped_url_{m['id']}_{i}") != turl:
-                                with st.spinner("Scraping Tracker.gg..."):
-                                    jsdata, err = scrape_tracker_match(turl)
-                                    if err:
-                                        st.error(err)
-                                    else:
-                                        # Save to session state for scoreboard reuse
-                                        cur_t1_id = int(m.get('t1_id', m.get('team1_id')))
-                                        json_suggestions, map_name, t1_r, t2_r = parse_tracker_json(jsdata, cur_t1_id)
-                                        
-                                        st.session_state[f"ocr_{m['id']}_{i}"] = json_suggestions
-                                        st.session_state[f"scraped_data_{m['id']}_{i}"] = {
-                                            'map_name': map_name,
-                                            't1_rounds': int(t1_r),
-                                            't2_rounds': int(t2_r)
-                                        }
-                                        st.session_state[f"scraped_url_{m['id']}_{i}"] = turl
-
-                                        # Save to file for caching
-                                        mid_match = re.search(r'match/([a-zA-Z0-9\-]+)', turl)
-                                        if mid_match:
-                                            mid = mid_match.group(1)
-                                            if not os.path.exists("matches"): os.makedirs("matches")
-                                            with open(os.path.join("matches", f"match_{mid}.json"), 'w', encoding='utf-8') as f:
-                                                json.dump(jsdata, f, indent=4)
-                                        
-                                        st.success("Map data scraped and scoreboard pre-filled!")
-
-                        scraped = st.session_state.get(f"scraped_data_{m['id']}_{i}")
-                        
-                        if not existing_maps_df.empty:
-                            rowx = existing_maps_df[existing_maps_df['map_index'] == i]
-                            if not rowx.empty:
-                                pre_name = rowx.iloc[0]['map_name']
-                                pre_t1 = int(rowx.iloc[0]['team1_rounds'])
-                                pre_t2 = int(rowx.iloc[0]['team2_rounds'])
-                                pre_win = int(rowx.iloc[0]['winner_id']) if pd.notna(rowx.iloc[0]['winner_id']) else None
-                        
-                        # Override with scraped data if available
-                        t1_id_val = int(m.get('t1_id', m.get('team1_id')))
-                        t2_id_val = int(m.get('t2_id', m.get('team2_id')))
-                        if scraped:
-                            pre_name = scraped['map_name']
-                            pre_t1 = scraped['t1_rounds']
-                            pre_t2 = scraped['t2_rounds']
-                            if pre_t1 > pre_t2:
-                                pre_win = t1_id_val
-                            elif pre_t2 > pre_t1:
-                                pre_win = t2_id_val
-
-                        nsel = st.selectbox(f"Name {i+1}", maps_catalog, index=(maps_catalog.index(pre_name) if pre_name in maps_catalog else 0), key=f"mname_{i}")
-                        t1r = st.number_input(f"{m['t1_name']} rounds", min_value=0, value=pre_t1, key=f"t1r_{i}")
-                        t2r = st.number_input(f"{m['t2_name']} rounds", min_value=0, value=pre_t2, key=f"t2r_{i}")
-                        
-                        # Forfeit option
-                        is_forfeit = st.checkbox(f"Forfeit", value=False, key=f"ff_{i}", help="Check if this map was a forfeit (13-0)")
-                        if is_forfeit:
-                            ff_winner = st.radio("Forfeit Winner", [m['t1_name'], m['t2_name']], key=f"ff_win_{i}", horizontal=True)
-                            if ff_winner == m['t1_name']:
-                                t1r, t2r = 13, 0
-                            else:
-                                t1r, t2r = 0, 13
-                        
-                        wsel = st.selectbox("Winner", ["", m['t1_name'], m['t2_name']], index=(1 if pre_win==t1_id_val else (2 if pre_win==t2_id_val else 0)), key=f"win_{i}")
-                        wid = None
-                        if wsel == m['t1_name']:
-                            wid = t1_id_val
-                        elif wsel == m['t2_name']:
-                            wid = t2_id_val
-                        maps_data.append({"map_index": i, "map_name": nsel, "team1_rounds": int(t1r), "team2_rounds": int(t2r), "winner_id": wid})
-                if st.button("Save Maps"):
-                    played = 0
-                    for i, md in enumerate(maps_data):
-                        if i < max_maps and (i < min_maps or (md['team1_rounds']+md['team2_rounds']>0)):
-                            played += 1
-                    upsert_match_maps(int(m['id']), maps_data[:max_maps])
-                    conn_u = get_conn()
-                    winner_id = None
-                    if s1 > s2:
-                        winner_id = t1_id_val
-                    elif s2 > s1:
-                        winner_id = t2_id_val
-                    conn_u.execute("UPDATE matches SET score_t1=?, score_t2=?, winner_id=?, status=?, format=?, maps_played=? WHERE id=?", (int(s1), int(s2), winner_id, 'completed', fmt, int(played), int(m['id'])))
-                    conn_u.commit()
-                    conn_u.close()
-                    st.cache_data.clear() # Clear cache to show new scores immediately
-                    st.success("Saved match and maps")
-                    st.rerun()
-
-                st.divider()
-                st.subheader("Per-Map Scoreboard")
-                map_choice = st.selectbox("Select Map", list(range(1, max_maps+1)), index=0)
-                map_idx = map_choice - 1
                 
-                all_df0 = get_all_players()
+                # Pre-define IDs for both FF and regular logic
+                t1_id_val = int(m.get('t1_id', m.get('team1_id')))
+                t2_id_val = int(m.get('t2_id', m.get('team2_id')))
+                
+                # Match-level Forfeit
+                is_match_ff = st.checkbox("Match-level Forfeit", value=bool(m.get('is_forfeit', 0)), key=f"match_ff_{m['id']}", help="Check if the entire match was a forfeit (13-0 result)")
+                
+                if is_match_ff:
+                    ff_winner_team = st.radio("Match Winner", [m['t1_name'], m['t2_name']], index=0 if m['score_t1'] >= m['score_t2'] else 1, horizontal=True)
+                    s1 = 13 if ff_winner_team == m['t1_name'] else 0
+                    s2 = 13 if ff_winner_team == m['t2_name'] else 0
+                    st.info(f"Forfeit Result: {m['t1_name']} {s1} - {s2} {m['t2_name']}")
+                    
+                    if st.button("Save Forfeit Match"):
+                        conn_u = get_conn()
+                        winner_id = t1_id_val if s1 > s2 else t2_id_val
+                        conn_u.execute("UPDATE matches SET score_t1=?, score_t2=?, winner_id=?, status=?, format=?, maps_played=?, is_forfeit=1 WHERE id=?", (int(s1), int(s2), winner_id, 'completed', fmt, 0, int(m['id'])))
+                        # Clear any existing maps/stats if it's now a forfeit
+                        conn_u.execute("DELETE FROM match_maps WHERE match_id=?", (int(m['id']),))
+                        conn_u.execute("DELETE FROM match_stats_map WHERE match_id=?", (int(m['id']),))
+                        conn_u.commit()
+                        conn_u.close()
+                        st.cache_data.clear()
+                        st.success("Saved forfeit match")
+                        st.rerun()
+                else:
+                    with c1:
+                        s1 = st.number_input(m['t1_name'], min_value=0, value=int(m['score_t1'] or 0))
+                    with c2:
+                        s2 = st.number_input(m['t2_name'], min_value=0, value=int(m['score_t2'] or 0))
+
+                    st.caption("Per-Map Scores")
+                    maps_catalog = ["Ascent","Bind","Breeze","Corrode","Fracture","Haven","Icebox","Lotus","Pearl","Split","Sunset"]
+                    fmt_constraints = {"BO1": (1,1), "BO3": (2,3), "BO5": (3,5)}
+                    min_maps, max_maps = fmt_constraints.get(fmt, (1,1))
+                    existing_maps_df = get_match_maps(int(m['id']))
+                    maps_data = []
+                    for i in range(max_maps):
+                        with st.expander(f"Map {i+1}"):
+                            # Tracker.gg link for this map
+                            turl = st.text_input(f"Tracker.gg Link for Map {i+1}", key=f"turl_map_{m['id']}_{i}", placeholder="https://tracker.gg/valorant/match/...")
+                            
+                            pre_name = ""
+                            pre_t1 = 0
+                            pre_t2 = 0
+                            pre_win = None
+                            
+                            # Check if we just scraped this map
+                            if turl:
+                                if f"scraped_data_{m['id']}_{i}" not in st.session_state or st.session_state.get(f"scraped_url_{m['id']}_{i}") != turl:
+                                    with st.spinner("Scraping Tracker.gg..."):
+                                        jsdata, err = scrape_tracker_match(turl)
+                                        if err:
+                                            st.error(err)
+                                        else:
+                                            # Save to session state for scoreboard reuse
+                                            json_suggestions, map_name, t1_r, t2_r = parse_tracker_json(jsdata, t1_id_val)
+                                            
+                                            st.session_state[f"ocr_{m['id']}_{i}"] = json_suggestions
+                                            st.session_state[f"scraped_data_{m['id']}_{i}"] = {
+                                                'map_name': map_name,
+                                                't1_rounds': int(t1_r),
+                                                't2_rounds': int(t2_r)
+                                            }
+                                            st.session_state[f"scraped_url_{m['id']}_{i}"] = turl
+
+                                            # Save to file for caching
+                                            mid_match = re.search(r'match/([a-zA-Z0-9\-]+)', turl)
+                                            if mid_match:
+                                                mid = mid_match.group(1)
+                                                if not os.path.exists("matches"): os.makedirs("matches")
+                                                with open(os.path.join("matches", f"match_{mid}.json"), 'w', encoding='utf-8') as f:
+                                                    json.dump(jsdata, f, indent=4)
+                                            
+                                            st.success("Map data scraped and scoreboard pre-filled!")
+
+                            scraped = st.session_state.get(f"scraped_data_{m['id']}_{i}")
+                            
+                            if not existing_maps_df.empty:
+                                rowx = existing_maps_df[existing_maps_df['map_index'] == i]
+                                if not rowx.empty:
+                                    pre_name = rowx.iloc[0]['map_name']
+                                    pre_t1 = int(rowx.iloc[0]['team1_rounds'])
+                                    pre_t2 = int(rowx.iloc[0]['team2_rounds'])
+                                    pre_win = int(rowx.iloc[0]['winner_id']) if pd.notna(rowx.iloc[0]['winner_id']) else None
+                            
+                            # Override with scraped data if available
+                            if scraped:
+                                pre_name = scraped['map_name']
+                                pre_t1 = scraped['t1_rounds']
+                                pre_t2 = scraped['t2_rounds']
+                                if pre_t1 > pre_t2:
+                                    pre_win = t1_id_val
+                                elif pre_t2 > pre_t1:
+                                    pre_win = t2_id_val
+
+                            nsel = st.selectbox(f"Name {i+1}", maps_catalog, index=(maps_catalog.index(pre_name) if pre_name in maps_catalog else 0), key=f"mname_{i}")
+                            t1r = st.number_input(f"{m['t1_name']} rounds", min_value=0, value=pre_t1, key=f"t1r_{i}")
+                            t2r = st.number_input(f"{m['t2_name']} rounds", min_value=0, value=pre_t2, key=f"t2r_{i}")
+                            
+                            # Forfeit option
+                            is_forfeit = st.checkbox(f"Forfeit", value=False, key=f"ff_{i}", help="Check if this map was a forfeit (13-0)")
+                            if is_forfeit:
+                                ff_winner = st.radio("Forfeit Winner", [m['t1_name'], m['t2_name']], key=f"ff_win_{i}", horizontal=True)
+                                if ff_winner == m['t1_name']:
+                                    t1r, t2r = 13, 0
+                                else:
+                                    t1r, t2r = 0, 13
+                            
+                            wsel = st.selectbox("Winner", ["", m['t1_name'], m['t2_name']], index=(1 if pre_win==t1_id_val else (2 if pre_win==t2_id_val else 0)), key=f"win_{i}")
+                            wid = None
+                            if wsel == m['t1_name']:
+                                wid = t1_id_val
+                            elif wsel == m['t2_name']:
+                                wid = t2_id_val
+                            maps_data.append({"map_index": i, "map_name": nsel, "team1_rounds": int(t1r), "team2_rounds": int(t2r), "winner_id": wid})
+                    if st.button("Save Maps"):
+                        played = 0
+                        for i, md in enumerate(maps_data):
+                            if i < max_maps and (i < min_maps or (md['team1_rounds']+md['team2_rounds']>0)):
+                                played += 1
+                        upsert_match_maps(int(m['id']), maps_data[:max_maps])
+                        conn_u = get_conn()
+                        winner_id = None
+                        if s1 > s2:
+                            winner_id = t1_id_val
+                        elif s2 > s1:
+                            winner_id = t2_id_val
+                        conn_u.execute("UPDATE matches SET score_t1=?, score_t2=?, winner_id=?, status=?, format=?, maps_played=?, is_forfeit=0 WHERE id=?", (int(s1), int(s2), winner_id, 'completed', fmt, int(played), int(m['id'])))
+                        conn_u.commit()
+                        conn_u.close()
+                        st.cache_data.clear() # Clear cache to show new scores immediately
+                        st.success("Saved match and maps")
+                        st.rerun()
+
+                    st.divider()
+                    st.subheader("Per-Map Scoreboard")
+                    map_choice = st.selectbox("Select Map", list(range(1, max_maps+1)), index=0)
+                    map_idx = map_choice - 1
+                    
+                    all_df0 = get_all_players()
                 name_to_riot = dict(zip(all_df0['name'].astype(str), all_df0['riot_id'].astype(str))) if not all_df0.empty else {}
                 
                 # Match ID or Link input for automatic pre-filling
