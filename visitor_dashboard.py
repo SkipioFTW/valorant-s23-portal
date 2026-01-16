@@ -200,6 +200,12 @@ st.markdown("""<link href='https://fonts.googleapis.com/css2?family=Orbitron:wgh
 
 st.markdown("""
 <style>
+/* Hide Streamlit elements */
+#MainMenu {visibility: hidden;}
+header {visibility: hidden;}
+footer {visibility: hidden;}
+.stAppDeployButton {display:none;}
+
 /* Global Styles */
 :root {
 --primary-blue: #3FD1FF;
