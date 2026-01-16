@@ -1033,14 +1033,18 @@ def get_standings():
     m['is_ot'] = (m['score_t1'] >= 12) & (m['score_t2'] >= 12)
     
     # Points for Team 1
-    m['p1'] = 0
-    m.loc[m['score_t1'] > m['score_t2'], 'p1'] = 15 + m['score_t1']
-    m.loc[m['score_t1'] < m['score_t2'], 'p1'] = np.where(m['is_ot'], 12 + m['score_t1'], m['score_t1'])
+    m['p1'] = np.where(
+        m['score_t1'] > m['score_t2'],
+        15 + m['score_t1'],
+        np.where(m['is_ot'], 12 + m['score_t1'], m['score_t1'])
+    )
     
     # Points for Team 2
-    m['p2'] = 0
-    m.loc[m['score_t2'] > m['score_t1'], 'p2'] = 15 + m['score_t2']
-    m.loc[m['score_t2'] < m['score_t1'], 'p2'] = np.where(m['is_ot'], 12 + m['score_t2'], m['score_t2'])
+    m['p2'] = np.where(
+        m['score_t2'] > m['score_t1'],
+        15 + m['score_t2'],
+        np.where(m['is_ot'], 12 + m['score_t2'], m['score_t2'])
+    )
     
     # Wins/Losses
     m['t1_win'] = (m['score_t1'] > m['score_t2']).astype(int)
@@ -1049,16 +1053,16 @@ def get_standings():
     # Reshape to team-level
     t1_stats = m.groupby('team1_id').agg({
         't1_win': 'sum',
-        't2_win': lambda x: (1-x).sum(), # t1 losses
-        'score_t1': 'sum', # for RD calculation later or Points
-        'score_t2': 'sum', # for RD calculation later or Points Against
+        't2_win': 'sum',
+        'score_t1': 'sum',
+        'score_t2': 'sum',
         'p1': 'sum',
-        'id': 'count' # Played
+        'id': 'count'
     }).rename(columns={'t1_win': 'Wins', 't2_win': 'Losses', 'score_t1': 'S_For', 'score_t2': 'S_Ag', 'p1': 'Points', 'id': 'Played'})
     
     t2_stats = m.groupby('team2_id').agg({
         't2_win': 'sum',
-        't1_win': lambda x: (1-x).sum(), # t2 losses
+        't1_win': 'sum',
         'score_t2': 'sum',
         'score_t1': 'sum',
         'p2': 'sum',
