@@ -46,10 +46,10 @@ def extract_features(t1_id, t2_id, current_week=None):
         avg_acs = acs_res['avg_acs'].iloc[0] or 200.0 # Baseline
         
         # 3. Strength of Schedule (Avg WR of opponents)
-        opponents = []
-        for _, row in m.iterrows():
-            opp_id = row['team2_id'] if row['team1_id'] == tid else row['team1_id']
-            opponents.append(opp_id)
+        if not m.empty:
+            opponents = np.where(m['team1_id'] == tid, m['team2_id'], m['team1_id'])
+        else:
+            opponents = []
         
         opp_wr = 0.5
         if opponents:
@@ -113,12 +113,12 @@ def train_initial_model():
     X_train = []
     y_train = []
     
-    for _, row in matches.iterrows():
+    for row in matches.itertuples():
         # For training, we should ideally only use data BEFORE this match
         # but for the first run, we'll use a simplified approach
-        feat = extract_features(row['team1_id'], row['team2_id'], row['week'])
+        feat = extract_features(row.team1_id, row.team2_id, row.week)
         X_train.append(feat[0])
-        y_train.append(1 if row['winner_id'] == row['team1_id'] else 0)
+        y_train.append(1 if row.winner_id == row.team1_id else 0)
         
     model = RandomForestClassifier(n_estimators=100, random_state=42)
     model.fit(X_train, y_train)

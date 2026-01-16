@@ -26,11 +26,11 @@ def prepare_training_data():
     features = []
     targets = []
     
-    for _, match in matches.iterrows():
-        m_id = match['id']
-        t1_id = match['team1_id']
-        t2_id = match['team2_id']
-        m_week = match['week']
+    for match in matches.itertuples():
+        m_id = match.id
+        t1_id = match.team1_id
+        t2_id = match.team2_id
+        m_week = match.week
         
         # We only want to train on matches where we have historical data BEFORE this match
         def get_team_features(tid, current_match_id, current_week):
