@@ -519,9 +519,9 @@ def scrape_tracker_match(url):
     except Exception as e:
         return None, f"Scraping error: {str(e)}"
 
-def parse_tracker_json(jsdata, team1_id):
+def parse_tracker_json(jsdata, team1_id, team2_id):
     """
-    Parses Tracker.gg JSON data and matches it to team1_id.
+    Parses Tracker.gg JSON data and matches it to team1_id and team2_id.
     Returns (json_suggestions, map_name, t1_rounds, t2_rounds)
     """
     import re
@@ -535,29 +535,84 @@ def parse_tracker_json(jsdata, team1_id):
     # Get all players for matching
     all_players_df = get_all_players()
     riot_id_to_name = {}
+    name_to_name = {}
     if not all_players_df.empty:
         # Create a case-insensitive map of riot_id -> player name
         riot_id_to_name = {str(r).strip().lower(): str(n) for r, n in zip(all_players_df['riot_id'], all_players_df['name']) if pd.notna(r)}
+        # Also map name -> name for fallback
+        name_to_name = {str(n).strip().lower(): str(n) for n in all_players_df['name'] if pd.notna(n)}
 
     if len(team_segments) >= 2:
         # Use Riot IDs to match teams
-        # Ensure team1_id is int for comparison
         t1_id_int = int(team1_id) if team1_id is not None else None
-        t1_roster = all_players_df[all_players_df['default_team_id'] == t1_id_int]['riot_id'].dropna().tolist()
-        t1_roster = [str(r).strip().lower() for r in t1_roster]
+        t2_id_int = int(team2_id) if team2_id is not None else None
         
-        potential_t1_id = team_segments[0].get("attributes", {}).get("teamId")
-        t1_matches = 0
+        # Team 1 Roster
+        t1_roster_df = all_players_df[all_players_df['default_team_id'] == t1_id_int]
+        t1_rids = [str(r).strip().lower() for r in t1_roster_df['riot_id'].dropna()]
+        t1_names = [str(n).strip().lower() for n in t1_roster_df['name'].dropna()]
+        t1_names_clean = [n.replace('@', '').strip() for n in t1_names]
+        
+        # Team 2 Roster
+        t2_roster_df = all_players_df[all_players_df['default_team_id'] == t2_id_int]
+        t2_rids = [str(r).strip().lower() for r in t2_roster_df['riot_id'].dropna()]
+        t2_names = [str(n).strip().lower() for n in t2_roster_df['name'].dropna()]
+        t2_names_clean = [n.replace('@', '').strip() for n in t2_names]
+        
+        team_ids_in_json = [ts.get("attributes", {}).get("teamId") for ts in team_segments]
+        
+        # Count matches for each Tracker team against our rosters
+        # score[tracker_team_id][db_team_id]
+        scores = {tid: {1: 0, 2: 0} for tid in team_ids_in_json}
+        
         for p_seg in [s for s in segments if s.get("type") == "player-summary"]:
-            if p_seg.get("metadata", {}).get("teamId") == potential_t1_id:
+            t_id = p_seg.get("metadata", {}).get("teamId")
+            if t_id in scores:
                 rid = p_seg.get("metadata", {}).get("platformInfo", {}).get("platformUserIdentifier")
-                if rid and str(rid).strip().lower() in t1_roster:
-                    t1_matches += 1
+                if not rid: rid = p_seg.get("metadata", {}).get("platformInfo", {}).get("platformUserHandle")
+                
+                if rid:
+                    rid_clean = str(rid).strip().lower()
+                    name_part = rid_clean.split('#')[0]
+                    
+                    # Match vs Team 1
+                    is_t1 = rid_clean in t1_rids or rid_clean in t1_names or name_part in t1_names or name_part in t1_names_clean
+                    if not is_t1:
+                        # Try partial match for name_part
+                        for tn in t1_names_clean:
+                            if name_part in tn or tn in name_part:
+                                is_t1 = True
+                                break
+                    if is_t1: scores[t_id][1] += 1
+                    
+                    # Match vs Team 2
+                    is_t2 = rid_clean in t2_rids or rid_clean in t2_names or name_part in t2_names or name_part in t2_names_clean
+                    if not is_t2:
+                        # Try partial match for name_part
+                        for tn in t2_names_clean:
+                            if name_part in tn or tn in name_part:
+                                is_t2 = True
+                                break
+                    if is_t2: scores[t_id][2] += 1
         
-        if t1_matches >= 1:
-            tracker_team_1_id = potential_t1_id
+        # Decision logic:
+        # Option A: TrackerTeam0 is Team 1, TrackerTeam1 is Team 2
+        score_a = scores[team_ids_in_json[0]][1] + scores[team_ids_in_json[1]][2]
+        # Option B: TrackerTeam0 is Team 2, TrackerTeam1 is Team 1
+        score_b = scores[team_ids_in_json[0]][2] + scores[team_ids_in_json[1]][1]
+        
+        if score_a >= score_b and score_a > 0:
+            tracker_team_1_id = team_ids_in_json[0]
+        elif score_b > score_a:
+            tracker_team_1_id = team_ids_in_json[1]
         else:
-            tracker_team_1_id = team_segments[1].get("attributes", {}).get("teamId")
+            # Tie or 0 matches? Default to first team
+            tracker_team_1_id = team_ids_in_json[0]
+    else:
+        if team_segments:
+            tracker_team_1_id = team_segments[0].get("attributes", {}).get("teamId")
+        else:
+            tracker_team_1_id = None
 
     for seg in segments:
         if seg.get("type") == "player-summary":
@@ -590,8 +645,6 @@ def parse_tracker_json(jsdata, team1_id):
                 # If still no match, try matching the name part of rid (if it's Name#Tag) or rid itself against DB names
                 if not matched_name:
                     name_part = rid.split('#')[0].lower()
-                    # We need a name-to-name map
-                    name_to_name = {str(n).lower(): str(n) for n in all_players_df['name']}
                     matched_name = name_to_name.get(name_part) or name_to_name.get(rid_lower)
                 
                 # Store by riot_id but also provide the matched name if found
@@ -2515,7 +2568,7 @@ elif page == "Playoffs":
                                     
                                     if jsdata:
                                         # Process and apply
-                                        json_suggestions, map_name, t1_r, t2_r = parse_tracker_json(jsdata, t1_id_val)
+                                        json_suggestions, map_name, t1_r, t2_r = parse_tracker_json(jsdata, t1_id_val, t2_id_val)
                                         
                                         st.session_state[f"ocr_po_{m['id']}_{i}"] = json_suggestions
                                         st.session_state[f"scraped_data_po_{m['id']}_{i}"] = {
@@ -2910,7 +2963,7 @@ elif page == "Admin Panel":
                                         
                                         if jsdata:
                                             # Process and apply
-                                            json_suggestions, map_name, t1_r, t2_r = parse_tracker_json(jsdata, t1_id_val)
+                                            json_suggestions, map_name, t1_r, t2_r = parse_tracker_json(jsdata, t1_id_val, t2_id_val)
                                             
                                             st.session_state[f"ocr_{m['id']}_{i}"] = json_suggestions
                                             st.session_state[f"scraped_data_{m['id']}_{i}"] = {
@@ -2919,9 +2972,15 @@ elif page == "Admin Panel":
                                                 't2_rounds': int(t2_r)
                                             }
                                             st.session_state[f"scraped_mid_{m['id']}_{i}"] = mid_input
+                                            
+                                            # Increment force counter to change widget keys
+                                            st.session_state[f"force_map_{m['id']}_{i}"] = st.session_state.get(f"force_map_{m['id']}_{i}", 0) + 1
+
                                             st.success(f"Map data ({map_name}) loaded!")
+                                            st.rerun()
 
                             scraped = st.session_state.get(f"scraped_data_{m['id']}_{i}")
+                            force_map_cnt = st.session_state.get(f"force_map_{m['id']}_{i}", 0)
                             
                             if not existing_maps_df.empty:
                                 rowx = existing_maps_df[existing_maps_df['map_index'] == i]
@@ -2940,31 +2999,22 @@ elif page == "Admin Panel":
                                     pre_win = t1_id_val
                                 elif pre_t2 > pre_t1:
                                     pre_win = t2_id_val
-                            
-                            # Override with scraped data if available
-                            if scraped:
-                                pre_name = scraped['map_name']
-                                pre_t1 = scraped['t1_rounds']
-                                pre_t2 = scraped['t2_rounds']
-                                if pre_t1 > pre_t2:
-                                    pre_win = t1_id_val
-                                elif pre_t2 > pre_t1:
-                                    pre_win = t2_id_val
 
-                            nsel = st.selectbox(f"Name {i+1}", maps_catalog, index=(maps_catalog.index(pre_name) if pre_name in maps_catalog else 0), key=f"mname_{i}")
-                            t1r = st.number_input(f"{m['t1_name']} rounds", min_value=0, value=pre_t1, key=f"t1r_{i}")
-                            t2r = st.number_input(f"{m['t2_name']} rounds", min_value=0, value=pre_t2, key=f"t2r_{i}")
+                            # Use dynamic keys based on force_map_cnt to force widget refresh
+                            nsel = st.selectbox(f"Name {i+1}", maps_catalog, index=(maps_catalog.index(pre_name) if pre_name in maps_catalog else 0), key=f"mname_{m['id']}_{i}_{force_map_cnt}")
+                            t1r = st.number_input(f"{m['t1_name']} rounds", min_value=0, value=pre_t1, key=f"t1r_{m['id']}_{i}_{force_map_cnt}")
+                            t2r = st.number_input(f"{m['t2_name']} rounds", min_value=0, value=pre_t2, key=f"t2r_{m['id']}_{i}_{force_map_cnt}")
                             
                             # Forfeit option
-                            is_forfeit = st.checkbox(f"Forfeit", value=False, key=f"ff_{i}", help="Check if this map was a forfeit (13-0)")
+                            is_forfeit = st.checkbox(f"Forfeit", value=False, key=f"ff_{m['id']}_{i}_{force_map_cnt}", help="Check if this map was a forfeit (13-0)")
                             if is_forfeit:
-                                ff_winner = st.radio("Forfeit Winner", [m['t1_name'], m['t2_name']], key=f"ff_win_{i}", horizontal=True)
+                                ff_winner = st.radio("Forfeit Winner", [m['t1_name'], m['t2_name']], key=f"ff_win_{m['id']}_{i}_{force_map_cnt}", horizontal=True)
                                 if ff_winner == m['t1_name']:
                                     t1r, t2r = 13, 0
                                 else:
                                     t1r, t2r = 0, 13
                             
-                            wsel = st.selectbox("Winner", ["", m['t1_name'], m['t2_name']], index=(1 if pre_win==t1_id_val else (2 if pre_win==t2_id_val else 0)), key=f"win_{i}")
+                            wsel = st.selectbox("Winner", ["", m['t1_name'], m['t2_name']], index=(1 if pre_win==t1_id_val else (2 if pre_win==t2_id_val else 0)), key=f"win_{m['id']}_{i}_{force_map_cnt}")
                             wid = None
                             if wsel == m['t1_name']:
                                 wid = t1_id_val
@@ -3047,7 +3097,8 @@ elif page == "Admin Panel":
                                 # 3. Process and apply if we have data
                                 if jsdata:
                                     cur_t1_id = int(m.get('t1_id', m.get('team1_id')))
-                                    json_suggestions, map_name, t1_r, t2_r = parse_tracker_json(jsdata, cur_t1_id)
+                                    cur_t2_id = int(m.get('t2_id', m.get('team2_id')))
+                                    json_suggestions, map_name, t1_r, t2_r = parse_tracker_json(jsdata, cur_t1_id, cur_t2_id)
                                 
                                     st.session_state[f"ocr_{m['id']}_{map_idx}"] = json_suggestions
                                     st.session_state[f"scraped_data_{m['id']}_{map_idx}"] = {
@@ -3055,7 +3106,11 @@ elif page == "Admin Panel":
                                         't1_rounds': int(t1_r),
                                         't2_rounds': int(t2_r)
                                     }
+                                    
+                                    # Increment both counters to force refresh of both Map info and Player stats
+                                    st.session_state[f"force_map_{m['id']}_{map_idx}"] = st.session_state.get(f"force_map_{m['id']}_{map_idx}", 0) + 1
                                     st.session_state[f"force_apply_{m['id']}_{map_idx}"] = st.session_state.get(f"force_apply_{m['id']}_{map_idx}", 0) + 1
+                                    
                                     st.success(f"Loaded {map_name} from {source}!")
                                     st.rerun()
                             else:
@@ -3076,9 +3131,14 @@ elif page == "Admin Panel":
                                 with open(json_path, 'r', encoding='utf-8') as f:
                                     jsdata = json.load(f)
                                 cur_t1_id = int(m.get('t1_id', m.get('team1_id')))
-                                json_suggestions, map_name, t1_r, t2_r = parse_tracker_json(jsdata, cur_t1_id)
+                                cur_t2_id = int(m.get('t2_id', m.get('team2_id')))
+                                json_suggestions, map_name, t1_r, t2_r = parse_tracker_json(jsdata, cur_t1_id, cur_t2_id)
                                 st.session_state[f"ocr_{m['id']}_{map_idx}"] = json_suggestions
                                 st.session_state[f"scraped_data_{m['id']}_{map_idx}"] = {'map_name': map_name, 't1_rounds': int(t1_r), 't2_rounds': int(t2_r)}
+                                # Also increment counters for auto-load to ensure UI refresh
+                                st.session_state[f"force_map_{m['id']}_{map_idx}"] = st.session_state.get(f"force_map_{m['id']}_{map_idx}", 0) + 1
+                                st.session_state[f"force_apply_{m['id']}_{map_idx}"] = st.session_state.get(f"force_apply_{m['id']}_{map_idx}", 0) + 1
+                                st.rerun()
                             except: pass
                 
                     force_apply = st.session_state.get(f"force_apply_{m['id']}_{map_idx}", False)
