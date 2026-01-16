@@ -102,6 +102,16 @@ def track_user_activity():
             
         ip_address = get_visitor_ip()
         conn = get_conn()
+        
+        # If the user is NOT an admin in the current session (e.g. after a refresh),
+        # we clear any active admin status associated with this IP address.
+        # This ensures that a refresh effectively "logs out" the old session for this user.
+        if not is_admin:
+            conn.execute(
+                "DELETE FROM session_activity WHERE ip_address = ? AND (role = 'admin' OR role = 'dev')",
+                (ip_address,)
+            )
+            
         conn.execute(
             "INSERT OR REPLACE INTO session_activity (session_id, username, role, last_activity, ip_address) VALUES (?, ?, ?, ?, ?)",
             (session_id, username, role, time.time(), ip_address)
