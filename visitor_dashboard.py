@@ -2510,7 +2510,7 @@ elif page == "Admin Panel":
                         
                         # Check if we just scraped this map
                         if turl:
-                            if f"scraped_data_{m['id']}_{i}" not in st.session_state or st.session_state[f"scraped_url_{m['id']}_{i}"] != turl:
+                            if f"scraped_data_{m['id']}_{i}" not in st.session_state or st.session_state.get(f"scraped_url_{m['id']}_{i}") != turl:
                                 with st.spinner("Scraping Tracker.gg..."):
                                     jsdata, err = scrape_tracker_match(turl)
                                     if err:
