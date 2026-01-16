@@ -730,7 +730,8 @@ def get_substitutions_log():
         df = pd.read_sql(
             """
             SELECT msm.match_id, msm.map_index, m.week, m.group_name,
-                   t.name AS team, p.name AS player, sp.name AS subbed_for,
+                   t.name AS team, p.name AS player, p.riot_id AS player_riot,
+                   sp.name AS subbed_for, sp.riot_id AS sub_riot,
                    msm.agent, msm.acs, msm.kills, msm.deaths, msm.assists
             FROM match_stats_map msm
             JOIN matches m ON msm.match_id = m.id
@@ -742,6 +743,10 @@ def get_substitutions_log():
             """,
             conn,
         )
+        if not df.empty:
+            df['player'] = df.apply(lambda r: f"{r['player']} ({r['player_riot']})" if r['player_riot'] and str(r['player_riot']).strip() else r['player'], axis=1)
+            df['subbed_for'] = df.apply(lambda r: f"{r['subbed_for']} ({r['sub_riot']})" if r['sub_riot'] and str(r['sub_riot']).strip() else r['subbed_for'], axis=1)
+            df = df.drop(columns=['player_riot', 'sub_riot'])
     except Exception:
         conn.close()
         return pd.DataFrame()
@@ -754,7 +759,7 @@ def get_player_profile(player_id):
     conn = get_conn()
     try:
         info = pd.read_sql(
-            "SELECT p.id, p.name, p.rank, t.tag as team FROM players p LEFT JOIN teams t ON p.default_team_id=t.id WHERE p.id=?",
+            "SELECT p.id, p.name, p.riot_id, p.rank, t.tag as team FROM players p LEFT JOIN teams t ON p.default_team_id=t.id WHERE p.id=?",
             conn,
             params=(int(player_id),),
         )
@@ -762,6 +767,11 @@ def get_player_profile(player_id):
             conn.close()
             return {}
             
+        # Format name to include Riot ID if available
+        p_name = info.iloc[0]['name']
+        p_riot = info.iloc[0]['riot_id']
+        display_name = f"{p_name} ({p_riot})" if p_riot and str(p_riot).strip() else p_name
+        
         rank_val = info.iloc[0]['rank']
         
         # Stats with match metadata in one go
@@ -825,6 +835,7 @@ def get_player_profile(player_id):
 
     return {
         'info': info.iloc[0].to_dict(),
+        'display_name': display_name,
         'games': int(games),
         'avg_acs': round(avg_acs, 1),
         'total_kills': total_k,
@@ -1093,6 +1104,7 @@ def get_player_leaderboard():
             """
             SELECT p.id as player_id,
                    p.name,
+                   p.riot_id,
                    t.tag as team,
                    COUNT(DISTINCT msm.match_id) as games,
                    AVG(msm.acs) as avg_acs,
@@ -1102,7 +1114,7 @@ def get_player_leaderboard():
             FROM match_stats_map msm
             JOIN players p ON msm.player_id = p.id
             LEFT JOIN teams t ON p.default_team_id = t.id
-            GROUP BY p.id, p.name
+            GROUP BY p.id, p.name, p.riot_id
             HAVING games > 0
             """,
             conn,
@@ -1111,7 +1123,11 @@ def get_player_leaderboard():
         conn.close()
         return pd.DataFrame()
     conn.close()
+    
     if not df.empty:
+        # Format name to include Riot ID if available
+        df['name'] = df.apply(lambda r: f"{r['name']} ({r['riot_id']})" if r['riot_id'] and str(r['riot_id']).strip() else r['name'], axis=1)
+        df = df.drop(columns=['riot_id'])
         df['kd_ratio'] = df['total_kills'] / df['total_deaths'].replace(0, 1)
         df['avg_acs'] = df['avg_acs'].round(1)
         df['kd_ratio'] = df['kd_ratio'].round(2)
@@ -1198,7 +1214,7 @@ def get_map_stats(match_id, map_index, team_id):
     try:
         df = pd.read_sql(
             """
-            SELECT p.name, ms.agent, ms.acs, ms.kills, ms.deaths, ms.assists, ms.is_sub 
+            SELECT p.name, p.riot_id, ms.agent, ms.acs, ms.kills, ms.deaths, ms.assists, ms.is_sub 
             FROM match_stats_map ms 
             JOIN players p ON ms.player_id=p.id 
             WHERE ms.match_id=? AND ms.map_index=? AND ms.team_id=?
@@ -1206,6 +1222,9 @@ def get_map_stats(match_id, map_index, team_id):
             conn, 
             params=(int(match_id), int(map_index), int(team_id))
         )
+        if not df.empty:
+            df['name'] = df.apply(lambda r: f"{r['name']} ({r['riot_id']})" if r['riot_id'] and str(r['riot_id']).strip() else r['name'], axis=1)
+            df = df.drop(columns=['riot_id'])
     except Exception:
         df = pd.DataFrame()
     conn.close()
@@ -1494,6 +1513,9 @@ if page == "Overview & Standings":
         # Pre-group rosters for efficiency
         rosters_by_team = {}
         if not all_players_bench.empty:
+            all_players_bench = all_players_bench.copy()
+            # Format name to include Riot ID
+            all_players_bench['name'] = all_players_bench.apply(lambda r: f"{r['name']} ({r['riot_id']})" if r['riot_id'] and str(r['riot_id']).strip() else r['name'], axis=1)
             for tid, group in all_players_bench.groupby('default_team_id'):
                 rosters_by_team[int(tid)] = group[['name', 'rank']]
 
@@ -1873,7 +1895,7 @@ elif page == "Player Leaderboard":
             prof = get_player_profile(pid)
             if prof:
                     st.markdown(f"""<div style="margin-top: 2rem; padding: 1rem; border-left: 5px solid var(--primary-blue); background: rgba(63, 209, 255, 0.05);">
-<h2 style="margin: 0;">{html.escape(str(prof['info'].get('name')))}</h2>
+<h2 style="margin: 0;">{html.escape(str(prof.get('display_name', prof['info'].get('name'))))}</h2>
 <div style="color: var(--text-dim); font-family: 'Orbitron';">{html.escape(str(prof['info'].get('team') or 'No Team'))} • {html.escape(str(prof['info'].get('rank') or 'Unranked'))}</div>
 </div>""", unsafe_allow_html=True)
                     
@@ -2006,6 +2028,9 @@ elif page == "Teams":
     # Pre-group rosters for efficiency
     rosters_by_team = {}
     if not all_players.empty:
+        all_players = all_players.copy()
+        # Format name to include Riot ID
+        all_players['name'] = all_players.apply(lambda r: f"{r['name']} ({r['riot_id']})" if r['riot_id'] and str(r['riot_id']).strip() else r['name'], axis=1)
         for tid, group in all_players.groupby('default_team_id'):
             rosters_by_team[int(tid)] = group[['name', 'rank']]
     
@@ -2070,10 +2095,13 @@ elif page == "Teams":
                     with col2:
                         st.caption("Roster Management")
                         # Add player
-                        unassigned = all_players[all_players['default_team_id'].isna()]
-                        add_sel = st.selectbox(f"Add Player", [""] + unassigned['name'].tolist(), key=f"add_{row.id}")
+                        unassigned = all_players[all_players['default_team_id'].isna()].copy()
+                        if not unassigned.empty:
+                            unassigned['display_name'] = unassigned.apply(lambda r: f"{r['name']} ({r['riot_id']})" if r['riot_id'] and str(r['riot_id']).strip() else r['name'], axis=1)
+                        
+                        add_sel = st.selectbox(f"Add Player", [""] + unassigned['display_name'].tolist(), key=f"add_{row.id}")
                         if add_sel:
-                            pid = int(all_players[all_players['name'] == add_sel].iloc[0]['id'])
+                            pid = int(unassigned[unassigned['display_name'] == add_sel].iloc[0]['id'])
                             conn_a = get_conn()
                             conn_a.execute("UPDATE players SET default_team_id=? WHERE id=?", (int(row.id), pid))
                             conn_a.commit()
@@ -2083,9 +2111,12 @@ elif page == "Teams":
                         
                         # Remove player
                         if not roster.empty:
-                            rem_sel = st.selectbox(f"Remove Player", [""] + roster['name'].tolist(), key=f"rem_{row.id}")
+                            roster = roster.copy()
+                            roster['display_name'] = roster.apply(lambda r: f"{r['name']} ({r['riot_id']})" if r['riot_id'] and str(r['riot_id']).strip() else r['name'], axis=1)
+                            
+                            rem_sel = st.selectbox(f"Remove Player", [""] + roster['display_name'].tolist(), key=f"rem_{row.id}")
                             if rem_sel:
-                                pid = int(roster[roster['name'] == rem_sel].iloc[0]['id'])
+                                pid = int(roster[roster['display_name'] == rem_sel].iloc[0]['id'])
                                 conn_d = get_conn()
                                 conn_d.execute("UPDATE players SET default_team_id=NULL WHERE id=?", (pid,))
                                 conn_d.commit()
@@ -2646,11 +2677,10 @@ elif page == "Admin Panel":
                 
                 # Vectorized global list and map creation
                 if not all_df.empty:
-                    has_riot = all_df['riot_id'].notna() & (all_df['riot_id'].str.strip() != "")
-                    all_df['display_label'] = all_df['name']
-                    all_df.loc[has_riot, 'display_label'] = all_df.loc[has_riot, 'riot_id'].astype(str) + " (" + all_df.loc[has_riot, 'name'] + ")"
+                    all_df['display_label'] = all_df.apply(lambda r: f"{r['name']} ({r['riot_id']})" if r['riot_id'] and str(r['riot_id']).strip() else r['name'], axis=1)
                     global_list = all_df['display_label'].tolist()
                     global_map = dict(zip(global_list, all_df['id']))
+                    has_riot = all_df['riot_id'].notna() & (all_df['riot_id'].str.strip() != "")
                     label_to_riot = dict(zip(all_df.loc[has_riot, 'display_label'], all_df.loc[has_riot, 'riot_id'].str.strip().str.lower()))
                     riot_to_label = {v: k for k, v in label_to_riot.items()}
                 else:
@@ -3024,10 +3054,7 @@ elif page == "Admin Panel":
                 
                 if not p_list_df.empty:
                     # Vectorized player options creation
-                    has_rid = p_list_df['riot_id'].notna() & (p_list_df['riot_id'].str.strip() != "")
-                    p_list_df['display'] = p_list_df['name']
-                    p_list_df.loc[has_rid, 'display'] = p_list_df.loc[has_rid, 'name'] + " (" + p_list_df.loc[has_rid, 'riot_id'].astype(str) + ")"
-                    p_list_df.loc[~has_rid, 'display'] = p_list_df.loc[~has_rid, 'name'] + " (No Riot ID)"
+                    p_list_df['display'] = p_list_df.apply(lambda r: f"{r['name']} ({r['riot_id']})" if r['riot_id'] and str(r['riot_id']).strip() else r['name'], axis=1)
                     
                     p_options = dict(zip(p_list_df['display'], p_list_df['id']))
                     p_to_del_name = st.selectbox("Select Player to Delete", options=list(p_options.keys()))
@@ -3236,22 +3263,26 @@ elif page == "Player Profile":
     
     st.markdown('<h1 class="main-header">PLAYER PROFILE</h1>', unsafe_allow_html=True)
     
-    opts = players_df['name'].tolist()
-    sel = st.selectbox("Select a Player", opts) if opts else None
-    
-    if sel:
-        pid = int(players_df[players_df['name'] == sel].iloc[0]['id'])
-        prof = get_player_profile(pid)
+    if not players_df.empty:
+        players_df = players_df.copy()
+        players_df['display_label'] = players_df.apply(lambda r: f"{r['name']} ({r['riot_id']})" if r['riot_id'] and str(r['riot_id']).strip() else r['name'], axis=1)
         
-        if prof:
-            # Header Card
-            st.markdown(f"""<div class="custom-card" style="margin-bottom: 2rem;">
+        opts = players_df['display_label'].tolist()
+        sel = st.selectbox("Select a Player", opts)
+        
+        if sel:
+            pid = int(players_df[players_df['display_label'] == sel].iloc[0]['id'])
+            prof = get_player_profile(pid)
+            
+            if prof:
+                # Header Card
+                st.markdown(f"""<div class="custom-card" style="margin-bottom: 2rem;">
 <div style="display: flex; align-items: center; gap: 20px;">
 <div style="background: var(--primary-blue); width: 60px; height: 60px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 2rem; color: var(--bg-dark);">
 {html.escape(str(prof['info'].get('name')[0].upper() if prof['info'].get('name') else 'P'))}
 </div>
 <div>
-<h2 style="margin: 0; color: var(--primary-blue); font-family: 'Orbitron';">{html.escape(str(prof['info'].get('name')))}</h2>
+<h2 style="margin: 0; color: var(--primary-blue); font-family: 'Orbitron';">{html.escape(str(prof['display_name']))}</h2>
 <div style="color: var(--text-dim); font-size: 1.1rem;">{html.escape(str(prof['info'].get('team') or 'Free Agent'))}</div>
 </div>
 </div>
