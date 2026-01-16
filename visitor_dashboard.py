@@ -2942,7 +2942,7 @@ elif page == "Admin Panel":
                                  conn_exec.execute("DELETE FROM players WHERE id = ?", (int(p_to_del_id),))
                                  conn_exec.commit()
                                  st.success(f"Player '{p_to_del_name}' deleted.")
-                                st.rerun()
+                                 st.rerun()
                             except Exception as e:
                                 st.error(f"Deletion error: {e}")
                             finally:
