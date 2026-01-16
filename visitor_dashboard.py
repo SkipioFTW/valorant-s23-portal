@@ -187,7 +187,7 @@ def get_active_admin_session():
     return None
 
 # Set page config immediately as the first streamlit command
-st.set_page_config(page_title="S23 Portal", layout="wide")
+st.set_page_config(page_title="S23 Portal", layout="wide", initial_sidebar_state="collapsed")
 
 # App Mode Logic
 if 'app_mode' not in st.session_state:
@@ -208,6 +208,8 @@ st.markdown("""
 header {visibility: hidden;}
 footer {visibility: hidden;}
 .stAppDeployButton {display:none;}
+[data-testid="stSidebar"] {display: none;}
+[data-testid="stSidebarCollapsedControl"] {display: none;}
 
 /* Global Styles */
 :root {
@@ -521,6 +523,45 @@ def scrape_tracker_match(url):
         return data, error
     except Exception as e:
         return None, f"Scraping error: {str(e)}"
+
+def fetch_match_from_github(match_id):
+    """
+    Attempts to fetch a match JSON from the GitHub repository.
+    """
+    owner = get_secret("GH_OWNER")
+    repo = get_secret("GH_REPO")
+    token = get_secret("GH_TOKEN")
+    branch = get_secret("GH_BRANCH", "main")
+    
+    if not owner or not repo:
+        return None, "GitHub configuration missing (GH_OWNER/GH_REPO)"
+        
+    # Use API for both public and private repos if token is available
+    if token:
+        url = f"https://api.github.com/repos/{owner}/{repo}/contents/matches/match_{match_id}.json?ref={branch}"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github.raw"
+        }
+        try:
+            r = requests.get(url, headers=headers, timeout=10)
+            if r.status_code == 200:
+                return r.json(), None
+            else:
+                return None, f"GitHub API error: {r.status_code}"
+        except Exception as e:
+            return None, f"GitHub API fetch error: {str(e)}"
+    else:
+        # Fallback to public raw URL
+        raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/matches/match_{match_id}.json"
+        try:
+            r = requests.get(raw_url, timeout=10)
+            if r.status_code == 200:
+                return r.json(), None
+            else:
+                return None, f"GitHub file not found (Status: {r.status_code})"
+        except Exception as e:
+            return None, f"GitHub fetch error: {str(e)}"
 
 def parse_tracker_json(jsdata, team1_id, team2_id):
     """
@@ -1718,15 +1759,6 @@ if 'is_admin' not in st.session_state:
 if 'username' not in st.session_state:
     st.session_state['username'] = None
 
-# Admin status display in sidebar
-if st.session_state['is_admin']:
-    st.sidebar.success(f"Logged in as: {st.session_state['username']}")
-    if st.sidebar.button("Logout"):
-        st.session_state['is_admin'] = False
-        st.session_state['username'] = None
-        st.session_state['app_mode'] = 'portal'
-        st.rerun()
-
 if 'page' not in st.session_state:
     st.session_state['page'] = "Overview & Standings"
 
@@ -1751,9 +1783,13 @@ st.markdown('<div class="nav-wrapper"><div class="nav-logo">VALORANT S23 • POR
 
 # Navigation Layout
 st.markdown('<div class="sub-nav-wrapper">', unsafe_allow_html=True)
-# Use a container to hold the columns, but we need to style the container itself to be part of the sub-nav
-# Since we can't easily wrap st.columns in a div that stays fixed, we rely on sub-nav-wrapper
-cols = st.columns([0.6] + [1] * len(pages))
+
+# Define columns based on whether admin is logged in (to add logout button)
+nav_cols_spec = [0.6] + [1] * len(pages)
+if st.session_state['is_admin']:
+    nav_cols_spec.append(0.8) # Column for logout
+
+cols = st.columns(nav_cols_spec)
 
 with cols[0]:
     st.markdown('<div class="exit-btn">', unsafe_allow_html=True)
@@ -1774,6 +1810,18 @@ for i, p in enumerate(pages):
         
         if is_active:
             st.markdown('<div style="height: 3px; background: var(--primary-red); margin-top: -8px; box-shadow: 0 0 10px var(--primary-red); border-radius: 2px;"></div>', unsafe_allow_html=True)
+
+# Add Logout button if admin
+if st.session_state['is_admin']:
+    with cols[-1]:
+        st.markdown('<div class="exit-btn">', unsafe_allow_html=True)
+        if st.button(f"🚪 LOGOUT ({st.session_state['username']})", key="logout_btn", use_container_width=True):
+            st.session_state['is_admin'] = False
+            st.session_state['username'] = None
+            st.session_state['app_mode'] = 'portal'
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+
 st.markdown('</div>', unsafe_allow_html=True)
 
 page = st.session_state['page']
@@ -1931,7 +1979,11 @@ elif page == "Match Summary":
     st.markdown('<h1 class="main-header">MATCH SUMMARY</h1>', unsafe_allow_html=True)
     
     wk_list = get_match_weeks()
-    week = st.sidebar.selectbox("Week", wk_list if wk_list else [1], index=0, key="wk_sum")
+    # Week selection moved from sidebar to main page
+    col_wk1, col_wk2 = st.columns([1, 3])
+    with col_wk1:
+        week = st.selectbox("Select Week", wk_list if wk_list else [1], index=0, key="wk_sum")
+    
     df = get_week_matches(week) if wk_list else pd.DataFrame()
     
     if df.empty:
@@ -2546,10 +2598,11 @@ elif page == "Playoffs":
                     if pre_map_t1 > pre_map_t2: pre_map_win = t1_id_val
                     elif pre_map_t2 > pre_map_t1: pre_map_win = t2_id_val
 
-                # Match ID input for automatic pre-filling
+                # Match ID/URL input and JSON upload for automatic pre-filling
+                st.write("#### 🤖 Auto-Fill from Tracker.gg")
                 col_json1, col_json2 = st.columns([2, 1])
                 with col_json1:
-                    match_input = st.text_input("Enter Match ID", key=f"po_mid_{m['id']}_{map_idx}", placeholder="e.g. fef14b8b-ddc7-4b91-b91c-905327c74325")
+                    match_input = st.text_input("Tracker.gg Match URL or ID", key=f"po_mid_{m['id']}_{map_idx}", placeholder="https://tracker.gg/valorant/match/...")
                 with col_json2:
                     if st.button("Apply Match Data", key=f"po_force_json_{m['id']}_{map_idx}", use_container_width=True):
                         if match_input:
@@ -2562,20 +2615,42 @@ elif page == "Playoffs":
                         
                             json_path = os.path.join("matches", f"match_{match_id_clean}.json")
                             jsdata = None
+                            source = ""
                         
+                            # 1. Try local file first
                             if os.path.exists(json_path):
                                 try:
                                     with open(json_path, 'r', encoding='utf-8') as f:
                                         jsdata = json.load(f)
+                                    source = "Local Cache"
                                 except: pass
                         
+                            # 2. If not found locally, try GitHub repository
                             if not jsdata:
-                                with st.spinner("Fetching data..."):
+                                with st.spinner("Checking GitHub matches folder..."):
+                                    jsdata, gh_err = fetch_match_from_github(match_id_clean)
+                                    if jsdata:
+                                        source = "GitHub Repository"
+                                        # Save locally for next time
+                                        try:
+                                            if not os.path.exists("matches"): os.makedirs("matches")
+                                            with open(json_path, 'w', encoding='utf-8') as f:
+                                                json.dump(jsdata, f, indent=4)
+                                        except: pass
+
+                            # 3. If still not found, attempt live scrape
+                            if not jsdata:
+                                with st.spinner("Fetching data from Tracker.gg..."):
                                     jsdata, err = scrape_tracker_match(match_id_clean)
                                     if jsdata:
+                                        source = "Tracker.gg"
                                         if not os.path.exists("matches"): os.makedirs("matches")
                                         with open(json_path, 'w', encoding='utf-8') as f:
                                             json.dump(jsdata, f, indent=4)
+                                    else:
+                                        st.error(f"Live scrape failed: {err}")
+                                        if gh_err: st.info(f"GitHub fetch also failed: {gh_err}")
+                                        st.info("💡 **Tip:** If scraping is blocked, run the scraper script on your PC and upload the JSON file below.")
                             
                             if jsdata:
                                 cur_t1_id = t1_id_val
@@ -2585,7 +2660,23 @@ elif page == "Playoffs":
                                 st.session_state[f"scraped_data_po_{m['id']}_{map_idx}"] = {'map_name': map_name, 't1_rounds': int(t1_r), 't2_rounds': int(t2_r)}
                                 st.session_state[f"force_map_po_{m['id']}_{map_idx}"] = st.session_state.get(f"force_map_po_{m['id']}_{map_idx}", 0) + 1
                                 st.session_state[f"force_apply_po_{m['id']}_{map_idx}"] = st.session_state.get(f"force_apply_po_{m['id']}_{map_idx}", 0) + 1
+                                st.success(f"Loaded {map_name} from {source}!")
                                 st.rerun()
+
+                uploaded_file = st.file_uploader("Or Upload Tracker.gg JSON", type=["json"], key=f"po_json_up_{m['id']}_{map_idx}")
+                if uploaded_file:
+                    try:
+                        jsdata = json.load(uploaded_file)
+                        cur_t1_id = t1_id_val
+                        cur_t2_id = t2_id_val
+                        json_suggestions, map_name, t1_r, t2_r = parse_tracker_json(jsdata, cur_t1_id, cur_t2_id)
+                        st.session_state[f"ocr_po_{m['id']}_{map_idx}"] = json_suggestions
+                        st.session_state[f"scraped_data_po_{m['id']}_{map_idx}"] = {'map_name': map_name, 't1_rounds': int(t1_r), 't2_rounds': int(t2_r)}
+                        st.session_state[f"force_map_po_{m['id']}_{map_idx}"] = st.session_state.get(f"force_map_po_{m['id']}_{map_idx}", 0) + 1
+                        st.session_state[f"force_apply_po_{m['id']}_{map_idx}"] = st.session_state.get(f"force_apply_po_{m['id']}_{map_idx}", 0) + 1
+                        st.success(f"Loaded {map_name} from uploaded file!")
+                    except Exception as e:
+                        st.error(f"Invalid JSON file: {e}")
 
                 # START UNIFIED FORM
                 with st.form(key=f"po_unified_map_form_{m['id']}_{map_idx}"):
@@ -3048,10 +3139,11 @@ elif page == "Admin Panel":
                     all_df0 = get_all_players()
                     name_to_riot = dict(zip(all_df0['name'].astype(str), all_df0['riot_id'].astype(str))) if not all_df0.empty else {}
                 
-                    # Match ID or Link input for automatic pre-filling
-                    col_json1, col_json2, col_json3 = st.columns([2, 1, 1])
+                    # Match ID/URL input and JSON upload for automatic pre-filling
+                    st.write("#### 🤖 Auto-Fill from Tracker.gg")
+                    col_json1, col_json2 = st.columns([2, 1])
                     with col_json1:
-                        match_input = st.text_input("Enter Match ID", key=f"mid_{m['id']}_{map_idx}", placeholder="e.g. fef14b8b-ddc7-4b91-b91c-905327c74325")
+                        match_input = st.text_input("Tracker.gg Match URL or ID", key=f"mid_{m['id']}_{map_idx}", placeholder="https://tracker.gg/valorant/match/...")
                     with col_json2:
                         if st.button("Apply Match Data", key=f"force_json_{m['id']}_{map_idx}", use_container_width=True):
                             if match_input:
@@ -3066,80 +3158,67 @@ elif page == "Admin Panel":
                                 jsdata = None
                                 source = ""
                             
-                                # 1. Try local file first (Prevents 403 errors in Cloud)
+                                # 1. Try local file first
                                 if os.path.exists(json_path):
                                     try:
                                         with open(json_path, 'r', encoding='utf-8') as f:
                                             jsdata = json.load(f)
                                         source = "Local Cache"
-                                    except Exception as e:
-                                        st.error(f"Error reading local file: {e}")
+                                    except: pass
                             
-                                # 2. If not found locally, attempt live scrape
+                                # 2. If not found locally, try GitHub repository
+                                if not jsdata:
+                                    with st.spinner("Checking GitHub matches folder..."):
+                                        jsdata, gh_err = fetch_match_from_github(match_id_clean)
+                                        if jsdata:
+                                            source = "GitHub Repository"
+                                            # Save locally for next time
+                                            try:
+                                                if not os.path.exists("matches"): os.makedirs("matches")
+                                                with open(json_path, 'w', encoding='utf-8') as f:
+                                                    json.dump(jsdata, f, indent=4)
+                                            except: pass
+
+                                # 3. If still not found, attempt live scrape
                                 if not jsdata:
                                     with st.spinner("Fetching data from Tracker.gg..."):
                                         jsdata, err = scrape_tracker_match(match_id_clean)
-                                        if err:
-                                            st.error(f"Scrape failed: {err}")
-                                            st.info("💡 **Tip:** If scraping is blocked (403), ensure the JSON file is in the 'matches/' folder.")
-                                        else:
+                                        if jsdata:
                                             source = "Tracker.gg"
-                                            # Save locally for future use
                                             if not os.path.exists("matches"): os.makedirs("matches")
                                             with open(json_path, 'w', encoding='utf-8') as f:
                                                 json.dump(jsdata, f, indent=4)
-                                        
-                                            # Upload to GitHub so others can use it
-                                            scraper = TrackerScraper()
-                                            ok, gmsg = scraper.upload_match_to_github(match_id_clean, jsdata, get_secret)
-                                            if ok: st.toast(gmsg, icon="✅")
+                                        else:
+                                            st.error(f"Live scrape failed: {err}")
+                                            if gh_err: st.info(f"GitHub fetch also failed: {gh_err}")
+                                            st.info("💡 **Tip:** If scraping is blocked, run the scraper script on your PC and upload the JSON file below.")
                             
-                                # 3. Process and apply if we have data
                                 if jsdata:
                                     cur_t1_id = int(m.get('t1_id', m.get('team1_id')))
                                     cur_t2_id = int(m.get('t2_id', m.get('team2_id')))
                                     json_suggestions, map_name, t1_r, t2_r = parse_tracker_json(jsdata, cur_t1_id, cur_t2_id)
-                                
                                     st.session_state[f"ocr_{m['id']}_{map_idx}"] = json_suggestions
-                                    st.session_state[f"scraped_data_{m['id']}_{map_idx}"] = {
-                                        'map_name': map_name,
-                                        't1_rounds': int(t1_r),
-                                        't2_rounds': int(t2_r)
-                                    }
-                                    
-                                    # Increment both counters to force refresh of both Map info and Player stats
+                                    st.session_state[f"scraped_data_{m['id']}_{map_idx}"] = {'map_name': map_name, 't1_rounds': int(t1_r), 't2_rounds': int(t2_r)}
                                     st.session_state[f"force_map_{m['id']}_{map_idx}"] = st.session_state.get(f"force_map_{m['id']}_{map_idx}", 0) + 1
                                     st.session_state[f"force_apply_{m['id']}_{map_idx}"] = st.session_state.get(f"force_apply_{m['id']}_{map_idx}", 0) + 1
-                                    
                                     st.success(f"Loaded {map_name} from {source}!")
                                     st.rerun()
-                            else:
-                                st.warning("Please enter a Match ID first.")
-                    with col_json3:
-                        st.info("💡 **Tip:** Enter a Match ID. We'll check for a local JSON first to avoid connection errors!")
 
-                    # Auto-load if file exists but not in session
-                    if match_input and f"ocr_{m['id']}_{map_idx}" not in st.session_state:
-                        match_id_clean = re.sub(r'[^a-zA-Z0-9\-]', '', match_input)
-                        if "tracker.gg" in match_input:
-                            mid_match = re.search(r'match/([a-zA-Z0-9\-]+)', match_input)
-                            if mid_match: match_id_clean = mid_match.group(1)
-                    
-                        json_path = os.path.join("matches", f"match_{match_id_clean}.json")
-                        if os.path.exists(json_path):
-                            try:
-                                with open(json_path, 'r', encoding='utf-8') as f:
-                                    jsdata = json.load(f)
-                                cur_t1_id = int(m.get('t1_id', m.get('team1_id')))
-                                cur_t2_id = int(m.get('t2_id', m.get('team2_id')))
-                                json_suggestions, map_name, t1_r, t2_r = parse_tracker_json(jsdata, cur_t1_id, cur_t2_id)
-                                st.session_state[f"ocr_{m['id']}_{map_idx}"] = json_suggestions
-                                st.session_state[f"scraped_data_{m['id']}_{map_idx}"] = {'map_name': map_name, 't1_rounds': int(t1_r), 't2_rounds': int(t2_r)}
-                                # Also increment counters for auto-load to ensure UI refresh
-                                st.session_state[f"force_map_{m['id']}_{map_idx}"] = st.session_state.get(f"force_map_{m['id']}_{map_idx}", 0) + 1
-                                st.session_state[f"force_apply_{m['id']}_{map_idx}"] = st.session_state.get(f"force_apply_{m['id']}_{map_idx}", 0) + 1
-                                st.rerun()
-                            except: pass
+                    uploaded_file = st.file_uploader("Or Upload Tracker.gg JSON", type=["json"], key=f"json_up_{m['id']}_{map_idx}")
+                    if uploaded_file:
+                        try:
+                            jsdata = json.load(uploaded_file)
+                            cur_t1_id = int(m.get('t1_id', m.get('team1_id')))
+                            cur_t2_id = int(m.get('t2_id', m.get('team2_id')))
+                            json_suggestions, map_name, t1_r, t2_r = parse_tracker_json(jsdata, cur_t1_id, cur_t2_id)
+                            st.session_state[f"ocr_{m['id']}_{map_idx}"] = json_suggestions
+                            st.session_state[f"scraped_data_{m['id']}_{map_idx}"] = {'map_name': map_name, 't1_rounds': int(t1_r), 't2_rounds': int(t2_r)}
+                            st.session_state[f"force_map_{m['id']}_{map_idx}"] = st.session_state.get(f"force_map_{m['id']}_{map_idx}", 0) + 1
+                            st.session_state[f"force_apply_{m['id']}_{map_idx}"] = st.session_state.get(f"force_apply_{m['id']}_{map_idx}", 0) + 1
+                            st.success(f"Loaded {map_name} from uploaded file!")
+                        except Exception as e:
+                            st.error(f"Invalid JSON file: {e}")
+
 
                     # START UNIFIED FORM
                     with st.form(key=f"unified_map_form_{m['id']}_{map_idx}"):

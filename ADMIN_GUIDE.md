@@ -10,7 +10,7 @@ The system is designed to prevent multiple administrators from making conflictin
 
 ### **The Lock System**
 If you see an "Access Denied" message, someone is already logged in. You have two options:
-1.  **Option 1: Unlock your specific ID**: Use this if you refreshed the page or your browser crashed. It clears the lock for **your device only**.
+1.  **Option 1: Unlock your specific ID**: Use this if you refreshed the page or your browser crashed and it locked you. It clears the lock for **your device only**.
 2.  **Option 2: Force Unlock Everything**: Use this as a last resort if a session from another admin is stuck. This requires the **Force Unlock Token**.
 
 ### **⚠️ Important: Logging Out**
@@ -39,16 +39,18 @@ Currently, the scraper works best when provided with the **Match ID** only.
 
 **Steps**:
 1.  In the **Per-Map Scoreboard* (Admin Panel).
-2.  Paste the **Match ID** into the "Enter Match ID" field.
+2.  Paste the **Match ID** into the "Enter Match ID" field and press "APPLY MATCH DATA".
 3.  The system will automatically scrape the map name, round scores, and all player statistics (ACS, K/D/A, Agents).
-4.  Review the auto-filled scoreboard and click **Save Match**.
+4.  Review the auto-filled scoreboard and click **Save Map Details & Scoreboard**.
 
 ### **3. Adding or Editing Players**
-**Tab**: `Players Directory`
-1.  Navigate to the **Players Directory** tab in the top navigation bar.
+**Tab**: `Admin Panel`
+1.  Navigate to the **Admin Panel** tab in the top navigation bar.
 2.  Scroll to the bottom of the page.
 3.  You will find the **Admin: Add Player** form (visible only to logged-in admins).
 4.  Enter the Name, Riot ID, and select their Team.
+5.  Under it you will find **Delete Player**
+
 
 ### **4. Managing Teams**
 **Tab**: `Teams`
@@ -57,6 +59,7 @@ Currently, the scraper works best when provided with the **Match ID** only.
 3.  You can update team names, group assignments, and logos.
 
 ### **5. Database Backups**
+**⚠️ For devs**
 **Tab**: `Admin Panel`
 1.  Navigate to the **Cloud Backup** section.
 2.  Click **Backup DB to GitHub** to save all current standings, matches, and player data to the cloud.
