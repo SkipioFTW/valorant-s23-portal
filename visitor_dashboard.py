@@ -1304,44 +1304,46 @@ def get_standings():
         m['score_t1'] = np.where(m['team1_rounds'].notna(), m['team1_rounds'], m['score_t1'])
         m['score_t2'] = np.where(m['team2_rounds'].notna(), m['team2_rounds'], m['score_t2'])
     
-    m['is_ot'] = (m['score_t1'] >= 12) & (m['score_t2'] >= 12)
-    
     # Points for Team 1
     m['p1'] = np.where(
         m['score_t1'] > m['score_t2'],
-        15 + m['score_t1'],
-        np.where(m['is_ot'], 12 + m['score_t1'], m['score_t1'])
+        np.minimum(m['score_t1'], 13) + 2,
+        np.minimum(m['score_t1'], 12)
     )
     
     # Points for Team 2
     m['p2'] = np.where(
         m['score_t2'] > m['score_t1'],
-        15 + m['score_t2'],
-        np.where(m['is_ot'], 12 + m['score_t2'], m['score_t2'])
+        np.minimum(m['score_t2'], 13) + 2,
+        np.minimum(m['score_t2'], 12)
     )
     
     # Wins/Losses
     m['t1_win'] = (m['score_t1'] > m['score_t2']).astype(int)
     m['t2_win'] = (m['score_t2'] > m['score_t1']).astype(int)
     
+    # Capped scores for RD (max 13 for winner, 12 for loser)
+    m['s1_capped'] = np.where(m['t1_win'] == 1, np.minimum(m['score_t1'], 13), np.minimum(m['score_t1'], 12))
+    m['s2_capped'] = np.where(m['t2_win'] == 1, np.minimum(m['score_t2'], 13), np.minimum(m['score_t2'], 12))
+    
     # Reshape to team-level
     t1_stats = m.groupby('team1_id').agg({
         't1_win': 'sum',
         't2_win': 'sum',
-        'score_t1': 'sum',
-        'score_t2': 'sum',
+        's1_capped': 'sum',
+        's2_capped': 'sum',
         'p1': 'sum',
         'id': 'count'
-    }).rename(columns={'t1_win': 'Wins', 't2_win': 'Losses', 'score_t1': 'S_For', 'score_t2': 'S_Ag', 'p1': 'Points', 'id': 'Played'})
+    }).rename(columns={'t1_win': 'Wins', 't2_win': 'Losses', 's1_capped': 'S_For', 's2_capped': 'S_Ag', 'p1': 'Points', 'id': 'Played'})
     
     t2_stats = m.groupby('team2_id').agg({
         't2_win': 'sum',
         't1_win': 'sum',
-        'score_t2': 'sum',
-        'score_t1': 'sum',
+        's2_capped': 'sum',
+        's1_capped': 'sum',
         'p2': 'sum',
         'id': 'count'
-    }).rename(columns={'t2_win': 'Wins', 't1_win': 'Losses', 'score_t2': 'S_For', 'score_t1': 'S_Ag', 'p2': 'Points', 'id': 'Played'})
+    }).rename(columns={'t2_win': 'Wins', 't1_win': 'Losses', 's2_capped': 'S_For', 's1_capped': 'S_Ag', 'p2': 'Points', 'id': 'Played'})
 
     # Combine stats
     combined = pd.concat([t1_stats, t2_stats]).groupby(level=0).sum()
@@ -3730,7 +3732,7 @@ elif page == "Admin Panel":
             conn_ins = get_conn()
             id1 = int(teams_df[teams_df['name'] == t1].iloc[0]['id'])
             id2 = int(teams_df[teams_df['name'] == t2].iloc[0]['id'])
-            conn_ins.execute("INSERT INTO matches (week, group_name, status, format, team1_id, team2_id, score_t1, score_t2, maps_played) VALUES (?, ?, 'scheduled', ?, ?, ?, 0, 0)", (int(w), gsel or None, fmt, id1, id2))
+            conn_ins.execute("INSERT INTO matches (week, group_name, status, format, team1_id, team2_id, score_t1, score_t2, maps_played, match_type) VALUES (?, ?, 'scheduled', ?, ?, ?, 0, 0, 0, 'regular')", (int(w), gsel or None, fmt, id1, id2))
             conn_ins.commit()
             conn_ins.close()
             st.success("Match added")
