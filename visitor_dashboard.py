@@ -195,6 +195,11 @@ if 'app_mode' not in st.session_state:
 
 # Initialize session activity table
 init_session_activity_table()
+# Ensure database schema is up to date
+ensure_base_schema()
+ensure_upgrade_schema()
+init_admin_table()
+init_match_stats_map_table()
 # Track current user activity
 track_user_activity()
 
