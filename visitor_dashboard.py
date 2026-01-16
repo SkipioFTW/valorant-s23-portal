@@ -1261,7 +1261,13 @@ def get_standings():
     conn = get_conn()
     try:
         teams_df = pd.read_sql_query("SELECT id, name, group_name, logo_path FROM teams", conn)
-        matches_df = pd.read_sql_query("SELECT * FROM matches WHERE status='completed' AND match_type='regular' AND (UPPER(format)='BO1' OR format IS NULL)", conn)
+        # Join with match_maps to get round scores for BO1
+        matches_df = pd.read_sql_query("""
+            SELECT m.*, mm.team1_rounds, mm.team2_rounds 
+            FROM matches m
+            LEFT JOIN match_maps mm ON m.id = mm.match_id AND mm.map_index = 0
+            WHERE m.status='completed' AND m.match_type='regular' AND (UPPER(m.format)='BO1' OR m.format IS NULL)
+        """, conn)
     except Exception:
         conn.close()
         return pd.DataFrame()
@@ -1292,6 +1298,11 @@ def get_standings():
     # Ensure scores are numeric to prevent alignment/broadcasting errors
     m['score_t1'] = pd.to_numeric(m['score_t1'], errors='coerce').fillna(0)
     m['score_t2'] = pd.to_numeric(m['score_t2'], errors='coerce').fillna(0)
+    
+    # For BO1, if we have map rounds, use them instead of map wins for points/RD
+    if 'team1_rounds' in m.columns and 'team2_rounds' in m.columns:
+        m['score_t1'] = np.where(m['team1_rounds'].notna(), m['team1_rounds'], m['score_t1'])
+        m['score_t2'] = np.where(m['team2_rounds'].notna(), m['team2_rounds'], m['score_t2'])
     
     m['is_ot'] = (m['score_t1'] >= 12) & (m['score_t2'] >= 12)
     
@@ -1395,16 +1406,27 @@ def get_week_matches(week):
         """
         SELECT m.id, m.week, m.group_name, m.status, m.format, m.maps_played, m.is_forfeit,
                t1.name as t1_name, t2.name as t2_name,
-               m.score_t1, m.score_t2, t1.id as t1_id, t2.id as t2_id
+               m.score_t1, m.score_t2, t1.id as t1_id, t2.id as t2_id,
+               mm.team1_rounds, mm.team2_rounds
         FROM matches m
         JOIN teams t1 ON m.team1_id = t1.id
         JOIN teams t2 ON m.team2_id = t2.id
+        LEFT JOIN match_maps mm ON m.id = mm.match_id AND mm.map_index = 0
         WHERE m.week = ? AND m.match_type = 'regular'
         ORDER BY m.id
         """,
         conn,
         params=(week,),
     )
+    # For BO1, if we have map rounds, use them as the primary scores for display
+    if not df.empty and 'team1_rounds' in df.columns:
+        is_bo1 = (df['format'].str.upper() == 'BO1') | (df['format'].isna())
+        df.loc[is_bo1 & df['team1_rounds'].notna(), 'score_t1'] = df.loc[is_bo1 & df['team1_rounds'].notna(), 'team1_rounds']
+        df.loc[is_bo1 & df['team2_rounds'].notna(), 'score_t2'] = df.loc[is_bo1 & df['team2_rounds'].notna(), 'team2_rounds']
+        
+        # Ensure integer type for scores to avoid .0 display
+        df['score_t1'] = df['score_t1'].astype(int)
+        df['score_t2'] = df['score_t2'].astype(int)
     conn.close()
     return df
 
@@ -1417,15 +1439,26 @@ def get_playoff_matches():
         SELECT m.id, m.playoff_round, m.bracket_pos, m.status, m.format, m.maps_played, m.is_forfeit,
                t1.name as t1_name, t2.name as t2_name,
                m.score_t1, m.score_t2, t1.id as t1_id, t2.id as t2_id,
-               m.winner_id
+               m.winner_id,
+               mm.team1_rounds, mm.team2_rounds
         FROM matches m
         LEFT JOIN teams t1 ON m.team1_id = t1.id
         LEFT JOIN teams t2 ON m.team2_id = t2.id
+        LEFT JOIN match_maps mm ON m.id = mm.match_id AND mm.map_index = 0
         WHERE m.match_type = 'playoff'
         ORDER BY m.playoff_round ASC, m.bracket_pos ASC
         """,
         conn
     )
+    # For BO1, if we have map rounds, use them as the primary scores for display
+    if not df.empty and 'team1_rounds' in df.columns:
+        is_bo1 = (df['format'].str.upper() == 'BO1') | (df['format'].isna())
+        df.loc[is_bo1 & df['team1_rounds'].notna(), 'score_t1'] = df.loc[is_bo1 & df['team1_rounds'].notna(), 'team1_rounds']
+        df.loc[is_bo1 & df['team2_rounds'].notna(), 'score_t2'] = df.loc[is_bo1 & df['team2_rounds'].notna(), 'team2_rounds']
+        
+        # Ensure integer type for scores to avoid .0 display
+        df['score_t1'] = df['score_t1'].astype(int)
+        df['score_t2'] = df['score_t2'].astype(int)
     conn.close()
     return df
 
@@ -1892,15 +1925,24 @@ if page == "Overview & Standings":
             
             # Standings Table for Group
             st.markdown("<br>", unsafe_allow_html=True)
+            
+            # Sort and add Rank column
+            sorted_grp = grp_df[['name', 'Played', 'Wins', 'Losses', 'Points', 'RD']].sort_values(['Points', 'RD'], ascending=False).reset_index(drop=True)
+            sorted_grp.index += 1
+            sorted_grp.insert(0, 'Rank', sorted_grp.index)
+            
             st.dataframe(
-                grp_df[['name', 'Played', 'Wins', 'Losses', 'Points', 'RD']].sort_values('Points', ascending=False),
+                sorted_grp,
                 hide_index=True,
                 use_container_width=True,
                 column_config={
+                    "Rank": st.column_config.NumberColumn("Rank", width="small"),
                     "name": "Team",
-                    "RD": st.column_config.NumberColumn("Round Diff", help="Total Rounds Won - Total Rounds Lost")
+                    "RD": st.column_config.NumberColumn("Round Diff", help="Total Rounds Won - Total Rounds Lost"),
+                    "Points": st.column_config.NumberColumn("Points", help="Match Win (15) + Rounds Won + OT Bonus (12 if loss in OT)")
                 }
             )
+            st.caption("🏆 Top teams from each group qualify for Playoffs.")
             st.markdown("---")
     else:
         st.info("No standings data available yet.")
@@ -1908,13 +1950,45 @@ if page == "Overview & Standings":
 elif page == "Matches":
     import pandas as pd
     st.markdown('<h1 class="main-header">MATCH SCHEDULE</h1>', unsafe_allow_html=True)
-    week = st.selectbox("Select Week", [1, 2, 3, 4, 5], index=0)
-    df = get_week_matches(week)
+    week_options = [1, 2, 3, 4, 5, 6, "Playoffs"]
+    week = st.selectbox("Select Week", week_options, index=0)
+    
+    if week == "Playoffs":
+        df = get_playoff_matches()
+    else:
+        df = get_week_matches(week)
+        
     if df.empty:
         st.info("No matches for this week.")
     else:
-        st.markdown("### Scheduled")
-        sched = df[df['status'] != 'completed']
+        if week == "Playoffs":
+            st.markdown("### Playoff Brackets")
+            # Group by playoff_round (1=Quarters, 2=Semis, 3=Finals etc.)
+            rounds = sorted(df['playoff_round'].unique())
+            cols = st.columns(len(rounds))
+            for i, r_num in enumerate(rounds):
+                with cols[i]:
+                    r_name = {1: "Quarter-Finals", 2: "Semi-Finals", 3: "Grand Finals"}.get(r_num, f"Round {r_num}")
+                    st.markdown(f"<h4 style='text-align: center; color: var(--primary-red);'>{r_name}</h4>", unsafe_allow_html=True)
+                    r_matches = df[df['playoff_round'] == r_num].sort_values('bracket_pos')
+                    for m in r_matches.itertuples():
+                        winner_color_1 = "var(--primary-blue)" if m.status == 'completed' and m.winner_id == m.t1_id else "var(--text-main)"
+                        winner_color_2 = "var(--primary-red)" if m.status == 'completed' and m.winner_id == m.t2_id else "var(--text-main)"
+                        
+                        st.markdown(f"""<div class="custom-card" style="margin-bottom: 10px; padding: 10px; border-left: 3px solid {winner_color_1 if m.winner_id == m.t1_id else winner_color_2};">
+<div style="display: flex; justify-content: space-between; font-size: 0.9rem;">
+<span style="color: {winner_color_1}; font-weight: {'bold' if m.winner_id == m.t1_id else 'normal'};">{html.escape(str(m.t1_name or "TBD"))}</span>
+<span style="font-family: 'Orbitron';">{int(m.score_t1) if m.status == 'completed' else '-'}</span>
+</div>
+<div style="display: flex; justify-content: space-between; font-size: 0.9rem; margin-top: 5px;">
+<span style="color: {winner_color_2}; font-weight: {'bold' if m.winner_id == m.t2_id else 'normal'};">{html.escape(str(m.t2_name or "TBD"))}</span>
+<span style="font-family: 'Orbitron';">{int(m.score_t2) if m.status == 'completed' else '-'}</span>
+</div>
+<div style="text-align: center; font-size: 0.6rem; color: var(--text-dim); margin-top: 5px;">{html.escape(str(m.format))}</div>
+</div>""", unsafe_allow_html=True)
+        else:
+            st.markdown("### Scheduled")
+            sched = df[df['status'] != 'completed']
         if sched.empty:
             st.caption("None")
         else:
@@ -3644,7 +3718,7 @@ elif page == "Admin Panel":
         st.divider()
         st.subheader("Schedule Manager")
         teams_df = get_teams_list_full()
-        weeks = list(range(1, 11))
+        weeks = list(range(1, 7)) # 6 weeks of regular season
         w = st.selectbox("Week", weeks, index=0)
         gnames = sorted([x for x in teams_df['group_name'].dropna().unique().tolist()])
         gsel = st.selectbox("Group", gnames + [""] , index=(0 if gnames else 0))
