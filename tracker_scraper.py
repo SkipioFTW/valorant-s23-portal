@@ -8,22 +8,32 @@ import time
 
 class TrackerScraper:
     def __init__(self):
+        # Using a more specific browser profile to better mimic a real user
         self.scraper = cloudscraper.create_scraper(
             browser={
                 'browser': 'chrome',
                 'platform': 'windows',
                 'desktop': True
-            }
+            },
+            delay=10 # Cloudflare sometimes requires a delay before the challenge can be solved
         )
+        # Standard headers that help mimic a browser request
         self.headers = {
             'Accept': 'application/json, text/plain, */*',
             'Accept-Language': 'en-US,en;q=0.9',
+            'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+            'Sec-Ch-Ua-Mobile': '?0',
+            'Sec-Ch-Ua-Platform': '"Windows"',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-origin',
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
 
     def get_match_data(self, match_url):
         """
         Scrapes match data from tracker.gg using the provided URL.
+        Includes a retry mechanism for robustness in cloud environments.
         """
         match_id_match = re.search(r'match/([a-zA-Z0-9\-]+)', match_url)
         if not match_id_match:
@@ -35,17 +45,29 @@ class TrackerScraper:
         headers = self.headers.copy()
         headers['Referer'] = f'https://tracker.gg/valorant/match/{match_id}'
         
-        try:
-            print(f"🚀 Scraping Match: {match_id}")
-            r = self.scraper.get(api_url, headers=headers)
-            
-            if r.status_code != 200:
-                return None, f"Tracker.gg API error: {r.status_code}"
-            
-            data = r.json()
-            return data, None
-        except Exception as e:
-            return None, f"Scraping error: {str(e)}"
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                print(f"🚀 Scraping Match: {match_id} (Attempt {attempt + 1})")
+                r = self.scraper.get(api_url, headers=headers, timeout=30)
+                
+                if r.status_code == 200:
+                    data = r.json()
+                    return data, None
+                elif r.status_code == 403:
+                    print(f"⚠️ 403 Forbidden on attempt {attempt + 1}. Cloudflare might be blocking the cloud IP.")
+                    if attempt < max_retries - 1:
+                        time.sleep(5) # Wait before retrying
+                        continue
+                    return None, f"Tracker.gg blocked the request (403). This often happens in cloud environments like Streamlit Cloud."
+                else:
+                    return None, f"Tracker.gg API error: {r.status_code}"
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                    continue
+                return None, f"Scraping error: {str(e)}"
+        return None, "Scraping failed after multiple attempts."
 
     def get_profile_data(self, profile_url):
         """
@@ -53,28 +75,40 @@ class TrackerScraper:
         Example URL: https://tracker.gg/valorant/profile/riot/User%23TAG/overview
         """
         # Extract Riot ID from URL
-        # Format: /profile/riot/User%23TAG
         profile_match = re.search(r'profile/riot/([^/?#]+)', profile_url)
         if not profile_match:
             return None, "Invalid Tracker.gg profile URL"
         
         user_url_part = profile_match.group(1)
-        api_url = f"https://api.tracker.gg/api/v2/valorant/standard/profile/riot/{user_url_part}?forceCollect=true"
+        api_url = f"https://api.tracker.gg/api/v2/valorant/standard/profile/riot/{user_url_part}"
         
         headers = self.headers.copy()
         headers['Referer'] = profile_url
         
-        try:
-            print(f"👤 Scraping Profile: {user_url_part}")
-            r = self.scraper.get(api_url, headers=headers)
-            
-            if r.status_code != 200:
-                return None, f"Tracker.gg API error: {r.status_code}"
-            
-            data = r.json()
-            return data, None
-        except Exception as e:
-            return None, f"Scraping error: {str(e)}"
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                print(f"👤 Scraping Profile: {user_url_part} (Attempt {attempt + 1})")
+                r = self.scraper.get(api_url, headers=headers, timeout=30)
+                
+                if r.status_code == 200:
+                    data = r.json()
+                    return data, None
+                elif r.status_code == 403:
+                    if attempt < max_retries - 1:
+                        time.sleep(5)
+                        continue
+                    return None, "Tracker.gg blocked the profile request (403)."
+                elif r.status_code == 451:
+                    return None, "Profile data is restricted or requires manual collection (451)."
+                else:
+                    return None, f"Tracker.gg API error: {r.status_code}"
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                    continue
+                return None, f"Scraping error: {str(e)}"
+        return None, "Scraping failed after multiple attempts."
 
     def save_match(self, data, folder="matches"):
         if not data or 'data' not in data:
