@@ -103,14 +103,16 @@ def track_user_activity():
         ip_address = get_visitor_ip()
         conn = get_conn()
         
-        # If the user is NOT an admin in the current session (e.g. after a refresh),
-        # we clear any active admin status associated with this IP address.
-        # This ensures that a refresh effectively "logs out" the old session for this user.
-        if not is_admin:
-            conn.execute(
-                "DELETE FROM session_activity WHERE ip_address = ? AND (role = 'admin' OR role = 'dev')",
-                (ip_address,)
-            )
+        # IMPROVED LOGIC: If this is a fresh session (just refreshed/opened),
+        # and it's NOT yet marked as admin, clear any old admin sessions for this IP.
+        # We use a session-specific flag to ensure we only clear ONCE per refresh.
+        if 'session_initialized' not in st.session_state:
+            if not is_admin:
+                conn.execute(
+                    "DELETE FROM session_activity WHERE ip_address = ? AND (role = 'admin' OR role = 'dev')",
+                    (ip_address,)
+                )
+            st.session_state['session_initialized'] = True
             
         conn.execute(
             "INSERT OR REPLACE INTO session_activity (session_id, username, role, last_activity, ip_address) VALUES (?, ?, ?, ?, ?)",
@@ -133,17 +135,13 @@ def get_active_user_count():
 def get_active_admin_session():
     conn = get_conn()
     # Check for active admin/dev sessions in last 2 minutes
-    # Exclude current session AND same IP (to allow refreshes)
-    from streamlit.runtime.scriptrunner import get_script_run_ctx
-    ctx = get_script_run_ctx()
-    curr_session_id = ctx.session_id if ctx else None
+    # Exclude current IP (to allow refreshes/multiple tabs for same user)
     curr_ip = get_visitor_ip()
     
-    # We block only if the active session has a DIFFERENT session_id AND DIFFERENT IP
-    # If the IP is the same, we assume it's the same person refreshing or using another tab
+    # We block ONLY if there's an active admin from a DIFFERENT IP address.
     res = conn.execute(
-        "SELECT username, role FROM session_activity WHERE (role='admin' OR role='dev') AND last_activity > ? AND session_id != ? AND ip_address != ?", 
-        (time.time() - 120, curr_session_id, curr_ip)
+        "SELECT username, role FROM session_activity WHERE (role='admin' OR role='dev') AND last_activity > ? AND ip_address != ?", 
+        (time.time() - 120, curr_ip)
     ).fetchone()
     conn.close()
     return res
