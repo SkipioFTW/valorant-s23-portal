@@ -2663,372 +2663,372 @@ elif page == "Admin Panel":
                     map_idx = map_choice - 1
                     
                     all_df0 = get_all_players()
-                name_to_riot = dict(zip(all_df0['name'].astype(str), all_df0['riot_id'].astype(str))) if not all_df0.empty else {}
+                    name_to_riot = dict(zip(all_df0['name'].astype(str), all_df0['riot_id'].astype(str))) if not all_df0.empty else {}
                 
-                # Match ID or Link input for automatic pre-filling
-                col_json1, col_json2, col_json3 = st.columns([2, 1, 1])
-                with col_json1:
-                    match_input = st.text_input("Enter Match ID", key=f"mid_{m['id']}_{map_idx}", placeholder="e.g. fef14b8b-ddc7-4b91-b91c-905327c74325")
-                with col_json2:
-                    if st.button("Apply Match Data", key=f"force_json_{m['id']}_{map_idx}", use_container_width=True):
-                        if match_input:
-                            # Clean Match ID
-                            match_id_clean = match_input
-                            if "tracker.gg" in match_input:
-                                mid_match = re.search(r'match/([a-zA-Z0-9\-]+)', match_input)
-                                if mid_match: match_id_clean = mid_match.group(1)
-                            match_id_clean = re.sub(r'[^a-zA-Z0-9\-]', '', match_id_clean)
+                    # Match ID or Link input for automatic pre-filling
+                    col_json1, col_json2, col_json3 = st.columns([2, 1, 1])
+                    with col_json1:
+                        match_input = st.text_input("Enter Match ID", key=f"mid_{m['id']}_{map_idx}", placeholder="e.g. fef14b8b-ddc7-4b91-b91c-905327c74325")
+                    with col_json2:
+                        if st.button("Apply Match Data", key=f"force_json_{m['id']}_{map_idx}", use_container_width=True):
+                            if match_input:
+                                # Clean Match ID
+                                match_id_clean = match_input
+                                if "tracker.gg" in match_input:
+                                    mid_match = re.search(r'match/([a-zA-Z0-9\-]+)', match_input)
+                                    if mid_match: match_id_clean = mid_match.group(1)
+                                match_id_clean = re.sub(r'[^a-zA-Z0-9\-]', '', match_id_clean)
                             
-                            json_path = os.path.join("matches", f"match_{match_id_clean}.json")
-                            jsdata = None
-                            source = ""
+                                json_path = os.path.join("matches", f"match_{match_id_clean}.json")
+                                jsdata = None
+                                source = ""
                             
-                            # 1. Try local file first (Prevents 403 errors in Cloud)
-                            if os.path.exists(json_path):
-                                try:
-                                    with open(json_path, 'r', encoding='utf-8') as f:
-                                        jsdata = json.load(f)
-                                    source = "Local Cache"
-                                except Exception as e:
-                                    st.error(f"Error reading local file: {e}")
+                                # 1. Try local file first (Prevents 403 errors in Cloud)
+                                if os.path.exists(json_path):
+                                    try:
+                                        with open(json_path, 'r', encoding='utf-8') as f:
+                                            jsdata = json.load(f)
+                                        source = "Local Cache"
+                                    except Exception as e:
+                                        st.error(f"Error reading local file: {e}")
                             
-                            # 2. If not found locally, attempt live scrape
-                            if not jsdata:
-                                with st.spinner("Fetching data from Tracker.gg..."):
-                                    jsdata, err = scrape_tracker_match(match_id_clean)
-                                    if err:
-                                        st.error(f"Scrape failed: {err}")
-                                        st.info("💡 **Tip:** If scraping is blocked (403), ensure the JSON file is in the 'matches/' folder.")
-                                    else:
-                                        source = "Tracker.gg"
-                                        # Save locally for future use
-                                        if not os.path.exists("matches"): os.makedirs("matches")
-                                        with open(json_path, 'w', encoding='utf-8') as f:
-                                            json.dump(jsdata, f, indent=4)
+                                # 2. If not found locally, attempt live scrape
+                                if not jsdata:
+                                    with st.spinner("Fetching data from Tracker.gg..."):
+                                        jsdata, err = scrape_tracker_match(match_id_clean)
+                                        if err:
+                                            st.error(f"Scrape failed: {err}")
+                                            st.info("💡 **Tip:** If scraping is blocked (403), ensure the JSON file is in the 'matches/' folder.")
+                                        else:
+                                            source = "Tracker.gg"
+                                            # Save locally for future use
+                                            if not os.path.exists("matches"): os.makedirs("matches")
+                                            with open(json_path, 'w', encoding='utf-8') as f:
+                                                json.dump(jsdata, f, indent=4)
                                         
-                                        # Upload to GitHub so others can use it
-                                        scraper = TrackerScraper()
-                                        ok, gmsg = scraper.upload_match_to_github(match_id_clean, jsdata, get_secret)
-                                        if ok: st.toast(gmsg, icon="✅")
+                                            # Upload to GitHub so others can use it
+                                            scraper = TrackerScraper()
+                                            ok, gmsg = scraper.upload_match_to_github(match_id_clean, jsdata, get_secret)
+                                            if ok: st.toast(gmsg, icon="✅")
                             
-                            # 3. Process and apply if we have data
-                            if jsdata:
+                                # 3. Process and apply if we have data
+                                if jsdata:
+                                    cur_t1_id = int(m.get('t1_id', m.get('team1_id')))
+                                    json_suggestions, map_name, t1_r, t2_r = parse_tracker_json(jsdata, cur_t1_id)
+                                
+                                    st.session_state[f"ocr_{m['id']}_{map_idx}"] = json_suggestions
+                                    st.session_state[f"scraped_data_{m['id']}_{map_idx}"] = {
+                                        'map_name': map_name,
+                                        't1_rounds': int(t1_r),
+                                        't2_rounds': int(t2_r)
+                                    }
+                                    st.session_state[f"force_apply_{m['id']}_{map_idx}"] = st.session_state.get(f"force_apply_{m['id']}_{map_idx}", 0) + 1
+                                    st.success(f"Loaded {map_name} from {source}!")
+                                    st.rerun()
+                            else:
+                                st.warning("Please enter a Match ID first.")
+                    with col_json3:
+                        st.info("💡 **Tip:** Enter a Match ID. We'll check for a local JSON first to avoid connection errors!")
+
+                    # Auto-load if file exists but not in session
+                    if match_input and f"ocr_{m['id']}_{map_idx}" not in st.session_state:
+                        match_id_clean = re.sub(r'[^a-zA-Z0-9\-]', '', match_input)
+                        if "tracker.gg" in match_input:
+                            mid_match = re.search(r'match/([a-zA-Z0-9\-]+)', match_input)
+                            if mid_match: match_id_clean = mid_match.group(1)
+                    
+                        json_path = os.path.join("matches", f"match_{match_id_clean}.json")
+                        if os.path.exists(json_path):
+                            try:
+                                with open(json_path, 'r', encoding='utf-8') as f:
+                                    jsdata = json.load(f)
                                 cur_t1_id = int(m.get('t1_id', m.get('team1_id')))
                                 json_suggestions, map_name, t1_r, t2_r = parse_tracker_json(jsdata, cur_t1_id)
-                                
                                 st.session_state[f"ocr_{m['id']}_{map_idx}"] = json_suggestions
-                                st.session_state[f"scraped_data_{m['id']}_{map_idx}"] = {
-                                    'map_name': map_name,
-                                    't1_rounds': int(t1_r),
-                                    't2_rounds': int(t2_r)
-                                }
-                                st.session_state[f"force_apply_{m['id']}_{map_idx}"] = st.session_state.get(f"force_apply_{m['id']}_{map_idx}", 0) + 1
-                                st.success(f"Loaded {map_name} from {source}!")
-                                st.rerun()
-                        else:
-                            st.warning("Please enter a Match ID first.")
-                with col_json3:
-                    st.info("💡 **Tip:** Enter a Match ID. We'll check for a local JSON first to avoid connection errors!")
-
-                # Auto-load if file exists but not in session
-                if match_input and f"ocr_{m['id']}_{map_idx}" not in st.session_state:
-                    match_id_clean = re.sub(r'[^a-zA-Z0-9\-]', '', match_input)
-                    if "tracker.gg" in match_input:
-                        mid_match = re.search(r'match/([a-zA-Z0-9\-]+)', match_input)
-                        if mid_match: match_id_clean = mid_match.group(1)
-                    
-                    json_path = os.path.join("matches", f"match_{match_id_clean}.json")
-                    if os.path.exists(json_path):
-                        try:
-                            with open(json_path, 'r', encoding='utf-8') as f:
-                                jsdata = json.load(f)
-                            cur_t1_id = int(m.get('t1_id', m.get('team1_id')))
-                            json_suggestions, map_name, t1_r, t2_r = parse_tracker_json(jsdata, cur_t1_id)
-                            st.session_state[f"ocr_{m['id']}_{map_idx}"] = json_suggestions
-                            st.session_state[f"scraped_data_{m['id']}_{map_idx}"] = {'map_name': map_name, 't1_rounds': int(t1_r), 't2_rounds': int(t2_r)}
-                        except: pass
+                                st.session_state[f"scraped_data_{m['id']}_{map_idx}"] = {'map_name': map_name, 't1_rounds': int(t1_r), 't2_rounds': int(t2_r)}
+                            except: pass
                 
-                force_apply = st.session_state.get(f"force_apply_{m['id']}_{map_idx}", False)
+                    force_apply = st.session_state.get(f"force_apply_{m['id']}_{map_idx}", False)
 
-                # Pre-fetch shared data outside the loop
-                agents_list = get_agents_list()
-                all_df = get_all_players()
+                    # Pre-fetch shared data outside the loop
+                    agents_list = get_agents_list()
+                    all_df = get_all_players()
                 
-                # Vectorized global list and map creation
-                if not all_df.empty:
-                    all_df['display_label'] = all_df.apply(lambda r: f"{r['name']} ({r['riot_id']})" if r['riot_id'] and str(r['riot_id']).strip() else r['name'], axis=1)
-                    global_list = all_df['display_label'].tolist()
-                    global_map = dict(zip(global_list, all_df['id']))
-                    has_riot = all_df['riot_id'].notna() & (all_df['riot_id'].str.strip() != "")
-                    label_to_riot = dict(zip(all_df.loc[has_riot, 'display_label'], all_df.loc[has_riot, 'riot_id'].str.strip().str.lower()))
-                    riot_to_label = {v: k for k, v in label_to_riot.items()}
-                else:
-                    global_list = []
-                    global_map = {}
-                    label_to_riot = {}
-                    riot_to_label = {}
-
-                # Vectorized player lookup creation (common for both teams)
-                player_lookup = {}
-                if not all_df.empty:
-                    player_lookup = {
-                        row.id: {
-                            'label': row.display_label,
-                            'riot_id': str(row.riot_id).strip().lower() if pd.notna(row.riot_id) and str(row.riot_id).strip() else None
-                        }
-                        for row in all_df.itertuples()
-                    }
-
-                # Fetch all stats for this match and map index at once to reduce DB calls
-                conn_p = get_conn()
-                all_map_stats = pd.read_sql(
-                    "SELECT * FROM match_stats_map WHERE match_id=? AND map_index=?", 
-                    conn_p, 
-                    params=(int(m['id']), map_idx)
-                )
-                conn_p.close()
-
-                for team_key, team_id, team_name in [("t1", int(m.get('t1_id', m.get('team1_id'))), m['t1_name']), ("t2", int(m.get('t2_id', m.get('team2_id'))), m['t2_name'])]:
-                    st.caption(f"{team_name} players")
-                    
-                    # Filter roster from all_df instead of querying DB
-                    roster_df = all_df[all_df['default_team_id'] == team_id].sort_values('name')
-                    
-                    # Filter existing stats from the pre-fetched all_map_stats
-                    existing = all_map_stats[all_map_stats['team_id'] == team_id]
-                    
-                    roster_list = roster_df['display_label'].tolist() if not roster_df.empty else []
-                    roster_map = dict(zip(roster_list, roster_df['id']))
-                    rows = []
-                    
-                    sug = st.session_state.get(f"ocr_{m['id']}_{map_idx}", {})
-                    our_team_num = 1 if team_key == "t1" else 2
-                    
-                    if not existing.empty and not force_apply:
-                        for r in existing.itertuples():
-                            pname = ""
-                            rid = None
-                            if r.player_id in player_lookup:
-                                pname = player_lookup[r.player_id]['label']
-                                rid = player_lookup[r.player_id]['riot_id']
-                            
-                            sfname = ""
-                            if r.subbed_for_id in player_lookup:
-                                sfname = player_lookup[r.subbed_for_id]['label']
-                            
-                            # Merge with JSON if existing stats are 0
-                            acs, k, d, a = int(r.acs or 0), int(r.kills or 0), int(r.deaths or 0), int(r.assists or 0)
-                            agent = r.agent or (agents_list[0] if agents_list else "")
-                            
-                            if rid and rid in sug and acs == 0 and k == 0:
-                                s = sug[rid]
-                                acs, k, d, a = s['acs'], s['k'], s['d'], s['a']
-                                agent = s.get('agent') or agent
-                                
-                            rows.append({
-                                'player': pname,
-                                'is_sub': bool(r.is_sub),
-                                'subbed_for': sfname or (roster_list[0] if roster_list else ""),
-                                'agent': agent,
-                                'acs': acs,
-                                'k': k,
-                                'd': d,
-                                'a': a,
-                            })
+                    # Vectorized global list and map creation
+                    if not all_df.empty:
+                        all_df['display_label'] = all_df.apply(lambda r: f"{r['name']} ({r['riot_id']})" if r['riot_id'] and str(r['riot_id']).strip() else r['name'], axis=1)
+                        global_list = all_df['display_label'].tolist()
+                        global_map = dict(zip(global_list, all_df['id']))
+                        has_riot = all_df['riot_id'].notna() & (all_df['riot_id'].str.strip() != "")
+                        label_to_riot = dict(zip(all_df.loc[has_riot, 'display_label'], all_df.loc[has_riot, 'riot_id'].str.strip().str.lower()))
+                        riot_to_label = {v: k for k, v in label_to_riot.items()}
                     else:
-                        # New Logic for JSON pre-fill with substitution support
-                        team_sug_rids = [rid for rid, s in sug.items() if s.get('team_num') == our_team_num]
-                        roster_labels = roster_list
-                        
-                        json_roster_matches = [] # (rid, label, stats)
-                        json_subs = [] # (rid, label_or_none, stats)
-                        
-                        for rid in team_sug_rids:
-                            s = sug[rid]
-                            l_rid = rid.lower()
-                            db_label = riot_to_label.get(l_rid)
-                            
-                            # If direct riot_id match fails, try using the matched name from parse_tracker_json
-                            if not db_label and s.get('name'):
-                                matched_name = s.get('name')
-                                # Find the display label for this name
-                                for label in global_list:
-                                    if label == matched_name or label.startswith(matched_name + " ("):
-                                        db_label = label
-                                        break
-                            
-                            # A player is a roster match only if they are in THIS team's roster
-                            if db_label and db_label in roster_labels:
-                                json_roster_matches.append((rid, db_label, s))
-                            else:
-                                # If they are in DB but not on THIS roster, they are a sub
-                                # If they are NOT in DB, they are still a sub (but with no label)
-                                json_subs.append((rid, db_label, s))
-                        
-                        used_roster_labels = [m[1] for m in json_roster_matches]
-                        missing_roster_labels = [l for l in roster_labels if l not in used_roster_labels]
-                        
+                        global_list = []
+                        global_map = {}
+                        label_to_riot = {}
+                        riot_to_label = {}
+
+                    # Vectorized player lookup creation (common for both teams)
+                    player_lookup = {}
+                    if not all_df.empty:
+                        player_lookup = {
+                            row.id: {
+                                'label': row.display_label,
+                                'riot_id': str(row.riot_id).strip().lower() if pd.notna(row.riot_id) and str(row.riot_id).strip() else None
+                            }
+                            for row in all_df.itertuples()
+                        }
+
+                    # Fetch all stats for this match and map index at once to reduce DB calls
+                    conn_p = get_conn()
+                    all_map_stats = pd.read_sql(
+                        "SELECT * FROM match_stats_map WHERE match_id=? AND map_index=?", 
+                        conn_p, 
+                        params=(int(m['id']), map_idx)
+                    )
+                    conn_p.close()
+
+                    for team_key, team_id, team_name in [("t1", int(m.get('t1_id', m.get('team1_id'))), m['t1_name']), ("t2", int(m.get('t2_id', m.get('team2_id'))), m['t2_name'])]:
+                        st.caption(f"{team_name} players")
+                    
+                        # Filter roster from all_df instead of querying DB
+                        roster_df = all_df[all_df['default_team_id'] == team_id].sort_values('name')
+                    
+                        # Filter existing stats from the pre-fetched all_map_stats
+                        existing = all_map_stats[all_map_stats['team_id'] == team_id]
+                    
+                        roster_list = roster_df['display_label'].tolist() if not roster_df.empty else []
+                        roster_map = dict(zip(roster_list, roster_df['id']))
                         rows = []
-                        # 1. Add roster matches
-                        for rid, label, s in json_roster_matches:
-                            rows.append({
-                                'player': label,
-                                'is_sub': False,
-                                'subbed_for': label,
-                                'agent': s.get('agent') or (agents_list[0] if agents_list else ""),
-                                'acs': s['acs'], 'k': s['k'], 'd': s['d'], 'a': s['a']
-                            })
+                    
+                        sug = st.session_state.get(f"ocr_{m['id']}_{map_idx}", {})
+                        our_team_num = 1 if team_key == "t1" else 2
+                    
+                        if not existing.empty and not force_apply:
+                            for r in existing.itertuples():
+                                pname = ""
+                                rid = None
+                                if r.player_id in player_lookup:
+                                    pname = player_lookup[r.player_id]['label']
+                                    rid = player_lookup[r.player_id]['riot_id']
                             
-                        # 2. Add subs (mapping to missing roster players)
-                        for rid, db_label, s in json_subs:
-                            if len(rows) >= 5: break
-                            subbed_for = missing_roster_labels.pop(0) if missing_roster_labels else (roster_labels[0] if roster_labels else "")
-                            rows.append({
-                                'player': db_label or "",
-                                'is_sub': True,
-                                'subbed_for': subbed_for,
-                                'agent': s.get('agent') or (agents_list[0] if agents_list else ""),
-                                'acs': s['acs'], 'k': s['k'], 'd': s['d'], 'a': s['a']
-                            })
+                                sfname = ""
+                                if r.subbed_for_id in player_lookup:
+                                    sfname = player_lookup[r.subbed_for_id]['label']
                             
-                        # 3. Fill remaining slots with missing roster players
-                        while len(rows) < 5 and missing_roster_labels:
-                            l = missing_roster_labels.pop(0)
-                            rows.append({
-                                'player': l,
-                                'is_sub': False,
-                                'subbed_for': l,
-                                'agent': agents_list[0] if agents_list else "",
-                                'acs': 0, 'k': 0, 'd': 0, 'a': 0
-                            })
+                                # Merge with JSON if existing stats are 0
+                                acs, k, d, a = int(r.acs or 0), int(r.kills or 0), int(r.deaths or 0), int(r.assists or 0)
+                                agent = r.agent or (agents_list[0] if agents_list else "")
                             
-                        # 4. Final fallback to 5 rows
-                        while len(rows) < 5:
-                            rows.append({
-                                'player': "",
-                                'is_sub': False,
-                                'subbed_for': roster_labels[0] if roster_labels else "",
-                                'agent': agents_list[0] if agents_list else "",
-                                'acs': 0, 'k': 0, 'd': 0, 'a': 0
-                            })
-
-                    with st.form(f"sb_{team_key}_{map_idx}"):
-                        h1,h2,h3,h4,h5,h6,h7,h8,h9 = st.columns([2,1.2,2,2,1,1,1,1,0.8])
-                        h1.write("Player")
-                        h2.write("Sub?")
-                        h3.write("Subbing For")
-                        h4.write("Agent")
-                        h5.write("ACS")
-                        h6.write("K")
-                        h7.write("D")
-                        h8.write("A")
-                        h9.write("Conf")
-                        entries = []
-                        
-                        for i, rowd in enumerate(rows):
-                            c1,c2,c3,c4,c5,c6,c7,c8,c9 = st.columns([2,1.2,2,2,1,1,1,1,0.8])
-                            # Find the best index for the player selectbox
-                            if rowd['player'] in global_list:
-                                p_idx = global_list.index(rowd['player'])
-                            else:
-                                p_idx = len(global_list) # Empty
-
-                            # Use a unique key for the inputs to force refresh when JSON changes or Force Apply is clicked
-                            # We include the hash of suggestions and the force apply counter to ensure inputs update
-                            force_cnt = st.session_state.get(f"force_apply_{m['id']}_{map_idx}", 0)
-                            input_key_suffix = f"{m['id']}_{map_idx}_{team_key}_{i}_{force_cnt}"
-                            if sug:
-                                input_key_suffix += f"_{hash(str(sug))}"
-                            
-                            psel = c1.selectbox(f"P_{input_key_suffix}", global_list + [""], index=p_idx, label_visibility="collapsed")
-                            rid_psel = label_to_riot.get(psel)
-                            
-                            # Update key suffix for stats inputs to include the selected player
-                            # This ensures that changing a player updates their stats from suggestions
-                            stats_key_suffix = input_key_suffix + f"_{rid_psel}"
-                            
-                            is_sub = c2.checkbox(f"S_{input_key_suffix}", value=rowd['is_sub'], label_visibility="collapsed")
-                            sf_sel = c3.selectbox(f"SF_{input_key_suffix}", roster_list + [""], index=(roster_list.index(rowd['subbed_for']) if rowd['subbed_for'] in roster_list else (0 if roster_list else 0)), label_visibility="collapsed")
-                            ag_sel = c4.selectbox(f"Ag_{input_key_suffix}", agents_list + [""], index=(agents_list.index(rowd['agent']) if rowd['agent'] in agents_list else (0 if agents_list else 0)), label_visibility="collapsed")
-                            
-                            # Final fallback: if selectbox changed, try to get suggestion again
-                            current_sug = sug.get(rid_psel, {}) if rid_psel else {}
-                            
-                            val_acs = current_sug.get('acs', rowd['acs'])
-                            val_k = current_sug.get('k', rowd['k'])
-                            val_d = current_sug.get('d', rowd['d'])
-                            val_a = current_sug.get('a', rowd['a'])
-                            val_conf = current_sug.get('conf', '-')
-                            
-                            acs = c5.number_input(f"ACS_{stats_key_suffix}", min_value=0, value=int(val_acs), label_visibility="collapsed")
-                            k = c6.number_input(f"K_{stats_key_suffix}", min_value=0, value=int(val_k), label_visibility="collapsed")
-                            d = c7.number_input(f"D_{stats_key_suffix}", min_value=0, value=int(val_d), label_visibility="collapsed")
-                            a = c8.number_input(f"A_{stats_key_suffix}", min_value=0, value=int(val_a), label_visibility="collapsed")
-                            c9.write(val_conf)
-                            
-                            entries.append({
-                                'player_id': global_map.get(psel),
-                                'is_sub': int(is_sub),
-                                'subbed_for_id': roster_map.get(sf_sel),
-                                'agent': ag_sel or None,
-                                'acs': int(acs),
-                                'kills': int(k),
-                                'deaths': int(d),
-                                'assists': int(a),
-                            })
-                        submit = st.form_submit_button("Save Scoreboard")
-                        if submit:
-                            conn_s = get_conn()
-                            try:
-                                conn_s.execute("DELETE FROM match_stats_map WHERE match_id=? AND map_index=? AND team_id=?", (int(m['id']), map_idx, team_id))
+                                if rid and rid in sug and acs == 0 and k == 0:
+                                    s = sug[rid]
+                                    acs, k, d, a = s['acs'], s['k'], s['d'], s['a']
+                                    agent = s.get('agent') or agent
                                 
-                                # Pre-fetch all player Riot IDs for the entries to avoid queries in loop
-                                entry_p_ids = [e['player_id'] for e in entries if e['player_id']]
-                                p_riot_map = {}
-                                if entry_p_ids:
-                                    placeholders = ",".join(["?"] * len(entry_p_ids))
-                                    p_riots = conn_s.execute(f"SELECT id, riot_id FROM players WHERE id IN ({placeholders})", entry_p_ids).fetchall()
-                                    p_riot_map = {r[0]: r[1] for r in p_riots}
+                                rows.append({
+                                    'player': pname,
+                                    'is_sub': bool(r.is_sub),
+                                    'subbed_for': sfname or (roster_list[0] if roster_list else ""),
+                                    'agent': agent,
+                                    'acs': acs,
+                                    'k': k,
+                                    'd': d,
+                                    'a': a,
+                                })
+                        else:
+                            # New Logic for JSON pre-fill with substitution support
+                            team_sug_rids = [rid for rid, s in sug.items() if s.get('team_num') == our_team_num]
+                            roster_labels = roster_list
+                        
+                            json_roster_matches = [] # (rid, label, stats)
+                            json_subs = [] # (rid, label_or_none, stats)
+                        
+                            for rid in team_sug_rids:
+                                s = sug[rid]
+                                l_rid = rid.lower()
+                                db_label = riot_to_label.get(l_rid)
+                            
+                                # If direct riot_id match fails, try using the matched name from parse_tracker_json
+                                if not db_label and s.get('name'):
+                                    matched_name = s.get('name')
+                                    # Find the display label for this name
+                                    for label in global_list:
+                                        if label == matched_name or label.startswith(matched_name + " ("):
+                                            db_label = label
+                                            break
+                            
+                                # A player is a roster match only if they are in THIS team's roster
+                                if db_label and db_label in roster_labels:
+                                    json_roster_matches.append((rid, db_label, s))
+                                else:
+                                    # If they are in DB but not on THIS roster, they are a sub
+                                    # If they are NOT in DB, they are still a sub (but with no label)
+                                    json_subs.append((rid, db_label, s))
+                        
+                            used_roster_labels = [m[1] for m in json_roster_matches]
+                            missing_roster_labels = [l for l in roster_labels if l not in used_roster_labels]
+                        
+                            rows = []
+                            # 1. Add roster matches
+                            for rid, label, s in json_roster_matches:
+                                rows.append({
+                                    'player': label,
+                                    'is_sub': False,
+                                    'subbed_for': label,
+                                    'agent': s.get('agent') or (agents_list[0] if agents_list else ""),
+                                    'acs': s['acs'], 'k': s['k'], 'd': s['d'], 'a': s['a']
+                                })
+                            
+                            # 2. Add subs (mapping to missing roster players)
+                            for rid, db_label, s in json_subs:
+                                if len(rows) >= 5: break
+                                subbed_for = missing_roster_labels.pop(0) if missing_roster_labels else (roster_labels[0] if roster_labels else "")
+                                rows.append({
+                                    'player': db_label or "",
+                                    'is_sub': True,
+                                    'subbed_for': subbed_for,
+                                    'agent': s.get('agent') or (agents_list[0] if agents_list else ""),
+                                    'acs': s['acs'], 'k': s['k'], 'd': s['d'], 'a': s['a']
+                                })
+                            
+                            # 3. Fill remaining slots with missing roster players
+                            while len(rows) < 5 and missing_roster_labels:
+                                l = missing_roster_labels.pop(0)
+                                rows.append({
+                                    'player': l,
+                                    'is_sub': False,
+                                    'subbed_for': l,
+                                    'agent': agents_list[0] if agents_list else "",
+                                    'acs': 0, 'k': 0, 'd': 0, 'a': 0
+                                })
+                            
+                            # 4. Final fallback to 5 rows
+                            while len(rows) < 5:
+                                rows.append({
+                                    'player': "",
+                                    'is_sub': False,
+                                    'subbed_for': roster_labels[0] if roster_labels else "",
+                                    'agent': agents_list[0] if agents_list else "",
+                                    'acs': 0, 'k': 0, 'd': 0, 'a': 0
+                                })
 
-                                for e in entries:
-                                    if e['player_id']:
-                                        # Auto-complete stats from JSON if they are 0 and player has suggestion
-                                        final_acs, final_k, final_d, final_a = e['acs'], e['kills'], e['deaths'], e['assists']
-                                        final_agent = e['agent']
-                                        
-                                        # Get Riot ID for this player from pre-fetched map
-                                        rid_raw = p_riot_map.get(e['player_id'])
-                                        
-                                        # Find Riot ID from label map if not in DB
-                                        p_label = player_lookup.get(e['player_id'], {}).get('label')
-                                        entry_rid_from_label = label_to_riot.get(p_label)
-                                        entry_rid_key = entry_rid_from_label.lower() if entry_rid_from_label else (rid_raw.lower() if rid_raw else None)
-                                        
-                                        if entry_rid_key and entry_rid_key in sug and final_acs == 0 and final_k == 0:
-                                            s = sug[entry_rid_key]
-                                            final_acs, final_k, final_d, final_a = s['acs'], s['k'], s['d'], s['a']
-                                            if not final_agent:
-                                                final_agent = s.get('agent')
+                        with st.form(f"sb_{team_key}_{map_idx}"):
+                            h1,h2,h3,h4,h5,h6,h7,h8,h9 = st.columns([2,1.2,2,2,1,1,1,1,0.8])
+                            h1.write("Player")
+                            h2.write("Sub?")
+                            h3.write("Subbing For")
+                            h4.write("Agent")
+                            h5.write("ACS")
+                            h6.write("K")
+                            h7.write("D")
+                            h8.write("A")
+                            h9.write("Conf")
+                            entries = []
+                        
+                            for i, rowd in enumerate(rows):
+                                c1,c2,c3,c4,c5,c6,c7,c8,c9 = st.columns([2,1.2,2,2,1,1,1,1,0.8])
+                                # Find the best index for the player selectbox
+                                if rowd['player'] in global_list:
+                                    p_idx = global_list.index(rowd['player'])
+                                else:
+                                    p_idx = len(global_list) # Empty
 
-                                        conn_s.execute("""
-                                            INSERT INTO match_stats_map (match_id, map_index, team_id, player_id, is_sub, subbed_for_id, agent, acs, kills, deaths, assists)
-                                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                                        """, (int(m['id']), map_idx, team_id, e['player_id'], e['is_sub'], e['subbed_for_id'], final_agent, final_acs, final_k, final_d, final_a))
-                                        
-                                        # Sync Riot ID if it was missing in DB but present in label
-                                        if not rid_raw and entry_rid_from_label:
-                                            conn_s.execute("UPDATE players SET riot_id=? WHERE id=?", (entry_rid_from_label, e['player_id']))
+                                # Use a unique key for the inputs to force refresh when JSON changes or Force Apply is clicked
+                                # We include the hash of suggestions and the force apply counter to ensure inputs update
+                                force_cnt = st.session_state.get(f"force_apply_{m['id']}_{map_idx}", 0)
+                                input_key_suffix = f"{m['id']}_{map_idx}_{team_key}_{i}_{force_cnt}"
+                                if sug:
+                                    input_key_suffix += f"_{hash(str(sug))}"
+                            
+                                psel = c1.selectbox(f"P_{input_key_suffix}", global_list + [""], index=p_idx, label_visibility="collapsed")
+                                rid_psel = label_to_riot.get(psel)
+                            
+                                # Update key suffix for stats inputs to include the selected player
+                                # This ensures that changing a player updates their stats from suggestions
+                                stats_key_suffix = input_key_suffix + f"_{rid_psel}"
+                            
+                                is_sub = c2.checkbox(f"S_{input_key_suffix}", value=rowd['is_sub'], label_visibility="collapsed")
+                                sf_sel = c3.selectbox(f"SF_{input_key_suffix}", roster_list + [""], index=(roster_list.index(rowd['subbed_for']) if rowd['subbed_for'] in roster_list else (0 if roster_list else 0)), label_visibility="collapsed")
+                                ag_sel = c4.selectbox(f"Ag_{input_key_suffix}", agents_list + [""], index=(agents_list.index(rowd['agent']) if rowd['agent'] in agents_list else (0 if agents_list else 0)), label_visibility="collapsed")
+                            
+                                # Final fallback: if selectbox changed, try to get suggestion again
+                                current_sug = sug.get(rid_psel, {}) if rid_psel else {}
+                            
+                                val_acs = current_sug.get('acs', rowd['acs'])
+                                val_k = current_sug.get('k', rowd['k'])
+                                val_d = current_sug.get('d', rowd['d'])
+                                val_a = current_sug.get('a', rowd['a'])
+                                val_conf = current_sug.get('conf', '-')
+                            
+                                acs = c5.number_input(f"ACS_{stats_key_suffix}", min_value=0, value=int(val_acs), label_visibility="collapsed")
+                                k = c6.number_input(f"K_{stats_key_suffix}", min_value=0, value=int(val_k), label_visibility="collapsed")
+                                d = c7.number_input(f"D_{stats_key_suffix}", min_value=0, value=int(val_d), label_visibility="collapsed")
+                                a = c8.number_input(f"A_{stats_key_suffix}", min_value=0, value=int(val_a), label_visibility="collapsed")
+                                c9.write(val_conf)
+                            
+                                entries.append({
+                                    'player_id': global_map.get(psel),
+                                    'is_sub': int(is_sub),
+                                    'subbed_for_id': roster_map.get(sf_sel),
+                                    'agent': ag_sel or None,
+                                    'acs': int(acs),
+                                    'kills': int(k),
+                                    'deaths': int(d),
+                                    'assists': int(a),
+                                })
+                            submit = st.form_submit_button("Save Scoreboard")
+                            if submit:
+                                conn_s = get_conn()
+                                try:
+                                    conn_s.execute("DELETE FROM match_stats_map WHERE match_id=? AND map_index=? AND team_id=?", (int(m['id']), map_idx, team_id))
+                                
+                                    # Pre-fetch all player Riot IDs for the entries to avoid queries in loop
+                                    entry_p_ids = [e['player_id'] for e in entries if e['player_id']]
+                                    p_riot_map = {}
+                                    if entry_p_ids:
+                                        placeholders = ",".join(["?"] * len(entry_p_ids))
+                                        p_riots = conn_s.execute(f"SELECT id, riot_id FROM players WHERE id IN ({placeholders})", entry_p_ids).fetchall()
+                                        p_riot_map = {r[0]: r[1] for r in p_riots}
 
-                                conn_s.commit()
-                                st.cache_data.clear()
-                                st.success("Scoreboard saved!")
-                                if f"force_apply_{m['id']}_{map_idx}" in st.session_state:
-                                    del st.session_state[f"force_apply_{m['id']}_{map_idx}"]
-                                st.rerun()
-                            except Exception as ex:
-                                st.error(f"Save failed: {ex}")
-                            finally:
-                                conn_s.close()
+                                    for e in entries:
+                                        if e['player_id']:
+                                            # Auto-complete stats from JSON if they are 0 and player has suggestion
+                                            final_acs, final_k, final_d, final_a = e['acs'], e['kills'], e['deaths'], e['assists']
+                                            final_agent = e['agent']
+                                        
+                                            # Get Riot ID for this player from pre-fetched map
+                                            rid_raw = p_riot_map.get(e['player_id'])
+                                        
+                                            # Find Riot ID from label map if not in DB
+                                            p_label = player_lookup.get(e['player_id'], {}).get('label')
+                                            entry_rid_from_label = label_to_riot.get(p_label)
+                                            entry_rid_key = entry_rid_from_label.lower() if entry_rid_from_label else (rid_raw.lower() if rid_raw else None)
+                                        
+                                            if entry_rid_key and entry_rid_key in sug and final_acs == 0 and final_k == 0:
+                                                s = sug[entry_rid_key]
+                                                final_acs, final_k, final_d, final_a = s['acs'], s['k'], s['d'], s['a']
+                                                if not final_agent:
+                                                    final_agent = s.get('agent')
+
+                                            conn_s.execute("""
+                                                INSERT INTO match_stats_map (match_id, map_index, team_id, player_id, is_sub, subbed_for_id, agent, acs, kills, deaths, assists)
+                                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                            """, (int(m['id']), map_idx, team_id, e['player_id'], e['is_sub'], e['subbed_for_id'], final_agent, final_acs, final_k, final_d, final_a))
+                                        
+                                            # Sync Riot ID if it was missing in DB but present in label
+                                            if not rid_raw and entry_rid_from_label:
+                                                conn_s.execute("UPDATE players SET riot_id=? WHERE id=?", (entry_rid_from_label, e['player_id']))
+
+                                    conn_s.commit()
+                                    st.cache_data.clear()
+                                    st.success("Scoreboard saved!")
+                                    if f"force_apply_{m['id']}_{map_idx}" in st.session_state:
+                                        del st.session_state[f"force_apply_{m['id']}_{map_idx}"]
+                                    st.rerun()
+                                except Exception as ex:
+                                    st.error(f"Save failed: {ex}")
+                                finally:
+                                    conn_s.close()
 
         st.divider()
         st.subheader("Players Admin")
