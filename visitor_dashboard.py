@@ -2841,25 +2841,28 @@ elif page == "Admin Panel":
                     rid_clean = rid_new.strip() if rid_new else ""
                     nm_clean = nm_new.strip()
                     
+                    can_add = True
                     if rid_clean:
                         existing_rid = pd.read_sql("SELECT name FROM players WHERE LOWER(riot_id) = ?", conn_add, params=(rid_clean.lower(),))
                         if not existing_rid.empty:
                             st.error(f"Error: A player ('{existing_rid.iloc[0]['name']}') already has Riot ID '{rid_clean}'.")
                             conn_add.close()
-                            return
+                            can_add = False
                     
-                    existing_name = pd.read_sql("SELECT id FROM players WHERE LOWER(name) = ?", conn_add, params=(nm_clean.lower(),))
-                    if not existing_name.empty:
-                        st.error(f"Error: A player named '{nm_clean}' already exists.")
-                        conn_add.close()
-                        return
+                    if can_add:
+                        existing_name = pd.read_sql("SELECT id FROM players WHERE LOWER(name) = ?", conn_add, params=(nm_clean.lower(),))
+                        if not existing_name.empty:
+                            st.error(f"Error: A player named '{nm_clean}' already exists.")
+                            conn_add.close()
+                            can_add = False
 
-                    dtid_new = team_map.get(tmn_new) if tmn_new else None
-                    conn_add.execute("INSERT INTO players (name, riot_id, rank, default_team_id) VALUES (?, ?, ?, ?)", (nm_clean, rid_clean, rk_new, dtid_new))
-                    conn_add.commit()
-                    conn_add.close()
-                    st.success("Player added")
-                    st.rerun()
+                    if can_add:
+                        dtid_new = team_map.get(tmn_new) if tmn_new else None
+                        conn_add.execute("INSERT INTO players (name, riot_id, rank, default_team_id) VALUES (?, ?, ?, ?)", (nm_clean, rid_clean, rk_new, dtid_new))
+                        conn_add.commit()
+                        conn_add.close()
+                        st.success("Player added")
+                        st.rerun()
             
             if st.button("🔍 Cleanup Duplicate Players", help="Merge players with exact same Riot ID or case-insensitive name"):
                 conn_clean = get_conn()
