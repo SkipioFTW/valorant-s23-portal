@@ -19,6 +19,9 @@ def get_secret(key, default=None):
 
 DB_PATH = get_secret("DB_PATH", "valorant_s23.db")
 
+# Valorant Map Catalog
+maps_catalog = ["Abyss", "Ascent", "Bind", "Breeze", "Fracture", "Haven", "Icebox", "Lotus", "Pearl", "Split", "Sunset"]
+
 def get_conn():
     return sqlite3.connect(DB_PATH)
 
@@ -2512,121 +2515,224 @@ elif page == "Playoffs":
                     st.success("Saved forfeit playoff match")
                     st.rerun()
             else:
-                with c1:
-                    s1 = st.number_input(m['t1_name'], min_value=0, value=int(m['score_t1'] or 0), key="po_s1")
-                with c2:
-                    s2 = st.number_input(m['t2_name'], min_value=0, value=int(m['score_t2'] or 0), key="po_s2")
-
-                st.caption("Per-Map Scores")
-                maps_catalog = ["Ascent","Bind","Breeze","Corrode","Fracture","Haven","Icebox","Lotus","Pearl","Split","Sunset"]
+                st.info("Match details are managed per-map below. The total match score will be automatically updated.")
+                st.divider()
+                st.subheader("Per-Map Scoreboard")
                 fmt_constraints = {"BO1": (1,1), "BO3": (2,3), "BO5": (3,5)}
                 min_maps, max_maps = fmt_constraints.get(fmt, (1,1))
-                existing_maps_df = get_match_maps(int(m['id']))
-                maps_data = []
-                for i in range(max_maps):
-                    with st.expander(f"Map {i+1}"):
-                        # Match ID input for automatic pre-filling
-                        mid_input = st.text_input(f"Match ID for Map {i+1}", key=f"po_mid_map_{m['id']}_{i}", placeholder="e.g. fef14b8b-ddc7-4b91-b91c-905327c74325")
-                        
-                        pre_name = ""
-                        pre_t1 = 0
-                        pre_t2 = 0
-                        pre_win = None
-                        
-                        # Check if we just scraped this map
-                        if mid_input:
-                            if f"scraped_data_po_{m['id']}_{i}" not in st.session_state or st.session_state.get(f"scraped_mid_po_{m['id']}_{i}") != mid_input:
-                                with st.spinner("Fetching Tracker.gg data..."):
-                                    # Clean Match ID
-                                    match_id_clean = mid_input
-                                    if "tracker.gg" in mid_input:
-                                        mid_match = re.search(r'match/([a-zA-Z0-9\-]+)', mid_input)
-                                        if mid_match: match_id_clean = mid_match.group(1)
-                                    match_id_clean = re.sub(r'[^a-zA-Z0-9\-]', '', match_id_clean)
-                                    
-                                    json_path = os.path.join("matches", f"match_{match_id_clean}.json")
-                                    jsdata = None
-                                    
-                                    # 1. Try local file first
-                                    if os.path.exists(json_path):
-                                        try:
-                                            with open(json_path, 'r', encoding='utf-8') as f:
-                                                jsdata = json.load(f)
-                                        except Exception as e:
-                                            st.error(f"Error reading local file: {e}")
-                                    
-                                    # 2. If not found locally, attempt live scrape
-                                    if not jsdata:
-                                        jsdata, err = scrape_tracker_match(match_id_clean)
-                                        if err:
-                                            st.error(f"Scrape failed: {err}")
-                                        else:
-                                            # Save locally for future use
-                                            if not os.path.exists("matches"): os.makedirs("matches")
-                                            with open(json_path, 'w', encoding='utf-8') as f:
-                                                json.dump(jsdata, f, indent=4)
-                                    
-                                    if jsdata:
-                                        # Process and apply
-                                        json_suggestions, map_name, t1_r, t2_r = parse_tracker_json(jsdata, t1_id_val, t2_id_val)
-                                        
-                                        st.session_state[f"ocr_po_{m['id']}_{i}"] = json_suggestions
-                                        st.session_state[f"scraped_data_po_{m['id']}_{i}"] = {
-                                            'map_name': map_name,
-                                            't1_rounds': int(t1_r),
-                                            't2_rounds': int(t2_r)
-                                        }
-                                        st.session_state[f"scraped_mid_po_{m['id']}_{i}"] = mid_input
-                                        st.success(f"Map data ({map_name}) loaded!")
-
-                        scraped = st.session_state.get(f"scraped_data_po_{m['id']}_{i}")
-
-                        if not existing_maps_df.empty:
-                            rowx = existing_maps_df[existing_maps_df['map_index'] == i]
-                            if not rowx.empty:
-                                pre_name = rowx.iloc[0]['map_name']
-                                pre_t1 = int(rowx.iloc[0]['team1_rounds'])
-                                pre_t2 = int(rowx.iloc[0]['team2_rounds'])
-                                pre_win = int(rowx.iloc[0]['winner_id']) if pd.notna(rowx.iloc[0]['winner_id']) else None
-                        
-                        # Override with scraped data if available
-                        if scraped:
-                            pre_name = scraped['map_name']
-                            pre_t1 = scraped['t1_rounds']
-                            pre_t2 = scraped['t2_rounds']
-                            if pre_t1 > pre_t2:
-                                pre_win = t1_id_val
-                            elif pre_t2 > pre_t1:
-                                pre_win = t2_id_val
-                        nsel = st.selectbox(f"Name {i+1}", maps_catalog, index=(maps_catalog.index(pre_name) if pre_name in maps_catalog else 0), key=f"po_mname_{i}")
-                        t1r = st.number_input(f"{m['t1_name']} rounds", min_value=0, value=pre_t1, key=f"po_t1r_{i}")
-                        t2r = st.number_input(f"{m['t2_name']} rounds", min_value=0, value=pre_t2, key=f"po_t2r_{i}")
-                        wsel = st.selectbox("Winner", ["", m['t1_name'], m['t2_name']], index=(1 if pre_win==t1_id_val else (2 if pre_win==t2_id_val else 0)), key=f"po_win_{i}")
-                        wid = None
-                        if wsel == m['t1_name']:
-                            wid = t1_id_val
-                        elif wsel == m['t2_name']:
-                            wid = t2_id_val
-                        maps_data.append({"map_index": i, "map_name": nsel, "team1_rounds": int(t1r), "team2_rounds": int(t2r), "winner_id": wid})
+                map_choice = st.selectbox("Select Map", list(range(1, max_maps+1)), index=0, key=f"po_map_choice_{m['id']}")
+                map_idx = map_choice - 1
                 
-                if st.button("Save Playoff Match & Maps"):
-                    played = 0
-                    for i, md in enumerate(maps_data):
-                        if i < max_maps and (i < min_maps or (md['team1_rounds']+md['team2_rounds']>0)):
-                            played += 1
-                    upsert_match_maps(int(m['id']), maps_data[:max_maps])
-                    conn_u = get_conn()
-                    winner_id = None
-                    if s1 > s2:
-                        winner_id = t1_id_val
-                    elif s2 > s1:
-                        winner_id = t2_id_val
-                    conn_u.execute("UPDATE matches SET score_t1=?, score_t2=?, winner_id=?, status=?, format=?, maps_played=?, is_forfeit=0 WHERE id=?", (int(s1), int(s2), winner_id, 'completed' if played > 0 else 'scheduled', fmt, int(played), int(m['id'])))
-                    conn_u.commit()
-                    conn_u.close()
-                    st.cache_data.clear()
-                    st.success("Saved playoff match data")
-                    st.rerun()
+                # 1. Fetch existing map data for THIS map index
+                existing_maps_df = get_match_maps(int(m['id']))
+                existing_map = None
+                if not existing_maps_df.empty:
+                    rowx = existing_maps_df[existing_maps_df['map_index'] == map_idx]
+                    if not rowx.empty:
+                        existing_map = rowx.iloc[0]
+
+                pre_map_name = existing_map['map_name'] if existing_map is not None else ""
+                pre_map_t1 = int(existing_map['team1_rounds']) if existing_map is not None else 0
+                pre_map_t2 = int(existing_map['team2_rounds']) if existing_map is not None else 0
+                pre_map_win = int(existing_map['winner_id']) if existing_map is not None and pd.notna(existing_map['winner_id']) else None
+                pre_map_ff = bool(existing_map['is_forfeit']) if existing_map is not None and 'is_forfeit' in existing_map else False
+
+                # Override with scraped data if available
+                scraped_map = st.session_state.get(f"scraped_data_po_{m['id']}_{map_idx}")
+                if scraped_map:
+                    pre_map_name = scraped_map['map_name']
+                    pre_map_t1 = scraped_map['t1_rounds']
+                    pre_map_t2 = scraped_map['t2_rounds']
+                    if pre_map_t1 > pre_map_t2: pre_map_win = t1_id_val
+                    elif pre_map_t2 > pre_map_t1: pre_map_win = t2_id_val
+
+                # Match ID input for automatic pre-filling
+                col_json1, col_json2 = st.columns([2, 1])
+                with col_json1:
+                    match_input = st.text_input("Enter Match ID", key=f"po_mid_{m['id']}_{map_idx}", placeholder="e.g. fef14b8b-ddc7-4b91-b91c-905327c74325")
+                with col_json2:
+                    if st.button("Apply Match Data", key=f"po_force_json_{m['id']}_{map_idx}", use_container_width=True):
+                        if match_input:
+                            # Clean Match ID
+                            match_id_clean = match_input
+                            if "tracker.gg" in match_input:
+                                mid_match = re.search(r'match/([a-zA-Z0-9\-]+)', match_input)
+                                if mid_match: match_id_clean = mid_match.group(1)
+                            match_id_clean = re.sub(r'[^a-zA-Z0-9\-]', '', match_id_clean)
+                        
+                            json_path = os.path.join("matches", f"match_{match_id_clean}.json")
+                            jsdata = None
+                        
+                            if os.path.exists(json_path):
+                                try:
+                                    with open(json_path, 'r', encoding='utf-8') as f:
+                                        jsdata = json.load(f)
+                                except: pass
+                        
+                            if not jsdata:
+                                with st.spinner("Fetching data..."):
+                                    jsdata, err = scrape_tracker_match(match_id_clean)
+                                    if jsdata:
+                                        if not os.path.exists("matches"): os.makedirs("matches")
+                                        with open(json_path, 'w', encoding='utf-8') as f:
+                                            json.dump(jsdata, f, indent=4)
+                            
+                            if jsdata:
+                                cur_t1_id = t1_id_val
+                                cur_t2_id = t2_id_val
+                                json_suggestions, map_name, t1_r, t2_r = parse_tracker_json(jsdata, cur_t1_id, cur_t2_id)
+                                st.session_state[f"ocr_po_{m['id']}_{map_idx}"] = json_suggestions
+                                st.session_state[f"scraped_data_po_{m['id']}_{map_idx}"] = {'map_name': map_name, 't1_rounds': int(t1_r), 't2_rounds': int(t2_r)}
+                                st.session_state[f"force_map_po_{m['id']}_{map_idx}"] = st.session_state.get(f"force_map_po_{m['id']}_{map_idx}", 0) + 1
+                                st.session_state[f"force_apply_po_{m['id']}_{map_idx}"] = st.session_state.get(f"force_apply_po_{m['id']}_{map_idx}", 0) + 1
+                                st.rerun()
+
+                # START UNIFIED FORM
+                with st.form(key=f"po_unified_map_form_{m['id']}_{map_idx}"):
+                    st.write(f"### Map Details & Scoreboard")
+                    force_map_cnt = st.session_state.get(f"force_map_po_{m['id']}_{map_idx}", 0)
+                    
+                    mcol1, mcol2, mcol3, mcol4 = st.columns([2, 1, 1, 1])
+                    with mcol1:
+                        map_name_input = st.selectbox("Map Name", maps_catalog, index=(maps_catalog.index(pre_map_name) if pre_map_name in maps_catalog else 0), key=f"po_mname_uni_{map_idx}_{force_map_cnt}")
+                    with mcol2:
+                        t1r_input = st.number_input(f"{m['t1_name']} rounds", min_value=0, value=pre_map_t1, key=f"po_t1r_uni_{map_idx}_{force_map_cnt}")
+                    with mcol3:
+                        t2r_input = st.number_input(f"{m['t2_name']} rounds", min_value=0, value=pre_map_t2, key=f"po_t2r_uni_{map_idx}_{force_map_cnt}")
+                    with mcol4:
+                        win_options = ["", m['t1_name'], m['t2_name']]
+                        win_idx = 1 if pre_map_win == t1_id_val else (2 if pre_map_win == t2_id_val else 0)
+                        winner_input = st.selectbox("Map Winner", win_options, index=win_idx, key=f"po_win_uni_{map_idx}_{force_map_cnt}")
+                    
+                    is_forfeit_input = st.checkbox("Forfeit?", value=pre_map_ff, key=f"po_ff_uni_{map_idx}_{force_map_cnt}")
+                    st.divider()
+                    
+                    agents_list = get_agents_list()
+                    all_df = get_all_players()
+                    if not all_df.empty:
+                        all_df['display_label'] = all_df.apply(lambda r: f"{r['name']} ({r['riot_id']})" if r['riot_id'] and str(r['riot_id']).strip() else r['name'], axis=1)
+                        global_list = all_df['display_label'].tolist()
+                        global_map = dict(zip(global_list, all_df['id']))
+                        has_riot = all_df['riot_id'].notna() & (all_df['riot_id'].str.strip() != "")
+                        label_to_riot = dict(zip(all_df.loc[has_riot, 'display_label'], all_df.loc[has_riot, 'riot_id'].str.strip().str.lower()))
+                        riot_to_label = {v: k for k, v in label_to_riot.items()}
+                        player_lookup = {row.id: {'label': row.display_label, 'riot_id': str(row.riot_id).strip().lower() if pd.notna(row.riot_id) and str(row.riot_id).strip() else None} for row in all_df.itertuples()}
+                    else:
+                        global_list, global_map, label_to_riot, riot_to_label, player_lookup = [], {}, {}, {}, {}
+
+                    conn_p = get_conn()
+                    all_map_stats = pd.read_sql("SELECT * FROM match_stats_map WHERE match_id=? AND map_index=?", conn_p, params=(int(m['id']), map_idx))
+                    conn_p.close()
+
+                    all_teams_entries = []
+                    for team_key, team_id, team_name in [("t1", t1_id_val, m['t1_name']), ("t2", t2_id_val, m['t2_name'])]:
+                        st.write(f"#### {team_name} Scoreboard")
+                        roster_df = all_df[all_df['default_team_id'] == team_id].sort_values('name')
+                        roster_list = roster_df['display_label'].tolist() if not roster_df.empty else []
+                        roster_map = dict(zip(roster_list, roster_df['id']))
+                        existing = all_map_stats[all_map_stats['team_id'] == team_id]
+                        sug = st.session_state.get(f"ocr_po_{m['id']}_{map_idx}", {})
+                        our_team_num = 1 if team_key == "t1" else 2
+                        force_apply = st.session_state.get(f"force_apply_po_{m['id']}_{map_idx}", False)
+                        
+                        rows = []
+                        if not existing.empty and not force_apply:
+                            for r in existing.itertuples():
+                                pname = player_lookup.get(r.player_id, {}).get('label', "")
+                                rid = player_lookup.get(r.player_id, {}).get('riot_id')
+                                sfname = player_lookup.get(r.subbed_for_id, {}).get('label', "")
+                                acs, k, d, a = int(r.acs or 0), int(r.kills or 0), int(r.deaths or 0), int(r.assists or 0)
+                                agent = r.agent or (agents_list[0] if agents_list else "")
+                                if rid and rid in sug and acs == 0 and k == 0:
+                                    s = sug[rid]; acs, k, d, a = s['acs'], s['k'], s['d'], s['a']; agent = s.get('agent') or agent
+                                rows.append({'player': pname, 'is_sub': bool(r.is_sub), 'subbed_for': sfname or (roster_list[0] if roster_list else ""), 'agent': agent, 'acs': acs, 'k': k, 'd': d, 'a': a})
+                        else:
+                            team_sug_rids = [rid for rid, s in sug.items() if s.get('team_num') == our_team_num]
+                            json_roster_matches, json_subs = [], []
+                            for rid in team_sug_rids:
+                                s = sug[rid]; l_rid = rid.lower(); db_label = riot_to_label.get(l_rid)
+                                if not db_label and s.get('name'):
+                                    matched_name = s.get('name')
+                                    for label in global_list:
+                                        if label == matched_name or label.startswith(matched_name + " ("): db_label = label; break
+                                if db_label and db_label in roster_list: json_roster_matches.append((rid, db_label, s))
+                                else: json_subs.append((rid, db_label, s))
+                            
+                            used_roster = [mx[1] for mx in json_roster_matches]
+                            missing_roster = [l for l in roster_list if l not in used_roster]
+                            for rid, label, s in json_roster_matches:
+                                rows.append({'player': label, 'is_sub': False, 'subbed_for': label, 'agent': s.get('agent') or (agents_list[0] if agents_list else ""), 'acs': s['acs'], 'k': s['k'], 'd': s['d'], 'a': s['a']})
+                            for rid, db_label, s in json_subs:
+                                if len(rows) >= 5: break
+                                sub_for = missing_roster.pop(0) if missing_roster else (roster_list[0] if roster_list else "")
+                                rows.append({'player': db_label or "", 'is_sub': True, 'subbed_for': sub_for, 'agent': s.get('agent') or (agents_list[0] if agents_list else ""), 'acs': s['acs'], 'k': s['k'], 'd': s['d'], 'a': s['a']})
+                            while len(rows) < 5:
+                                l = missing_roster.pop(0) if missing_roster else (roster_list[0] if roster_list else "")
+                                rows.append({'player': l, 'is_sub': False, 'subbed_for': l, 'agent': agents_list[0] if agents_list else "", 'acs': 0, 'k': 0, 'd': 0, 'a': 0})
+
+                        h1,h2,h3,h4,h5,h6,h7,h8,h9 = st.columns([2,1.2,2,2,1,1,1,1,0.8])
+                        h1.write("Player"); h2.write("Sub?"); h3.write("Subbing For"); h4.write("Agent"); h5.write("ACS"); h6.write("K"); h7.write("D"); h8.write("A"); h9.write("Conf")
+                        
+                        team_entries = []
+                        force_cnt = st.session_state.get(f"force_apply_po_{m['id']}_{map_idx}", 0)
+                        for i, rowd in enumerate(rows):
+                            c1,c2,c3,c4,c5,c6,c7,c8,c9 = st.columns([2,1.2,2,2,1,1,1,1,0.8])
+                            p_idx = global_list.index(rowd['player']) if rowd['player'] in global_list else len(global_list)
+                            input_key = f"po_uni_{m['id']}_{map_idx}_{team_key}_{i}_{force_cnt}"
+                            psel = c1.selectbox(f"P_{input_key}", global_list + [""], index=p_idx, label_visibility="collapsed")
+                            rid_psel = label_to_riot.get(psel)
+                            is_sub = c2.checkbox(f"S_{input_key}", value=rowd['is_sub'], label_visibility="collapsed")
+                            sf_sel = c3.selectbox(f"SF_{input_key}", roster_list + [""], index=(roster_list.index(rowd['subbed_for']) if rowd['subbed_for'] in roster_list else 0), label_visibility="collapsed")
+                            ag_sel = c4.selectbox(f"Ag_{input_key}", agents_list + [""], index=(agents_list.index(rowd['agent']) if rowd['agent'] in agents_list else 0), label_visibility="collapsed")
+                            cur_s = sug.get(rid_psel, {}) if rid_psel else {}
+                            v_acs = cur_s.get('acs', rowd['acs']); v_k = cur_s.get('k', rowd['k']); v_d = cur_s.get('d', rowd['d']); v_a = cur_s.get('a', rowd['a'])
+                            acs = c5.number_input(f"ACS_{input_key}_{rid_psel}", min_value=0, value=int(v_acs), label_visibility="collapsed")
+                            k = c6.number_input(f"K_{input_key}_{rid_psel}", min_value=0, value=int(v_k), label_visibility="collapsed")
+                            d = c7.number_input(f"D_{input_key}_{rid_psel}", min_value=0, value=int(v_d), label_visibility="collapsed")
+                            a = c8.number_input(f"A_{input_key}_{rid_psel}", min_value=0, value=int(v_a), label_visibility="collapsed")
+                            c9.write(cur_s.get('conf', '-'))
+                            team_entries.append({'player_id': global_map.get(psel), 'is_sub': int(is_sub), 'subbed_for_id': roster_map.get(sf_sel), 'agent': ag_sel or None, 'acs': int(acs), 'kills': int(k), 'deaths': int(d), 'assists': int(a)})
+                        all_teams_entries.append((team_id, team_entries))
+                        st.divider()
+
+                    submit_all = st.form_submit_button("Save Playoff Map & Scoreboard", use_container_width=True)
+                    if submit_all:
+                        wid = t1_id_val if winner_input == m['t1_name'] else (t2_id_val if winner_input == m['t2_name'] else None)
+                        conn_s = get_conn()
+                        try:
+                            # Use DELETE + INSERT for maximum compatibility and to avoid ON CONFLICT issues
+                            conn_s.execute("DELETE FROM match_maps WHERE match_id=? AND map_index=?", (int(m['id']), map_idx))
+                            conn_s.execute("""
+                                INSERT INTO match_maps (match_id, map_index, map_name, team1_rounds, team2_rounds, winner_id, is_forfeit)
+                                VALUES (?, ?, ?, ?, ?, ?, ?)
+                            """, (int(m['id']), map_idx, map_name_input, int(t1r_input), int(t2r_input), wid, int(is_forfeit_input)))
+
+                            for t_id, t_entries in all_teams_entries:
+                                conn_s.execute("DELETE FROM match_stats_map WHERE match_id=? AND map_index=? AND team_id=?", (int(m['id']), map_idx, t_id))
+                                for e in t_entries:
+                                    if e['player_id']:
+                                        conn_s.execute("""
+                                            INSERT INTO match_stats_map (match_id, map_index, team_id, player_id, is_sub, subbed_for_id, agent, acs, kills, deaths, assists)
+                                            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                                        """, (int(m['id']), map_idx, t_id, e['player_id'], e['is_sub'], e['subbed_for_id'], e['agent'], e['acs'], e['kills'], e['deaths'], e['assists']))
+                            
+                            maps_df_final = pd.read_sql("SELECT winner_id, team1_rounds, team2_rounds FROM match_maps WHERE match_id=?", conn_s, params=(int(m['id']),))
+                            final_s1 = len(maps_df_final[maps_df_final['winner_id'] == t1_id_val])
+                            final_s2 = len(maps_df_final[maps_df_final['winner_id'] == t2_id_val])
+                            final_winner = t1_id_val if final_s1 > final_s2 else (t2_id_val if final_s2 > final_s1 else None)
+                            played_cnt = len(maps_df_final[(maps_df_final['team1_rounds'] + maps_df_final['team2_rounds']) > 0])
+                            
+                            conn_s.execute("UPDATE matches SET score_t1=?, score_t2=?, winner_id=?, status='completed', maps_played=? WHERE id=?", 
+                                         (final_s1, final_s2, final_winner, played_cnt, int(m['id'])))
+                            conn_s.commit()
+                            st.cache_data.clear()
+                            st.success(f"Saved Playoff Map {map_idx+1}!")
+                            st.rerun()
+                        except Exception as ex:
+                            conn_s.rollback()
+                            st.error(f"Error: {ex}")
+                        finally:
+                            conn_s.close()
 
     # Bracket Visualization
     if df.empty:
@@ -2907,145 +3013,17 @@ elif page == "Admin Panel":
                         st.success("Saved forfeit match")
                         st.rerun()
                 else:
-                    with c1:
-                        s1 = st.number_input(m['t1_name'], min_value=0, value=int(m['score_t1'] or 0))
-                    with c2:
-                        s2 = st.number_input(m['t2_name'], min_value=0, value=int(m['score_t2'] or 0))
-
-                    st.caption("Per-Map Scores")
-                    maps_catalog = ["Ascent","Bind","Breeze","Corrode","Fracture","Haven","Icebox","Lotus","Pearl","Split","Sunset"]
-                    fmt_constraints = {"BO1": (1,1), "BO3": (2,3), "BO5": (3,5)}
-                    min_maps, max_maps = fmt_constraints.get(fmt, (1,1))
-                    existing_maps_df = get_match_maps(int(m['id']))
-                    maps_data = []
-                    for i in range(max_maps):
-                        with st.expander(f"Map {i+1}"):
-                            # Match ID input for automatic pre-filling
-                            mid_input = st.text_input(f"Match ID for Map {i+1}", key=f"mid_map_{m['id']}_{i}", placeholder="e.g. fef14b8b-ddc7-4b91-b91c-905327c74325")
-                            
-                            pre_name = ""
-                            pre_t1 = 0
-                            pre_t2 = 0
-                            pre_win = None
-                            
-                            # Check if we just scraped this map
-                            if mid_input:
-                                if f"scraped_data_{m['id']}_{i}" not in st.session_state or st.session_state.get(f"scraped_mid_{m['id']}_{i}") != mid_input:
-                                    with st.spinner("Fetching Tracker.gg data..."):
-                                        # Clean Match ID
-                                        match_id_clean = mid_input
-                                        if "tracker.gg" in mid_input:
-                                            mid_match = re.search(r'match/([a-zA-Z0-9\-]+)', mid_input)
-                                            if mid_match: match_id_clean = mid_match.group(1)
-                                        match_id_clean = re.sub(r'[^a-zA-Z0-9\-]', '', match_id_clean)
-                                        
-                                        json_path = os.path.join("matches", f"match_{match_id_clean}.json")
-                                        jsdata = None
-                                        
-                                        # 1. Try local file first
-                                        if os.path.exists(json_path):
-                                            try:
-                                                with open(json_path, 'r', encoding='utf-8') as f:
-                                                    jsdata = json.load(f)
-                                            except Exception as e:
-                                                st.error(f"Error reading local file: {e}")
-                                        
-                                        # 2. If not found locally, attempt live scrape
-                                        if not jsdata:
-                                            jsdata, err = scrape_tracker_match(match_id_clean)
-                                            if err:
-                                                st.error(f"Scrape failed: {err}")
-                                            else:
-                                                # Save locally for future use
-                                                if not os.path.exists("matches"): os.makedirs("matches")
-                                                with open(json_path, 'w', encoding='utf-8') as f:
-                                                    json.dump(jsdata, f, indent=4)
-                                        
-                                        if jsdata:
-                                            # Process and apply
-                                            json_suggestions, map_name, t1_r, t2_r = parse_tracker_json(jsdata, t1_id_val, t2_id_val)
-                                            
-                                            st.session_state[f"ocr_{m['id']}_{i}"] = json_suggestions
-                                            st.session_state[f"scraped_data_{m['id']}_{i}"] = {
-                                                'map_name': map_name,
-                                                't1_rounds': int(t1_r),
-                                                't2_rounds': int(t2_r)
-                                            }
-                                            st.session_state[f"scraped_mid_{m['id']}_{i}"] = mid_input
-                                            
-                                            # Increment force counter to change widget keys
-                                            st.session_state[f"force_map_{m['id']}_{i}"] = st.session_state.get(f"force_map_{m['id']}_{i}", 0) + 1
-
-                                            st.success(f"Map data ({map_name}) loaded!")
-                                            st.rerun()
-
-                            scraped = st.session_state.get(f"scraped_data_{m['id']}_{i}")
-                            force_map_cnt = st.session_state.get(f"force_map_{m['id']}_{i}", 0)
-                            
-                            if not existing_maps_df.empty:
-                                rowx = existing_maps_df[existing_maps_df['map_index'] == i]
-                                if not rowx.empty:
-                                    pre_name = rowx.iloc[0]['map_name']
-                                    pre_t1 = int(rowx.iloc[0]['team1_rounds'])
-                                    pre_t2 = int(rowx.iloc[0]['team2_rounds'])
-                                    pre_win = int(rowx.iloc[0]['winner_id']) if pd.notna(rowx.iloc[0]['winner_id']) else None
-                            
-                            # Override with scraped data if available
-                            if scraped:
-                                pre_name = scraped['map_name']
-                                pre_t1 = scraped['t1_rounds']
-                                pre_t2 = scraped['t2_rounds']
-                                if pre_t1 > pre_t2:
-                                    pre_win = t1_id_val
-                                elif pre_t2 > pre_t1:
-                                    pre_win = t2_id_val
-
-                            # Use dynamic keys based on force_map_cnt to force widget refresh
-                            nsel = st.selectbox(f"Name {i+1}", maps_catalog, index=(maps_catalog.index(pre_name) if pre_name in maps_catalog else 0), key=f"mname_{m['id']}_{i}_{force_map_cnt}")
-                            t1r = st.number_input(f"{m['t1_name']} rounds", min_value=0, value=pre_t1, key=f"t1r_{m['id']}_{i}_{force_map_cnt}")
-                            t2r = st.number_input(f"{m['t2_name']} rounds", min_value=0, value=pre_t2, key=f"t2r_{m['id']}_{i}_{force_map_cnt}")
-                            
-                            # Forfeit option
-                            is_forfeit = st.checkbox(f"Forfeit", value=False, key=f"ff_{m['id']}_{i}_{force_map_cnt}", help="Check if this map was a forfeit (13-0)")
-                            if is_forfeit:
-                                ff_winner = st.radio("Forfeit Winner", [m['t1_name'], m['t2_name']], key=f"ff_win_{m['id']}_{i}_{force_map_cnt}", horizontal=True)
-                                if ff_winner == m['t1_name']:
-                                    t1r, t2r = 13, 0
-                                else:
-                                    t1r, t2r = 0, 13
-                            
-                            wsel = st.selectbox("Winner", ["", m['t1_name'], m['t2_name']], index=(1 if pre_win==t1_id_val else (2 if pre_win==t2_id_val else 0)), key=f"win_{m['id']}_{i}_{force_map_cnt}")
-                            wid = None
-                            if wsel == m['t1_name']:
-                                wid = t1_id_val
-                            elif wsel == m['t2_name']:
-                                wid = t2_id_val
-                            maps_data.append({"map_index": i, "map_name": nsel, "team1_rounds": int(t1r), "team2_rounds": int(t2r), "winner_id": wid})
-                    if st.button("Save Maps"):
-                        played = 0
-                        for i, md in enumerate(maps_data):
-                            if i < max_maps and (i < min_maps or (md['team1_rounds']+md['team2_rounds']>0)):
-                                played += 1
-                        upsert_match_maps(int(m['id']), maps_data[:max_maps])
-                        conn_u = get_conn()
-                        winner_id = None
-                        if s1 > s2:
-                            winner_id = t1_id_val
-                        elif s2 > s1:
-                            winner_id = t2_id_val
-                        conn_u.execute("UPDATE matches SET score_t1=?, score_t2=?, winner_id=?, status=?, format=?, maps_played=?, is_forfeit=0 WHERE id=?", (int(s1), int(s2), winner_id, 'completed', fmt, int(played), int(m['id'])))
-                        conn_u.commit()
-                        conn_u.close()
-                        st.cache_data.clear() # Clear cache to show new scores immediately
-                        st.success("Saved match and maps")
-                        st.rerun()
-
+                    st.info("Match details are managed per-map below. The total match score will be automatically updated.")
                     st.divider()
                     st.subheader("Per-Map Scoreboard")
+                    
+                    fmt_constraints = {"BO1": (1,1), "BO3": (2,3), "BO5": (3,5)}
+                    min_maps, max_maps = fmt_constraints.get(fmt, (1,1))
                     map_choice = st.selectbox("Select Map", list(range(1, max_maps+1)), index=0)
                     map_idx = map_choice - 1
                     
                     # 1. Fetch existing map data for THIS map index
+                    existing_maps_df = get_match_maps(int(m['id']))
                     existing_map = None
                     if not existing_maps_df.empty:
                         rowx = existing_maps_df[existing_maps_df['map_index'] == map_idx]
@@ -3291,15 +3269,11 @@ elif page == "Admin Panel":
                             conn_s = get_conn()
                             try:
                                 # A. Save Map Info
+                                # Use DELETE + INSERT for maximum compatibility and to avoid ON CONFLICT issues
+                                conn_s.execute("DELETE FROM match_maps WHERE match_id=? AND map_index=?", (int(m['id']), map_idx))
                                 conn_s.execute("""
                                     INSERT INTO match_maps (match_id, map_index, map_name, team1_rounds, team2_rounds, winner_id, is_forfeit)
                                     VALUES (?, ?, ?, ?, ?, ?, ?)
-                                    ON CONFLICT(match_id, map_index) DO UPDATE SET
-                                        map_name=excluded.map_name,
-                                        team1_rounds=excluded.team1_rounds,
-                                        team2_rounds=excluded.team2_rounds,
-                                        winner_id=excluded.winner_id,
-                                        is_forfeit=excluded.is_forfeit
                                 """, (int(m['id']), map_idx, map_name_input, int(t1r_input), int(t2r_input), wid, int(is_forfeit_input)))
 
                                 # B. Save Stats for both teams
