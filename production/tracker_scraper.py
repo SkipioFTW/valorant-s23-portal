@@ -160,7 +160,8 @@ class TrackerScraper:
             )
             if result.returncode != 0:
                 os.chdir(original_dir)
-                return False, f"Git add failed: {result.stderr}"
+                error_msg = f"Git add failed: {result.stderr.strip() or result.stdout.strip() or 'Unknown error'}"
+                return False, error_msg
             
             # Git commit
             commit_msg = f"Add match {match_id}"
@@ -174,7 +175,13 @@ class TrackerScraper:
             commit_output = result.stdout + result.stderr
             if result.returncode != 0 and "nothing to commit" not in commit_output.lower():
                 os.chdir(original_dir)
-                return False, f"Git commit failed: {result.stderr}"
+                error_msg = f"Git commit failed: {result.stderr.strip() or result.stdout.strip() or 'Unknown error'}"
+                return False, error_msg
+            
+            # If nothing to commit, file was already committed - that's OK
+            if "nothing to commit" in commit_output.lower():
+                os.chdir(original_dir)
+                return True, f"Match {match_id} already committed, skipping push"
             
             # Git push
             result = subprocess.run(
@@ -185,7 +192,8 @@ class TrackerScraper:
             )
             if result.returncode != 0:
                 os.chdir(original_dir)
-                return False, f"Git push failed: {result.stderr}"
+                error_msg = f"Git push failed: {result.stderr.strip() or result.stdout.strip() or 'Unknown error'}"
+                return False, error_msg
             
             os.chdir(original_dir)
             return True, f"Successfully pushed match_{match_id}.json to GitHub via git"
