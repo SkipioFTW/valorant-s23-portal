@@ -171,7 +171,8 @@ class TrackerScraper:
                 timeout=10
             )
             # Note: commit might return 1 if nothing to commit (file already committed)
-            if result.returncode != 0 and "nothing to commit" not in result.stdout:
+            commit_output = result.stdout + result.stderr
+            if result.returncode != 0 and "nothing to commit" not in commit_output.lower():
                 os.chdir(original_dir)
                 return False, f"Git commit failed: {result.stderr}"
             
