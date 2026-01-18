@@ -131,6 +131,70 @@ class TrackerScraper:
                 return False, f"GitHub upload failed: {r.status_code}"
         except Exception as e:
             return False, f"GitHub upload error: {str(e)}"
+    
+    def push_match_to_github_via_git(self, match_id):
+        """
+        Pushes the locally saved match JSON to GitHub using git commands.
+        This ensures the local repository stays in sync with GitHub.
+        """
+        import subprocess
+        
+        filepath = f"assets/matches/match_{match_id}.json"
+        
+        try:
+            # Change to ROOT_DIR for git operations
+            original_dir = os.getcwd()
+            os.chdir(ROOT_DIR)
+            
+            # Check if file exists
+            if not os.path.exists(filepath):
+                os.chdir(original_dir)
+                return False, f"File {filepath} not found locally"
+            
+            # Git add
+            result = subprocess.run(
+                ["git", "add", filepath],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode != 0:
+                os.chdir(original_dir)
+                return False, f"Git add failed: {result.stderr}"
+            
+            # Git commit
+            commit_msg = f"Add match {match_id}"
+            result = subprocess.run(
+                ["git", "commit", "-m", commit_msg],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            # Note: commit might return 1 if nothing to commit (file already committed)
+            if result.returncode != 0 and "nothing to commit" not in result.stdout:
+                os.chdir(original_dir)
+                return False, f"Git commit failed: {result.stderr}"
+            
+            # Git push
+            result = subprocess.run(
+                ["git", "push", "origin", "main"],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            if result.returncode != 0:
+                os.chdir(original_dir)
+                return False, f"Git push failed: {result.stderr}"
+            
+            os.chdir(original_dir)
+            return True, f"Successfully pushed match_{match_id}.json to GitHub via git"
+            
+        except subprocess.TimeoutExpired:
+            os.chdir(original_dir)
+            return False, "Git operation timed out"
+        except Exception as e:
+            os.chdir(original_dir)
+            return False, f"Git push error: {str(e)}"
 
     def get_profile_data(self, profile_url):
         """

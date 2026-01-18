@@ -40,7 +40,7 @@ def process_link(scraper, url, push_to_github):
             # Push to GitHub if requested
             github_msg = ""
             if push_to_github:
-                ok, gmsg = scraper.upload_match_to_github(match_id, data, get_secret)
+                ok, gmsg = scraper.push_match_to_github_via_git(match_id)
                 github_msg = f" | GitHub: {'✅' if ok else '❌'} {gmsg}"
             
             return url, True, f"✅ Match {match_id} saved{github_msg}"
@@ -64,9 +64,9 @@ def main():
     It saves match JSONs to `assets/matches/` for use in the main portal.
     """)
 
-    # GitHub Configuration Section
-    with st.expander("⚙️ GitHub Configuration (Optional)", expanded=False):
-        st.info("Required only if you want to auto-push JSON files to GitHub.")
+    # GitHub Configuration Section (Legacy - Not needed for git-based push)
+    with st.expander("⚙️ GitHub API Configuration (Legacy/Optional)", expanded=False):
+        st.info("This section is for the legacy GitHub API upload method. The tool now uses git commands by default, which doesn't require these settings.")
         col1, col2 = st.columns(2)
         with col1:
             gh_owner = st.text_input("GitHub Owner", value=get_secret("GH_OWNER", ""), placeholder="e.g. your-username")
@@ -101,10 +101,6 @@ def main():
     if st.button("🚀 Start Scraping", use_container_width=True, type="primary"):
         if not links_to_process:
             st.warning("Please enter at least one link.")
-            return
-
-        if push_to_github and (not get_secret("GH_OWNER") or not get_secret("GH_TOKEN")):
-            st.error("GitHub configuration is missing! Please fill it in the settings above.")
             return
 
         scraper = TrackerScraper()
