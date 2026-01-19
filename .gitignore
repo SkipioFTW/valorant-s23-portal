@@ -43,3 +43,8 @@ Thumbs.db
 
 # Backup
 assets/teams_backup/
+
+# System Design Report (Requested to be unpushable)
+docs/system_design.md
+
+.streamlit/

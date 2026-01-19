@@ -1351,14 +1351,14 @@ def get_standings():
     # Points for Team 1
     m['p1'] = np.where(
         m['score_t1'] > m['score_t2'],
-        np.minimum(m['score_t1'], 13) + 2,
+        15,
         np.minimum(m['score_t1'], 12)
     )
     
     # Points for Team 2
     m['p2'] = np.where(
         m['score_t2'] > m['score_t1'],
-        np.minimum(m['score_t2'], 13) + 2,
+        15,
         np.minimum(m['score_t2'], 12)
     )
     
@@ -1366,40 +1366,32 @@ def get_standings():
     m['t1_win'] = (m['score_t1'] > m['score_t2']).astype(int)
     m['t2_win'] = (m['score_t2'] > m['score_t1']).astype(int)
     
-    # Capped scores for RD (max 13 for winner, 12 for loser)
-    m['s1_capped'] = np.where(m['t1_win'] == 1, np.minimum(m['score_t1'], 13), np.minimum(m['score_t1'], 12))
-    m['s2_capped'] = np.where(m['t2_win'] == 1, np.minimum(m['score_t2'], 13), np.minimum(m['score_t2'], 12))
-    
     # Reshape to team-level
     t1_stats = m.groupby('team1_id').agg({
         't1_win': 'sum',
         't2_win': 'sum',
-        's1_capped': 'sum',
-        's2_capped': 'sum',
         'p1': 'sum',
+        'p2': 'sum',
         'id': 'count'
-    }).rename(columns={'t1_win': 'Wins', 't2_win': 'Losses', 's1_capped': 'S_For', 's2_capped': 'S_Ag', 'p1': 'Points', 'id': 'Played'})
+    }).rename(columns={'t1_win': 'Wins', 't2_win': 'Losses', 'p1': 'Points', 'p2': 'Points Against', 'id': 'Played'})
     
     t2_stats = m.groupby('team2_id').agg({
         't2_win': 'sum',
         't1_win': 'sum',
-        's2_capped': 'sum',
-        's1_capped': 'sum',
         'p2': 'sum',
+        'p1': 'sum',
         'id': 'count'
-    }).rename(columns={'t2_win': 'Wins', 't1_win': 'Losses', 's2_capped': 'S_For', 's1_capped': 'S_Ag', 'p2': 'Points', 'id': 'Played'})
+    }).rename(columns={'t2_win': 'Wins', 't1_win': 'Losses', 'p2': 'Points', 'p1': 'Points Against', 'id': 'Played'})
 
     # Combine stats
     combined = pd.concat([t1_stats, t2_stats]).groupby(level=0).sum()
-    combined['RD'] = combined['S_For'] - combined['S_Ag']
-    combined = combined.rename(columns={'S_Ag': 'Points Against'})
-    combined = combined.drop(columns=['S_For'])
+    combined['PD'] = combined['Points'] - combined['Points Against']
     
     # Merge with teams_df
     df = teams_df.merge(combined, left_on='id', right_index=True, how='left').fillna(0)
     
     # Ensure correct types for numeric columns
-    for col in ['Wins', 'Losses', 'RD', 'Points', 'Points Against', 'Played']:
+    for col in ['Wins', 'Losses', 'PD', 'Points', 'Points Against', 'Played']:
         df[col] = df[col].astype(int)
         
     return df.sort_values(by=['Points', 'Points Against'], ascending=[False, True])
@@ -1967,7 +1959,7 @@ if page == "Overview & Standings":
             st.markdown("<br>", unsafe_allow_html=True)
             
             # Sort and add Rank column
-            sorted_grp = grp_df[['name', 'Played', 'Wins', 'Losses', 'Points', 'RD']].sort_values(['Points', 'RD'], ascending=False).reset_index(drop=True)
+            sorted_grp = grp_df[['name', 'Played', 'Wins', 'Losses', 'Points', 'PD']].sort_values(['Points', 'PD'], ascending=False).reset_index(drop=True)
             sorted_grp.index += 1
             sorted_grp.insert(0, 'Rank', sorted_grp.index)
             
@@ -1978,8 +1970,8 @@ if page == "Overview & Standings":
                 column_config={
                     "Rank": st.column_config.NumberColumn("Rank", width="small"),
                     "name": "Team",
-                    "RD": st.column_config.NumberColumn("Round Diff", help="Total Rounds Won - Total Rounds Lost"),
-                    "Points": st.column_config.NumberColumn("Points", help="Match Win (15) + Rounds Won + OT Bonus (12 if loss in OT)")
+                    "PD": st.column_config.NumberColumn("Point Diff", help="Points For - Points Against"),
+                    "Points": st.column_config.NumberColumn("Points", help="Match Win (15) or Rounds Won (max 12)")
                 }
             )
             st.caption("🏆 Top 6 teams from each group qualify for Playoffs (Top 2 get R1 BYE).")
@@ -2022,7 +2014,7 @@ elif page == "Matches":
                         if not standings.empty:
                             # Group by group_name and get top 2
                             for g_name, g_df in standings.groupby('group_name'):
-                                g_df = g_df.sort_values(['Points', 'RD'], ascending=False).head(2)
+                                g_df = g_df.sort_values(['Points', 'PD'], ascending=False).head(2)
                                 for team in g_df.itertuples():
                                     st.markdown(f"""<div class="custom-card" style="margin-bottom: 10px; padding: 10px; border-left: 3px solid var(--primary-blue); opacity: 0.8;">
 <div style="display: flex; justify-content: space-between; font-size: 0.9rem;">
