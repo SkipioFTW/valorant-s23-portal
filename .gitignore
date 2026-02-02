@@ -44,7 +44,12 @@ Thumbs.db
 # Backup
 assets/teams_backup/
 
-# System Design Report (Requested to be unpushable)
-docs/system_design.md
+# Internal Scripts/Utilities
+scripts/
+tracker_scraper.py
+get_tracker_json.py
+create_test_admin.py
 
 .streamlit/
+*.md
+/snowflake_setup
