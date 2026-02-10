@@ -3740,17 +3740,17 @@ elif page == "Admin Panel":
                                 
                                 conn_s.commit()
                                 
-                                 # CLEANUP PENDING REQUEST (DATABASE)
-                                 if 'pending_match_db_id' in st.session_state:
-                                     try:
-                                         pdbid = st.session_state['pending_match_db_id']
-                                         conn_s.execute("DELETE FROM pending_matches WHERE id=?", (int(pdbid),))
-                                         st.toast("Bot request cleared from database.")
-                                         del st.session_state['pending_match_db_id']
-                                         del st.session_state['pending_match_request']
-                                         if 'auto_selected_match_id' in st.session_state: del st.session_state['auto_selected_match_id']
-                                         if 'auto_selected_match_week' in st.session_state: del st.session_state['auto_selected_match_week']
-                                     except: pass
+                                # CLEANUP PENDING REQUEST (DATABASE)
+                                if 'pending_match_db_id' in st.session_state:
+                                    try:
+                                        pdbid = st.session_state['pending_match_db_id']
+                                        conn_s.execute("DELETE FROM pending_matches WHERE id=?", (int(pdbid),))
+                                        st.toast("Bot request cleared from database.")
+                                        del st.session_state['pending_match_db_id']
+                                        del st.session_state['pending_match_request']
+                                        if 'auto_selected_match_id' in st.session_state: del st.session_state['auto_selected_match_id']
+                                        if 'auto_selected_match_week' in st.session_state: del st.session_state['auto_selected_match_week']
+                                    except: pass
 
                                 st.cache_data.clear()
                                 st.success(f"Successfully saved Map {map_idx+1} and updated match totals!")
