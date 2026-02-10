@@ -10,3 +10,4 @@ numpy
 joblib
 selenium
 psycopg2-binary
+supabase

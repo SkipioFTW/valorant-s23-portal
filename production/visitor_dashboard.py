@@ -15,6 +15,7 @@ except ImportError:
     psycopg2 = None
 import base64
 import requests
+from supabase import create_client, Client
 
 # Path management for production/staging structure
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -103,6 +104,20 @@ else:
 # Valorant Map Catalog
 maps_catalog = ["Abyss", "Ascent", "Bind", "Breeze", "Fracture", "Haven", "Icebox", "Lotus", "Pearl", "Split", "Sunset", "Corrode"]
 
+# Supabase SDK Initialization
+supabase_api_url = get_secret("SUPABASE_URL")
+supabase_api_key = get_secret("SUPABASE_KEY")
+supabase: Client = None
+
+if supabase_api_url and supabase_api_key:
+    try:
+        # Strip quotes if they exist from streamlit secrets
+        u = str(supabase_api_url).strip('"').strip("'")
+        k = str(supabase_api_key).strip('"').strip("'")
+        supabase = create_client(u, k)
+    except Exception as e:
+        st.error(f"Error initializing Supabase SDK: {e}")
+
 class UnifiedCursorWrapper:
     def __init__(self, cur, is_sqlite):
         self.cur = cur
@@ -160,26 +175,27 @@ class UnifiedDBWrapper:
         self.conn.close()
 
 def get_conn():
-    # Priority: SUPABASE_DB_URL (connection string), then legacy SUPABASE_URL
-    supabase_db_url = get_secret("SUPABASE_DB_URL") or get_secret("SUPABASE_URL")
+    # Priority: SUPABASE_DB_URL, then legacy SUPABASE_URL
+    db_url = get_secret("SUPABASE_DB_URL") or get_secret("SUPABASE_URL")
     
     import psycopg2
     conn = None
     
-    if supabase_db_url and (supabase_db_url.startswith("postgresql") or "db.tekwoxehaktajyizaacj.supabase.co" in supabase_db_url):
+    if db_url:
+        db_url_str = str(db_url).strip().strip('"').strip("'")
+        
+        # Method 1: Try direct connection string
         try:
-            # Try connecting with the URL string first
-            conn = psycopg2.connect(supabase_db_url)
+            conn = psycopg2.connect(db_url_str, connect_timeout=5)
         except Exception as e:
-            # If URL fails (likely due to special characters), attempt manual parse
-            # Format: postgresql://user:password@host:port/dbname
+            # Method 2: Manual Parsing (Robust against special characters in passwords)
             try:
                 import re
-                match = re.search(r'postgresql://([^:]+):([^@]+)@([^:/]+):(\d+)/(.+)', supabase_db_url)
+                from urllib.parse import unquote
+                # regex to extract components from postgresql://user:pass@host:port/dbname
+                match = re.search(r'postgresql://([^:]+):([^@]+)@([^:/]+):(\d+)/(.+)', db_url_str)
                 if match:
                     user, pwd, host, port, db = match.groups()
-                    # Decode URL encoded chars like %3e to >
-                    from urllib.parse import unquote
                     conn = psycopg2.connect(
                         user=unquote(user),
                         password=unquote(pwd),
@@ -188,7 +204,8 @@ def get_conn():
                         database=unquote(db),
                         connect_timeout=10
                     )
-            except:
+            except Exception as e2:
+                # If everything fails, it will fall back to SQLite below
                 pass
     
     if conn:
@@ -197,9 +214,10 @@ def get_conn():
     # Fallback to local
     if os.path.exists(DB_PATH):
         try:
+            # If we are in a streamlit context, show a warning
             import streamlit as st
-            if supabase_url:
-                st.warning("⚠️ Supabase connection failed. Falling back to local database.")
+            if db_url:
+                st.warning("⚠️ PostgreSQL connection failed. Falling back to local data.")
         except:
             pass
         return UnifiedDBWrapper(sqlite3.connect(DB_PATH))
