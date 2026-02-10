@@ -1493,7 +1493,7 @@ def get_player_profile(player_id):
                                 'r_a': bdf[bdf['rank'] == rank_val]['assists'].mean()
                             })
         except Exception:
-
+            pass
     # Supabase-only: if not found via Supabase, return {}
     if info.empty:
         return {}
