@@ -15,6 +15,7 @@ except ImportError:
 import sqlite3
 from io import BytesIO
 from dotenv import load_dotenv
+from supabase import create_client, Client
 
 # Load environment variables from .env file
 load_dotenv()
@@ -31,8 +32,19 @@ GH_OWNER = os.getenv("GH_OWNER", "SkipioFTW") # Default owner
 GH_REPO = os.getenv("GH_REPO", "valorant-s23-portal") # Default repo
 GUILD_ID = int(os.getenv("GUILD_ID", "1470636024110776322"))
 SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL")
 
-# Database path (relative or absolute)
+# Initialize Supabase Client
+supabase: Client = None
+if SUPABASE_URL and SUPABASE_KEY:
+    try:
+        supabase = create_client(SUPABASE_URL.strip('"'), SUPABASE_KEY.strip('"'))
+        print("Supabase client initialized successfully!")
+    except Exception as e:
+        print(f"Error initializing Supabase client: {e}")
+
+# Database path (relative or absolute) for SQLite fallback
 DB_PATH = os.getenv("DB_PATH", os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data", "valorant_s23.db"))
 
 # Intents
@@ -151,48 +163,40 @@ class UnifiedDBWrapper:
         self.conn.close()
 
 def get_db_conn():
-    # Priority: SUPABASE_DB_URL, then legacy SUPABASE_URL
-    db_url = os.getenv("SUPABASE_DB_URL") or os.getenv("SUPABASE_URL")
+    # If using Supabase SDK, we don't strictly need a 'connection' object
+    # for SELECT/INSERT, but we'll keep the wrapper for SQLite fallback logic
+    # though eventually we want to move away from it.
     
-    if db_url:
+    db_url = SUPABASE_DB_URL or os.getenv("SUPABASE_URL") # Try to get any DB string
+    
+    if db_url and "postgresql" in str(db_url):
         import psycopg2
         conn = None
-        # Check if it's a connection string
-        if isinstance(db_url, str) and (db_url.startswith("postgresql") or "db.tekwoxehaktajyizaacj.supabase.co" in db_url):
+        try:
+            conn = psycopg2.connect(db_url)
+        except Exception as e:
+            # Fallback to manual parse if URL fails (special characters)
             try:
-                conn = psycopg2.connect(db_url)
-            except Exception as e:
-                # Fallback to manual parse if URL fails
-                try:
-                    import re
-                    match = re.search(r'postgresql://([^:]+):([^@]+)@([^:/]+):(\d+)/(.+)', db_url)
-                    if match:
-                        user, pwd, host, port, db = match.groups()
-                        from urllib.parse import unquote
-                        conn = psycopg2.connect(
-                            user=unquote(user),
-                            password=unquote(pwd),
-                            host=unquote(host),
-                            port=port,
-                            database=unquote(db),
-                            connect_timeout=10
-                        )
-                except:
-                    pass
-        elif isinstance(db_url, dict):
-            try:
-                conn = psycopg2.connect(**db_url)
+                import re
+                match = re.search(r'postgresql://([^:]+):([^@]+)@([^:/]+):(\d+)/(.+)', str(db_url))
+                if match:
+                    user, pwd, host, port, db = match.groups()
+                    from urllib.parse import unquote
+                    conn = psycopg2.connect(
+                        user=unquote(user),
+                        password=unquote(pwd),
+                        host=unquote(host),
+                        port=port,
+                        database=unquote(db),
+                        connect_timeout=10
+                    )
             except:
                 pass
-                
+        
         if conn:
             return UnifiedDBWrapper(conn)
             
-        print("Supabase connection failed, checking for local fallback...")
-        if os.path.exists(DB_PATH):
-            return UnifiedDBWrapper(sqlite3.connect(DB_PATH))
-        return None
-    
+    # Always fallback to SQLite if Supabase DB connection fails
     if os.path.exists(DB_PATH):
         return UnifiedDBWrapper(sqlite3.connect(DB_PATH))
     return None
@@ -214,33 +218,58 @@ ALLOWED_RANKS = ["Unranked", "Iron/Bronze", "Silver", "Gold", "Platinum", "Diamo
 async def match(interaction: discord.Interaction, team_a: str, team_b: str, group: str, url: str):
     await interaction.response.defer(thinking=True)
     
+    # Use Supabase SDK if available
+    if supabase:
+        try:
+            # 1. VALIDATION: Check if Teams exist
+            res_a = supabase.table("teams").select("name").ilike("name", team_a).execute()
+            if not res_a.data:
+                await interaction.followup.send(f"❌ Error: **Team A ('{team_a}')** not found. Please check spelling.")
+                return
+            
+            res_b = supabase.table("teams").select("name").ilike("name", team_b).execute()
+            if not res_b.data:
+                await interaction.followup.send(f"❌ Error: **Team B ('{team_b}')** not found. Please check spelling.")
+                return
+
+            # 2. INSERT into Pending Table
+            supabase.table("pending_matches").insert({
+                "team_a": team_a,
+                "team_b": team_b,
+                "group_name": group,
+                "url": url,
+                "submitted_by": str(interaction.user)
+            }).execute()
+            
+            await interaction.followup.send(f"✅ **Match Queued!**\nTeams: `{team_a} vs {team_b}`\nAdmin will verify in the dashboard.")
+            return
+        except Exception as e:
+            print(f"Supabase SDK Error: {e}")
+            # Fallback to legacy SQL below
+
     conn = get_db_conn()
     if not conn:
-        await interaction.followup.send("❌ Error: Could not connect to the database. Please contact an Admin.")
+        await interaction.followup.send("❌ Error: Database connection failed.")
         return
 
-    # 1. VALIDATION: Check if Teams exist
-    cursor = conn.cursor()
-    cursor.execute("SELECT name FROM teams WHERE LOWER(name) = LOWER(%s)", (team_a,))
-    if not cursor.fetchone():
-        await interaction.followup.send(f"❌ Error: **Team A ('{team_a}')** not found in the database. Please check the spelling.")
-        conn.close()
-        return
-        
-    cursor.execute("SELECT name FROM teams WHERE LOWER(name) = LOWER(%s)", (team_b,))
-    if not cursor.fetchone():
-        await interaction.followup.send(f"❌ Error: **Team B ('{team_b}')** not found in the database. Please check the spelling.")
-        conn.close()
-        return
-
-    # 2. INSERT into Pending Table
     try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM teams WHERE LOWER(name) = LOWER(%s)", (team_a,))
+        if not cursor.fetchone():
+            await interaction.followup.send(f"❌ Error: **Team A ('{team_a}')** not found.")
+            return
+            
+        cursor.execute("SELECT name FROM teams WHERE LOWER(name) = LOWER(%s)", (team_b,))
+        if not cursor.fetchone():
+            await interaction.followup.send(f"❌ Error: **Team B ('{team_b}')** not found.")
+            return
+
         cursor.execute("""
             INSERT INTO pending_matches (team_a, team_b, group_name, url, submitted_by)
             VALUES (%s, %s, %s, %s, %s)
         """, (team_a, team_b, group, url, str(interaction.user)))
         conn.commit()
-        await interaction.followup.send(f"✅ **Match Queued!**\nTeams: `{team_a} vs {team_b}`\nAdmin will verify the data in the dashboard.")
+        await interaction.followup.send(f"✅ **Match Queued!** (SQLite Fallback)")
     except Exception as e:
         await interaction.followup.send(f"❌ Database Error: {str(e)}")
     finally:
@@ -255,17 +284,28 @@ async def match(interaction: discord.Interaction, team_a: str, team_b: str, grou
 async def player(interaction: discord.Interaction, discord_handle: str, riot_id: str, rank: str):
     await interaction.response.defer()
     
-    # 1. VALIDATION: Check Rank
     clean_rank = rank.strip()
     if clean_rank not in ALLOWED_RANKS:
         ranks_list = "\n".join([f"- {r}" for r in ALLOWED_RANKS])
-        await interaction.followup.send(f"❌ Error: **'{rank}'** is not a valid rank.\nPlease use one of the following:\n{ranks_list}")
+        await interaction.followup.send(f"❌ Error: **'{rank}'** is invalid.\nOptions:\n{ranks_list}")
         return
 
-    # 2. INSERT into Pending Table
+    if supabase:
+        try:
+            supabase.table("pending_players").insert({
+                "riot_id": riot_id,
+                "rank": clean_rank,
+                "discord_handle": discord_handle,
+                "submitted_by": str(interaction.user)
+            }).execute()
+            await interaction.followup.send(f"✅ **Registration Submitted!**\nPlayer: `{riot_id}`\nPending Approval.")
+            return
+        except Exception as e:
+            print(f"Supabase SDK Error: {e}")
+
     conn = get_db_conn()
     if not conn:
-        await interaction.followup.send("❌ Error: Could not connect to the database.")
+        await interaction.followup.send("❌ Error: Database connection failed.")
         return
 
     try:
@@ -275,7 +315,7 @@ async def player(interaction: discord.Interaction, discord_handle: str, riot_id:
             VALUES (%s, %s, %s, %s)
         """, (riot_id, clean_rank, discord_handle, str(interaction.user)))
         conn.commit()
-        await interaction.followup.send(f"✅ **Registration Submitted!**\nPlayer: `{riot_id}`\nRank: `{clean_rank}`\nPending Approval in Admin Panel.")
+        await interaction.followup.send(f"✅ **Registration Submitted!** (SQLite Fallback)")
     except Exception as e:
         await interaction.followup.send(f"❌ Database Error: {str(e)}")
     finally:
@@ -285,27 +325,40 @@ async def player(interaction: discord.Interaction, discord_handle: str, riot_id:
 @discord.app_commands.describe(group="Group Name (e.g. ALPHA or BETA)")
 async def standings(interaction: discord.Interaction, group: str):
     await interaction.response.defer()
+    
+    if supabase:
+        try:
+            res = supabase.table("teams").select("name").ilike("group_name", group).execute()
+            if not res.data:
+                await interaction.followup.send(f"❌ No teams found in group `{group}`.")
+                return
+
+            msg = f"🏆 **Group {group.upper()} Teams**\n```\n"
+            for row in res.data:
+                msg += f"- {row['name']}\n"
+            msg += "```\n*Standings with points available in portal.*"
+            await interaction.followup.send(msg)
+            return
+        except Exception as e:
+            print(f"Supabase SDK Error: {e}")
+
     conn = get_db_conn()
     if not conn:
-        await interaction.followup.send("❌ Error: Could not connect to database.")
+        await interaction.followup.send("❌ Error: Database connection failed.")
         return
     
     try:
-        is_postgres = not isinstance(conn, sqlite3.Connection)
-        placeholder = "%s" if is_postgres else "?"
         cursor = conn.cursor()
-        
-        # Simple fetching of teams in the group
-        cursor.execute(f"SELECT name FROM teams WHERE UPPER(group_name) = UPPER({placeholder})", (group,))
+        cursor.execute("SELECT name FROM teams WHERE UPPER(group_name) = UPPER(%s)", (group,))
         teams = cursor.fetchall()
         if not teams:
-            await interaction.followup.send(f"❌ No teams found in group `{group}`.")
+            await interaction.followup.send(f"❌ No teams in group `{group}`.")
             return
 
-        msg = f"🏆 **Group {group.upper()} Teams**\n```\n"
+        msg = f"🏆 **Group {group.upper()} Teams** (Fallback)\n```\n"
         for row in teams:
             msg += f"- {row[0]}\n"
-        msg += "```\n*Full standings with points/PD available in the portal.*"
+        msg += "```"
         await interaction.followup.send(msg)
     except Exception as e:
         await interaction.followup.send(f"❌ Error: {str(e)}")
@@ -315,9 +368,41 @@ async def standings(interaction: discord.Interaction, group: str):
 @bot.tree.command(name="matches", description="Show upcoming matches")
 async def matches(interaction: discord.Interaction):
     await interaction.response.defer()
+    
+    if supabase:
+        try:
+            # Query matches with team names using SDK
+            # Note: Supabase SDK can do joins if foreign keys are defined, 
+            # but for simplicity we'll fetch matches and teams and join in Python 
+            # or use a smarter select if the schema supports it.
+            res = supabase.table("matches") \
+                .select("week, status, team1:teams!team1_id(name), team2:teams!team2_id(name)") \
+                .neq("status", "completed") \
+                .order("week") \
+                .limit(5) \
+                .execute()
+            
+            if not res.data:
+                await interaction.followup.send("📅 No upcoming matches.")
+                return
+
+            embed = discord.Embed(title="📅 Upcoming Matches", color=discord.Color.blue())
+            for m in res.data:
+                t1 = m['team1']['name']
+                t2 = m['team2']['name']
+                embed.add_field(
+                    name=f"Week {m['week']}", 
+                    value=f"**{t1}** vs **{t2}**\nStatus: `{m['status']}`", 
+                    inline=False
+                )
+            await interaction.followup.send(embed=embed)
+            return
+        except Exception as e:
+            print(f"Supabase SDK Error: {e}")
+
     conn = get_db_conn()
     if not conn:
-        await interaction.followup.send("❌ Error: Could not connect to database.")
+        await interaction.followup.send("❌ Error: Database connection failed.")
         return
     
     try:
@@ -335,16 +420,12 @@ async def matches(interaction: discord.Interaction):
         results = cursor.fetchall()
         
         if not results:
-            await interaction.followup.send("📅 No upcoming matches scheduled.")
+            await interaction.followup.send("📅 No upcoming matches.")
             return
             
-        embed = discord.Embed(title="📅 Upcoming Matches", color=discord.Color.blue())
+        embed = discord.Embed(title="📅 Upcoming Matches (Fallback)", color=discord.Color.blue())
         for week, t1, t2, status in results:
-            embed.add_field(
-                name=f"Week {week}", 
-                value=f"**{t1}** vs **{t2}**\nStatus: `{status}`", 
-                inline=False
-            )
+            embed.add_field(name=f"Week {week}", value=f"**{t1}** vs **{t2}**\nStatus: `{status}`", inline=False)
         await interaction.followup.send(embed=embed)
     except Exception as e:
         await interaction.followup.send(f"❌ Error: {str(e)}")
@@ -355,20 +436,41 @@ async def matches(interaction: discord.Interaction):
 @discord.app_commands.describe(name="Player name or Riot ID")
 async def player_info(interaction: discord.Interaction, name: str):
     await interaction.response.defer()
+    
+    if supabase:
+        try:
+            # Search by name or riot_id
+            res = supabase.table("players") \
+                .select("name, riot_id, rank, team:teams!default_team_id(name)") \
+                .or_(f"name.ilike.{name},riot_id.ilike.{name}") \
+                .limit(1) \
+                .execute()
+            
+            if res.data:
+                p = res.data[0]
+                team_name = p['team']['name'] if p.get('team') else 'Free Agent'
+                embed = discord.Embed(title=f"👤 Player: {p['name']}", color=discord.Color.green())
+                embed.add_field(name="Riot ID", value=f"`{p['riot_id'] or 'N/A'}`", inline=True)
+                embed.add_field(name="Rank", value=f"`{p['rank'] or 'Unranked'}`", inline=True)
+                embed.add_field(name="Team", value=f"`{team_name}`", inline=True)
+                await interaction.followup.send(embed=embed)
+                return
+        except Exception as e:
+            print(f"Supabase SDK Error: {e}")
+
     conn = get_db_conn()
     if not conn:
-        await interaction.followup.send("❌ Error: Could not connect to database.")
+        await interaction.followup.send("❌ Error: Database connection failed.")
         return
     
     try:
-        is_postgres = not isinstance(conn, sqlite3.Connection)
-        placeholder = "%s" if is_postgres else "?"
         cursor = conn.cursor()
-        cursor.execute(f"""
+        cursor.execute("""
             SELECT p.name, p.riot_id, p.rank, t.name as team_name
             FROM players p
             LEFT JOIN teams t ON p.default_team_id = t.id
-            WHERE LOWER(p.name) = LOWER({placeholder}) OR LOWER(p.riot_id) = LOWER({placeholder})
+            WHERE LOWER(p.name) = LOWER(%s) OR LOWER(p.riot_id) = LOWER(%s)
+            LIMIT 1
         """, (name, name))
         
         row = cursor.fetchone()
@@ -376,12 +478,11 @@ async def player_info(interaction: discord.Interaction, name: str):
             await interaction.followup.send(f"❌ Player `{name}` not found.")
             return
             
-        p_name, riot_id, rank, team = row
+        p_name, r_id, p_rank, t_name = row
         embed = discord.Embed(title=f"👤 Player: {p_name}", color=discord.Color.green())
-        embed.add_field(name="Riot ID", value=f"`{riot_id or 'N/A'}`", inline=True)
-        embed.add_field(name="Rank", value=f"`{rank or 'Unranked'}`", inline=True)
-        embed.add_field(name="Team", value=f"`{team or 'Free Agent'}`", inline=True)
-        
+        embed.add_field(name="Riot ID", value=f"`{r_id or 'N/A'}`", inline=True)
+        embed.add_field(name="Rank", value=f"`{p_rank or 'Unranked'}`", inline=True)
+        embed.add_field(name="Team", value=f"`{t_name or 'Free Agent'}`", inline=True)
         await interaction.followup.send(embed=embed)
     except Exception as e:
         await interaction.followup.send(f"❌ Error: {str(e)}")
