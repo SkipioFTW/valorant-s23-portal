@@ -1390,32 +1390,74 @@ def backup_db_to_github():
 @st.cache_data(ttl=300)
 def get_substitutions_log():
     import pandas as pd
-    conn = get_conn()
-    try:
-        df = pd.read_sql(
-            """
-            SELECT msm.match_id, msm.map_index, m.week, m.group_name,
-                   t.name AS team, p.name AS player, p.riot_id AS player_riot,
-                   sp.name AS subbed_for, sp.riot_id AS sub_riot,
-                   msm.agent, msm.acs, msm.kills, msm.deaths, msm.assists
-            FROM match_stats_map msm
-            JOIN matches m ON msm.match_id = m.id
-            LEFT JOIN teams t ON msm.team_id = t.id
-            LEFT JOIN players p ON msm.player_id = p.id
-            LEFT JOIN players sp ON msm.subbed_for_id = sp.id
-            WHERE msm.is_sub = 1 AND m.status = 'completed'
-            ORDER BY m.week, msm.match_id, msm.map_index
-            """,
-            conn,
-        )
-        if not df.empty:
-            df['player'] = df.apply(lambda r: f"{r['player']} ({r['player_riot']})" if r['player_riot'] and str(r['player_riot']).strip() else r['player'], axis=1)
-            df['subbed_for'] = df.apply(lambda r: f"{r['subbed_for']} ({r['sub_riot']})" if r['sub_riot'] and str(r['sub_riot']).strip() else r['subbed_for'], axis=1)
-            df = df.drop(columns=['player_riot', 'sub_riot'])
-    except Exception:
+    df = pd.DataFrame()
+    
+    # Try Supabase SDK First
+    if supabase:
+        try:
+            # Complex join via SDK
+            res = supabase.table("match_stats_map")\
+                .select("*, matches(*), teams(name), p:players!player_id(name, riot_id), sp:players!subbed_for_id(name, riot_id)")\
+                .eq("is_sub", 1)\
+                .execute()
+                
+            if res.data:
+                l = []
+                for r in res.data:
+                    if r.get("matches", {}).get("status") == "completed":
+                        item = {
+                            "match_id": r.get("match_id"),
+                            "map_index": r.get("map_index"),
+                            "week": r.get("matches", {}).get("week"),
+                            "group_name": r.get("matches", {}).get("group_name"),
+                            "team": r.get("teams", {}).get("name"),
+                            "player": r.get("p", {}).get("name"),
+                            "player_riot": r.get("p", {}).get("riot_id"),
+                            "subbed_for": r.get("sp", {}).get("name"),
+                            "sub_riot": r.get("sp", {}).get("riot_id"),
+                            "agent": r.get("agent"),
+                            "acs": r.get("acs"),
+                            "kills": r.get("kills"),
+                            "deaths": r.get("deaths"),
+                            "assists": r.get("assists")
+                        }
+                        l.append(item)
+                df = pd.DataFrame(l)
+                if not df.empty:
+                    df['player'] = df.apply(lambda r: f"{r['player']} ({r['player_riot']})" if r['player_riot'] and str(r['player_riot']).strip() else r['player'], axis=1)
+                    df['subbed_for'] = df.apply(lambda r: f"{r['subbed_for']} ({r['sub_riot']})" if r['sub_riot'] and str(r['sub_riot']).strip() else r['subbed_for'], axis=1)
+                    df = df.drop(columns=['player_riot', 'sub_riot'])
+        except Exception:
+            pass
+
+    # Fallback to SQL (SQLite)
+    if df.empty:
+        conn = get_conn()
+        try:
+            df = pd.read_sql(
+                """
+                SELECT msm.match_id, msm.map_index, m.week, m.group_name,
+                       t.name AS team, p.name AS player, p.riot_id AS player_riot,
+                       sp.name AS subbed_for, sp.riot_id AS sub_riot,
+                       msm.agent, msm.acs, msm.kills, msm.deaths, msm.assists
+                FROM match_stats_map msm
+                JOIN matches m ON msm.match_id = m.id
+                LEFT JOIN teams t ON msm.team_id = t.id
+                LEFT JOIN players p ON msm.player_id = p.id
+                LEFT JOIN players sp ON msm.subbed_for_id = sp.id
+                WHERE msm.is_sub = 1 AND m.status = 'completed'
+                ORDER BY m.week, msm.match_id, msm.map_index
+                """,
+                conn,
+            )
+            if not df.empty:
+                df['player'] = df.apply(lambda r: f"{r['player']} ({r['player_riot']})" if r['player_riot'] and str(r['player_riot']).strip() else r['player'], axis=1)
+                df['subbed_for'] = df.apply(lambda r: f"{r['subbed_for']} ({r['sub_riot']})" if r['sub_riot'] and str(r['sub_riot']).strip() else r['subbed_for'], axis=1)
+                df = df.drop(columns=['player_riot', 'sub_riot'])
+        except Exception:
+            conn.close()
+            return pd.DataFrame()
         conn.close()
-        return pd.DataFrame()
-    conn.close()
     return df
 
 @st.cache_data(ttl=300)
@@ -1676,23 +1718,47 @@ def authenticate(username, password):
     return None
 
 def upsert_match_maps(match_id, maps_data):
+    # Try Supabase SDK First
+    if supabase:
+        try:
+            for m in maps_data:
+                item = {
+                    "match_id": int(match_id),
+                    "map_index": int(m['map_index']),
+                    "map_name": m['map_name'],
+                    "team1_rounds": int(m['team1_rounds']),
+                    "team2_rounds": int(m['team2_rounds']),
+                    "winner_id": int(m['winner_id']) if m['winner_id'] else None,
+                    "is_forfeit": int(m.get('is_forfeit', 0))
+                }
+                # Supabase SDK upsert handles conflict based on unique constraints (match_id, map_index)
+                supabase.table("match_maps").upsert(item).execute()
+            return True
+        except Exception:
+            pass
+
+    # Fallback to SQL (SQLite)
     conn = get_conn()
-    c = conn.cursor()
-    for m in maps_data:
-        c.execute("SELECT id FROM match_maps WHERE match_id=%s AND map_index=%s", (match_id, m['map_index']))
-        ex = c.fetchone()
-        if ex:
-            c.execute(
-                "UPDATE match_maps SET map_name=%s, team1_rounds=%s, team2_rounds=%s, winner_id=%s, is_forfeit=%s WHERE id=%s",
-                (m['map_name'], m['team1_rounds'], m['team2_rounds'], m['winner_id'], m.get('is_forfeit', 0), ex[0])
-            )
-        else:
-            c.execute(
-                "INSERT INTO match_maps (match_id, map_index, map_name, team1_rounds, team2_rounds, winner_id, is_forfeit) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                (match_id, m['map_index'], m['map_name'], m['team1_rounds'], m['team2_rounds'], m['winner_id'], m.get('is_forfeit', 0))
-            )
-    conn.commit()
-    conn.close()
+    try:
+        c = conn.cursor()
+        for m in maps_data:
+            c.execute("SELECT id FROM match_maps WHERE match_id=%s AND map_index=%s", (match_id, m['map_index']))
+            ex = c.fetchone()
+            if ex:
+                c.execute(
+                    "UPDATE match_maps SET map_name=%s, team1_rounds=%s, team2_rounds=%s, winner_id=%s, is_forfeit=%s WHERE id=%s",
+                    (m['map_name'], m['team1_rounds'], m['team2_rounds'], m['winner_id'], m.get('is_forfeit', 0), ex[0])
+                )
+            else:
+                c.execute(
+                    "INSERT INTO match_maps (match_id, map_index, map_name, team1_rounds, team2_rounds, winner_id, is_forfeit) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    (match_id, m['map_index'], m['map_name'], m['team1_rounds'], m['team2_rounds'], m['winner_id'], m.get('is_forfeit', 0))
+                )
+        conn.commit()
+    except Exception:
+        if 'conn' in locals(): conn.rollback()
+    finally:
+        conn.close()
 
 @st.cache_data(ttl=900)
 def _get_standings_cached():
@@ -2068,21 +2134,45 @@ def get_match_maps(match_id):
 @st.cache_data(ttl=900)
 def _get_all_players_directory_cached(format_names=True):
     import pandas as pd
-    conn = get_conn()
-    try:
-        df = pd.read_sql(
-            """
-            SELECT p.id, p.name, p.riot_id, p.rank, t.name as team
-            FROM players p
-            LEFT JOIN teams t ON p.default_team_id = t.id
-            ORDER BY p.name
-            """,
-            conn
-        )
-    except Exception:
-        df = pd.DataFrame(columns=['id','name','riot_id','rank','team'])
-    finally:
-        conn.close()
+    df = pd.DataFrame()
+    
+    if supabase:
+        try:
+            res = supabase.table("players")\
+                .select("id, name, riot_id, rank, teams!default_team_id(name)")\
+                .order("name")\
+                .execute()
+            if res.data:
+                l = []
+                for r in res.data:
+                    item = {
+                        'id': r.get('id'),
+                        'name': r.get('name'),
+                        'riot_id': r.get('riot_id'),
+                        'rank': r.get('rank'),
+                        'team': r.get('teams', {}).get('name') if r.get('teams') else None
+                    }
+                    l.append(item)
+                df = pd.DataFrame(l)
+        except Exception:
+            pass
+
+    if df.empty:
+        conn = get_conn()
+        try:
+            df = pd.read_sql(
+                """
+                SELECT p.id, p.name, p.riot_id, p.rank, t.name as team
+                FROM players p
+                LEFT JOIN teams t ON p.default_team_id = t.id
+                ORDER BY p.name
+                """,
+                conn
+            )
+        except Exception:
+            df = pd.DataFrame(columns=['id','name','riot_id','rank','team'])
+        finally:
+            conn.close()
     
     if not df.empty and format_names:
         df['name'] = df.apply(lambda r: f"{r['name']} ({r['riot_id']})" if r['riot_id'] and str(r['riot_id']).strip() else r['name'], axis=1)
@@ -2094,27 +2184,54 @@ def get_all_players_directory(format_names=True):
         return _get_all_players_directory_cached.run(format_names)
     return _get_all_players_directory_cached(format_names)
 
-@st.cache_data(ttl=900)
+@st.cache_data(ttl=300)
 def _get_map_stats_cached(match_id, map_index, team_id):
     import pandas as pd
-    conn = get_conn()
-    try:
-        df = pd.read_sql(
-            """
-            SELECT p.name, p.riot_id, ms.agent, ms.acs, ms.kills, ms.deaths, ms.assists, ms.is_sub 
-            FROM match_stats_map ms 
-            JOIN players p ON ms.player_id=p.id 
-            WHERE ms.match_id=%s AND ms.map_index=%s AND ms.team_id=%s
-            """, 
-            conn, 
-            params=(int(match_id), int(map_index), int(team_id))
-        )
-        if not df.empty:
-            df['name'] = df.apply(lambda r: f"{r['name']} ({r['riot_id']})" if r['riot_id'] and str(r['riot_id']).strip() else r['name'], axis=1)
-            df = df.drop(columns=['riot_id'])
-    except Exception:
-        df = pd.DataFrame()
-    conn.close()
+    df = pd.DataFrame()
+    
+    if supabase:
+        try:
+            res = supabase.table("match_stats_map")\
+                .select("*, players(name, riot_id)")\
+                .eq("match_id", match_id)\
+                .eq("map_index", map_index)\
+                .eq("team_id", team_id)\
+                .execute()
+            if res.data:
+                l = []
+                for r in res.data:
+                    item = r.copy()
+                    p = r.get('players', {})
+                    item['name'] = p.get('name')
+                    item['riot_id'] = p.get('riot_id')
+                    l.append(item)
+                df = pd.DataFrame(l)
+                if not df.empty:
+                    df['name'] = df.apply(lambda r: f"{r['name']} ({r['riot_id']})" if r['riot_id'] and str(r['riot_id']).strip() else r['name'], axis=1)
+                    df = df.drop(columns=['riot_id'])
+        except Exception:
+            pass
+
+    if df.empty:
+        conn = get_conn()
+        try:
+            df = pd.read_sql(
+                """
+                SELECT p.name, p.riot_id, ms.agent, ms.acs, ms.kills, ms.deaths, ms.assists, ms.is_sub 
+                FROM match_stats_map ms 
+                JOIN players p ON ms.player_id=p.id 
+                WHERE ms.match_id=%s AND ms.map_index=%s AND ms.team_id=%s
+                """, 
+                conn, 
+                params=(int(match_id), int(map_index), int(team_id))
+            )
+            if not df.empty:
+                df['name'] = df.apply(lambda r: f"{r['name']} ({r['riot_id']})" if r['riot_id'] and str(r['riot_id']).strip() else r['name'], axis=1)
+                df = df.drop(columns=['riot_id'])
+        except Exception:
+            df = pd.DataFrame()
+        finally:
+            conn.close()
     return df
 
 def get_map_stats(match_id, map_index, team_id):
@@ -2125,15 +2242,27 @@ def get_map_stats(match_id, map_index, team_id):
 @st.cache_data(ttl=900)
 def _get_team_history_counts_cached():
     import pandas as pd
-    conn = get_conn()
-    try:
-        df = pd.read_sql_query(
-            "SELECT team_id, COUNT(DISTINCT season_id) as season_count FROM team_history GROUP BY team_id",
-            conn,
-        )
-    except Exception:
-        df = pd.DataFrame()
-    conn.close()
+    df = pd.DataFrame()
+    if supabase:
+        try:
+            res = supabase.table("team_history").select("team_id, season_id").execute()
+            if res.data:
+                temp = pd.DataFrame(res.data)
+                df = temp.groupby('team_id')['season_id'].nunique().reset_index(name='season_count')
+        except Exception:
+            pass
+            
+    if df.empty:
+        conn = get_conn()
+        try:
+            df = pd.read_sql_query(
+                "SELECT team_id, COUNT(DISTINCT season_id) as season_count FROM team_history GROUP BY team_id",
+                conn,
+            )
+        except Exception:
+            df = pd.DataFrame()
+        finally:
+            conn.close()
     return df
 
 def get_team_history_counts():
@@ -2144,12 +2273,23 @@ def get_team_history_counts():
 @st.cache_data(ttl=900)
 def _get_all_players_cached():
     import pandas as pd
-    conn = get_conn()
-    try:
-        df = pd.read_sql("SELECT id, name, riot_id, rank, default_team_id FROM players ORDER BY name", conn)
-    except Exception:
-        df = pd.DataFrame()
-    conn.close()
+    df = pd.DataFrame()
+    if supabase:
+        try:
+            res = supabase.table("players").select("id, name, riot_id, rank, default_team_id").order("name").execute()
+            if res.data:
+                df = pd.DataFrame(res.data)
+        except Exception:
+            pass
+            
+    if df.empty:
+        conn = get_conn()
+        try:
+            df = pd.read_sql("SELECT id, name, riot_id, rank, default_team_id FROM players ORDER BY name", conn)
+        except Exception:
+            df = pd.DataFrame()
+        finally:
+            conn.close()
     return df
 
 def get_all_players():
@@ -2160,12 +2300,23 @@ def get_all_players():
 @st.cache_data(ttl=900)
 def _get_teams_list_full_cached():
     import pandas as pd
-    conn = get_conn()
-    try:
-        df = pd.read_sql("SELECT id, name, tag, group_name, logo_path FROM teams ORDER BY name", conn)
-    except Exception:
-        df = pd.DataFrame()
-    conn.close()
+    df = pd.DataFrame()
+    if supabase:
+        try:
+            res = supabase.table("teams").select("id, name, tag, group_name, logo_path").order("name").execute()
+            if res.data:
+                df = pd.DataFrame(res.data)
+        except Exception:
+            pass
+            
+    if df.empty:
+        conn = get_conn()
+        try:
+            df = pd.read_sql("SELECT id, name, tag, group_name, logo_path FROM teams ORDER BY name", conn)
+        except Exception:
+            df = pd.DataFrame()
+        finally:
+            conn.close()
     return df
 
 def get_teams_list_full():
@@ -2182,12 +2333,21 @@ def get_teams_list():
 @st.cache_data(ttl=3600)
 def _get_agents_list_cached():
     import pandas as pd
+    if supabase:
+        try:
+            res = supabase.table("agents").select("name").order("name").execute()
+            if res.data:
+                return [r['name'] for r in res.data]
+        except Exception:
+            pass
+            
     conn = get_conn()
     try:
         df = pd.read_sql("SELECT name FROM agents ORDER BY name", conn)
     except Exception:
         df = pd.DataFrame()
-    conn.close()
+    finally:
+        conn.close()
     return df['name'].tolist() if not df.empty else []
 
 def get_agents_list():
@@ -2198,12 +2358,21 @@ def get_agents_list():
 @st.cache_data(ttl=900)
 def _get_match_weeks_cached():
     import pandas as pd
+    if supabase:
+        try:
+            res = supabase.table("matches").select("week").execute()
+            if res.data:
+                return sorted(list(set([r['week'] for r in res.data if r['week'] is not None])))
+        except Exception:
+            pass
+            
     conn = get_conn()
     try:
         df = pd.read_sql_query("SELECT DISTINCT week FROM matches ORDER BY week", conn)
     except Exception:
         df = pd.DataFrame()
-    conn.close()
+    finally:
+        conn.close()
     return df['week'].tolist() if not df.empty else []
 
 def get_match_weeks():
@@ -2218,12 +2387,23 @@ def get_match_maps_cached(match_id):
 @st.cache_data(ttl=900)
 def _get_completed_matches_cached():
     import pandas as pd
-    conn = get_conn()
-    try:
-        df = pd.read_sql("SELECT * FROM matches WHERE status='completed'", conn)
-    except Exception:
-        df = pd.DataFrame()
-    conn.close()
+    df = pd.DataFrame()
+    if supabase:
+        try:
+            res = supabase.table("matches").select("*").eq("status", "completed").execute()
+            if res.data:
+                df = pd.DataFrame(res.data)
+        except Exception:
+            pass
+            
+    if df.empty:
+        conn = get_conn()
+        try:
+            df = pd.read_sql("SELECT * FROM matches WHERE status='completed'", conn)
+        except Exception:
+            df = pd.DataFrame()
+        finally:
+            conn.close()
     return df
 
 def get_completed_matches():
@@ -4168,59 +4348,128 @@ elif page == "Admin Panel":
                             # 1. Determine Winner ID
                             wid = t1_id_val if winner_input == m['t1_name'] else (t2_id_val if winner_input == m['t2_name'] else None)
                             
-                            # 2. Save everything in one transaction
-                            conn_s = get_conn()
-                            try:
-                                # A. Save Map Info
-                                # Use DELETE + INSERT for maximum compatibility and to avoid ON CONFLICT issues
-                                conn_s.execute("DELETE FROM match_maps WHERE match_id=%s AND map_index=%s", (int(m['id']), map_idx))
-                                conn_s.execute("""
-                                    INSERT INTO match_maps (match_id, map_index, map_name, team1_rounds, team2_rounds, winner_id, is_forfeit)
-                                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                                """, (int(m['id']), map_idx, map_name_input, int(t1r_input), int(t2r_input), wid, int(is_forfeit_input)))
+                            saved_via_sdk = False
+                            # Try Supabase SDK First
+                            if supabase:
+                                try:
+                                    # A. Save Map Info
+                                    map_item = {
+                                        "match_id": int(m['id']),
+                                        "map_index": map_idx,
+                                        "map_name": map_name_input,
+                                        "team1_rounds": int(t1r_input),
+                                        "team2_rounds": int(t2r_input),
+                                        "winner_id": wid,
+                                        "is_forfeit": int(is_forfeit_input)
+                                    }
+                                    supabase.table("match_maps").upsert(map_item, on_conflict="match_id, map_index").execute()
 
-                                # B. Save Stats for both teams
-                                for t_id, t_entries in all_teams_entries:
-                                    conn_s.execute("DELETE FROM match_stats_map WHERE match_id=%s AND map_index=%s AND team_id=%s", (int(m['id']), map_idx, t_id))
-                                    for e in t_entries:
-                                        if e['player_id']:
-                                            conn_s.execute("""
-                                                INSERT INTO match_stats_map (match_id, map_index, team_id, player_id, is_sub, subbed_for_id, agent, acs, kills, deaths, assists)
-                                                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                                            """, (int(m['id']), map_idx, t_id, e['player_id'], e['is_sub'], e['subbed_for_id'], e['agent'], e['acs'], e['kills'], e['deaths'], e['assists']))
-                                
-                                # C. Recalculate Match Totals
-                                maps_df_final = pd.read_sql("SELECT team1_rounds, team2_rounds, winner_id FROM match_maps WHERE match_id=%s", conn_s, params=(int(m['id']),))
-                                final_s1 = len(maps_df_final[maps_df_final['winner_id'] == t1_id_val])
-                                final_s2 = len(maps_df_final[maps_df_final['winner_id'] == t2_id_val])
-                                final_winner = t1_id_val if final_s1 > final_s2 else (t2_id_val if final_s2 > final_s1 else None)
-                                played_cnt = len(maps_df_final[(maps_df_final['team1_rounds'] + maps_df_final['team2_rounds']) > 0])
-                                
-                                conn_s.execute("UPDATE matches SET score_t1=%s, score_t2=%s, winner_id=%s, status='completed', maps_played=%s WHERE id=%s", 
-                                             (final_s1, final_s2, final_winner, played_cnt, int(m['id'])))
-                                
-                                conn_s.commit()
-                                
-                                # CLEANUP PENDING REQUEST (DATABASE)
-                                if 'pending_match_db_id' in st.session_state:
-                                    try:
-                                        pdbid = st.session_state['pending_match_db_id']
-                                        conn_s.execute("DELETE FROM pending_matches WHERE id=%s", (int(pdbid),))
-                                        st.toast("Bot request cleared from database.")
-                                        del st.session_state['pending_match_db_id']
-                                        del st.session_state['pending_match_request']
-                                        if 'auto_selected_match_id' in st.session_state: del st.session_state['auto_selected_match_id']
-                                        if 'auto_selected_match_week' in st.session_state: del st.session_state['auto_selected_match_week']
-                                    except: pass
+                                    # B. Save Stats for both teams
+                                    # First delete existing stats for this map
+                                    supabase.table("match_stats_map")\
+                                        .delete()\
+                                        .eq("match_id", m['id'])\
+                                        .eq("map_index", map_idx)\
+                                        .execute()
+                                    
+                                    # Batch insert new stats
+                                    all_stats = []
+                                    for t_id, t_entries in all_teams_entries:
+                                        for e in t_entries:
+                                            if e['player_id']:
+                                                all_stats.append({
+                                                    "match_id": int(m['id']),
+                                                    "map_index": map_idx,
+                                                    "team_id": t_id,
+                                                    "player_id": e['player_id'],
+                                                    "is_sub": e['is_sub'],
+                                                    "subbed_for_id": e['subbed_for_id'],
+                                                    "agent": e['agent'],
+                                                    "acs": e['acs'],
+                                                    "kills": e['kills'],
+                                                    "deaths": e['deaths'],
+                                                    "assists": e['assists']
+                                                })
+                                    if all_stats:
+                                        supabase.table("match_stats_map").insert(all_stats).execute()
+                                        
+                                    # C. Recalculate Match Totals
+                                    res_maps = supabase.table("match_maps").select("winner_id, team1_rounds, team2_rounds").eq("match_id", m['id']).execute()
+                                    if res_maps.data:
+                                        maps_df_final = pd.DataFrame(res_maps.data)
+                                        final_s1 = len(maps_df_final[maps_df_final['winner_id'] == t1_id_val])
+                                        final_s2 = len(maps_df_final[maps_df_final['winner_id'] == t2_id_val])
+                                        final_winner = t1_id_val if final_s1 > final_s2 else (t2_id_val if final_s2 > final_s1 else None)
+                                        played_cnt = len(maps_df_final[(maps_df_final['team1_rounds'] + maps_df_final['team2_rounds']) > 0])
+                                        
+                                        supabase.table("matches").update({
+                                            "score_t1": final_s1,
+                                            "score_t2": final_s2,
+                                            "winner_id": final_winner,
+                                            "status": "completed",
+                                            "maps_played": played_cnt
+                                        }).eq("id", m['id']).execute()
+                                        
+                                    # D. Cleanup pending
+                                    if 'pending_match_db_id' in st.session_state:
+                                        try:
+                                            supabase.table("pending_matches").delete().eq("id", st.session_state['pending_match_db_id']).execute()
+                                        except: pass
+                                        
+                                    saved_via_sdk = True
+                                except Exception as e:
+                                    st.warning(f"Supabase SDK save failed, attempting local fallback: {e}")
 
-                                st.cache_data.clear()
-                                st.success(f"Successfully saved Map {map_idx+1} and updated match totals!")
-                                st.rerun()
-                            except Exception as e:
-                                conn_s.rollback()
-                                st.error(f"Error saving: {e}")
-                            finally:
-                                conn_s.close()
+                            if not saved_via_sdk:
+                                conn_s = get_conn()
+                                try:
+                                    conn_s.execute("DELETE FROM match_maps WHERE match_id=%s AND map_index=%s", (int(m['id']), map_idx))
+                                    conn_s.execute("""
+                                        INSERT INTO match_maps (match_id, map_index, map_name, team1_rounds, team2_rounds, winner_id, is_forfeit)
+                                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                                    """, (int(m['id']), map_idx, map_name_input, int(t1r_input), int(t2r_input), wid, int(is_forfeit_input)))
+
+                                    for t_id, t_entries in all_teams_entries:
+                                        conn_s.execute("DELETE FROM match_stats_map WHERE match_id=%s AND map_index=%s AND team_id=%s", (int(m['id']), map_idx, t_id))
+                                        for e in t_entries:
+                                            if e['player_id']:
+                                                conn_s.execute("""
+                                                    INSERT INTO match_stats_map (match_id, map_index, team_id, player_id, is_sub, subbed_for_id, agent, acs, kills, deaths, assists)
+                                                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                                                """, (int(m['id']), map_idx, t_id, e['player_id'], e['is_sub'], e['subbed_for_id'], e['agent'], e['acs'], e['kills'], e['deaths'], e['assists']))
+                                    
+                                    maps_df_final = pd.read_sql("SELECT team1_rounds, team2_rounds, winner_id FROM match_maps WHERE match_id=%s", conn_s, params=(int(m['id']),))
+                                    final_s1 = len(maps_df_final[maps_df_final['winner_id'] == t1_id_val])
+                                    final_s2 = len(maps_df_final[maps_df_final['winner_id'] == t2_id_val])
+                                    final_winner = t1_id_val if final_s1 > final_s2 else (t2_id_val if final_s2 > final_s1 else None)
+                                    played_cnt = len(maps_df_final[(maps_df_final['team1_rounds'] + maps_df_final['team2_rounds']) > 0])
+                                    
+                                    conn_s.execute("UPDATE matches SET score_t1=%s, score_t2=%s, winner_id=%s, status='completed', maps_played=%s WHERE id=%s", 
+                                                 (final_s1, final_s2, final_winner, played_cnt, int(m['id'])))
+                                    
+                                    if 'pending_match_db_id' in st.session_state:
+                                        try:
+                                            conn_s.execute("DELETE FROM pending_matches WHERE id=%s", (int(st.session_state['pending_match_db_id']),))
+                                        except: pass
+                                        
+                                    conn_s.commit()
+                                except Exception as e:
+                                    if 'conn_s' in locals(): conn_s.rollback()
+                                    st.error(f"Error saving locally: {e}")
+                                finally:
+                                    if 'conn_s' in locals(): conn_s.close()
+                                    
+                            # Cleanup State
+                            if 'pending_match_db_id' in st.session_state:
+                                del st.session_state['pending_match_db_id']
+                                del st.session_state['pending_match_request']
+                                if 'auto_selected_match_id' in st.session_state: del st.session_state['auto_selected_match_id']
+                                if 'auto_selected_match_week' in st.session_state: del st.session_state['auto_selected_match_week']
+
+                            st.cache_data.clear()
+                            st.success(f"Successfully saved and updated totals!")
+                            time.sleep(1)
+                            st.rerun()
 
         st.divider()
         st.subheader("Players Admin")
@@ -4256,98 +4505,178 @@ elif page == "Admin Panel":
                 tmn_new = st.selectbox("Team", [""] + team_names, index=0)
                 add_ok = st.form_submit_button("Create Player")
                 if add_ok and nm_new:
-                    conn_add = get_conn()
-                    # Check for duplicates
                     rid_clean = rid_new.strip() if rid_new else ""
                     nm_clean = nm_new.strip()
-                    
+                    dtid_new = team_map.get(tmn_new) if tmn_new else None
                     can_add = True
-                    if rid_clean:
-                        existing_rid = pd.read_sql("SELECT name FROM players WHERE LOWER(riot_id) = %s", conn_add, params=(rid_clean.lower(),))
-                        if not existing_rid.empty:
-                            st.error(f"Error: A player ('{existing_rid.iloc[0]['name']}') already has Riot ID '{rid_clean}'.")
-                            conn_add.close()
-                            can_add = False
                     
-                    if can_add:
-                        existing_name = pd.read_sql("SELECT id FROM players WHERE LOWER(name) = %s", conn_add, params=(nm_clean.lower(),))
-                        if not existing_name.empty:
-                            st.error(f"Error: A player named '{nm_clean}' already exists.")
-                            conn_add.close()
-                            can_add = False
+                    saved_via_sdk = False
+                    if supabase:
+                        try:
+                            # SDK Check for duplicates
+                            if rid_clean:
+                                res_rid = supabase.table("players").select("name").ilike("riot_id", rid_clean).execute()
+                                if res_rid.data:
+                                    st.error(f"Error: A player ('{res_rid.data[0]['name']}') already has Riot ID '{rid_clean}'.")
+                                    can_add = False
+                                    
+                            if can_add:
+                                res_name = supabase.table("players").select("id").ilike("name", nm_clean).execute()
+                                if res_name.data:
+                                    st.error(f"Error: A player named '{nm_clean}' already exists.")
+                                    can_add = False
+                                    
+                            if can_add:
+                                # Insert via SDK
+                                res_in = supabase.table("players").insert({
+                                    "name": nm_clean, 
+                                    "riot_id": rid_clean, 
+                                    "rank": rk_new, 
+                                    "discord_handle": dh_new, 
+                                    "default_team_id": dtid_new
+                                }).execute()
+                                if res_in.data:
+                                    if 'pending_player_db_id' in st.session_state:
+                                        try:
+                                            supabase.table("pending_players").delete().eq("id", st.session_state['pending_player_db_id']).execute()
+                                        except: pass
+                                    saved_via_sdk = True
+                                    st.success("Player added (Cloud)")
+                        except Exception as e:
+                            st.warning(f"Supabase SDK add failed: {e}")
 
-                    if can_add:
-                        dtid_new = team_map.get(tmn_new) if tmn_new else None
-                        conn_add.execute("INSERT INTO players (name, riot_id, rank, discord_handle, default_team_id) VALUES (%s, %s, %s, %s, %s)", (nm_clean, rid_clean, rk_new, dh_new, dtid_new))
-                        conn_add.commit()
-                        conn_add.close()
-                        st.success("Player added")
-                        
-                        # CLEANUP PENDING PLAYER REQUEST (DATABASE)
+                    if not saved_via_sdk and can_add:
+                        conn_add = get_conn()
+                        try:
+                            if rid_clean:
+                                existing_rid = pd.read_sql("SELECT name FROM players WHERE LOWER(riot_id) = %s", conn_add, params=(rid_clean.lower(),))
+                                if not existing_rid.empty:
+                                    st.error(f"Error: A player ('{existing_rid.iloc[0]['name']}') already has Riot ID '{rid_clean}'.")
+                                    can_add = False
+                            
+                            if can_add:
+                                existing_name = pd.read_sql("SELECT id FROM players WHERE LOWER(name) = %s", conn_add, params=(nm_clean.lower(),))
+                                if not existing_name.empty:
+                                    st.error(f"Error: A player named '{nm_clean}' already exists.")
+                                    can_add = False
+                                    
+                            if can_add:
+                                conn_add.execute("INSERT INTO players (name, riot_id, rank, discord_handle, default_team_id) VALUES (%s, %s, %s, %s, %s)", (nm_clean, rid_clean, rk_new, dh_new, dtid_new))
+                                
+                                if 'pending_player_db_id' in st.session_state:
+                                    try:
+                                        conn_add.execute("DELETE FROM pending_players WHERE id=%s", (int(st.session_state['pending_player_db_id']),))
+                                    except: pass
+                                
+                                conn_add.commit()
+                                st.success("Player added (Local)")
+                                saved_via_sdk = True # reuse flag to show success
+                        except Exception as e:
+                            if 'conn_add' in locals(): conn_add.rollback()
+                            st.error(f"Error adding locally: {e}")
+                        finally:
+                            if 'conn_add' in locals(): conn_add.close()
+
+                    if saved_via_sdk:
                         if 'pending_player_db_id' in st.session_state:
-                            try:
-                                pdbid = st.session_state['pending_player_db_id']
-                                conn_d = get_conn()
-                                conn_d.execute("DELETE FROM pending_players WHERE id=%s", (int(pdbid),))
-                                conn_d.commit()
-                                conn_d.close()
-                                st.toast("Bot player request cleared from database.")
-                                del st.session_state['pending_player_db_id']
-                                del st.session_state['pending_player_request']
-                            except: pass
-
+                            del st.session_state['pending_player_db_id']
+                            del st.session_state['pending_player_request']
                         st.rerun()
             
             if st.button("🔍 Cleanup Duplicate Players", help="Merge players with exact same Riot ID or case-insensitive name"):
-                conn_clean = get_conn()
-                try:
-                    players = pd.read_sql("SELECT id, name, riot_id FROM players", conn_clean)
-                    players['name_lower'] = players['name'].str.lower().str.strip()
-                    players['riot_lower'] = players['riot_id'].str.lower().str.strip().fillna("")
-                    
-                    merged_count = 0
-                    # 1. Exact Riot ID duplicates
-                    riot_dupes = players[players['riot_lower'] != ""][players.duplicated('riot_lower', keep=False)]
-                    for rid, group in riot_dupes.groupby('riot_lower'):
-                        group = group.sort_values('id')
-                        keep_id = group.iloc[0]['id']
-                        remove_ids = group.iloc[1:]['id'].tolist()
-                        for rid_to_rem in remove_ids:
-                            conn_clean.execute("UPDATE match_stats_map SET player_id = %s WHERE player_id = %s", (int(keep_id), int(rid_to_rem)))
-                            conn_clean.execute("UPDATE match_stats_map SET subbed_for_id = %s WHERE subbed_for_id = %s", (int(keep_id), int(rid_to_rem)))
-                            conn_clean.execute("UPDATE match_stats SET player_id = %s WHERE player_id = %s", (int(keep_id), int(rid_to_rem)))
-                            conn_clean.execute("UPDATE match_stats SET subbed_for_id = %s WHERE subbed_for_id = %s", (int(keep_id), int(rid_to_rem)))
-                            conn_clean.execute("DELETE FROM players WHERE id = %s", (int(rid_to_rem),))
-                            merged_count += 1
-                    
-                    # 2. Case-insensitive Name duplicates (only if Riot ID matches or one is empty)
-                    name_dupes = players[players.duplicated('name_lower', keep=False)]
-                    for name, group in name_dupes.groupby('name_lower'):
-                        group = group.sort_values('id')
-                        keep_id = group.iloc[0]['id']
-                        remove_ids = group.iloc[1:]['id'].tolist()
-                        for rid_to_rem in remove_ids:
-                            # Re-verify it still exists (might have been deleted by Riot ID check)
-                            exists = conn_clean.execute("SELECT id FROM players WHERE id=%s", (int(rid_to_rem),)).fetchone()
-                            if exists:
+                merged_count = 0
+                saved_via_sdk = False
+                
+                if supabase:
+                    try:
+                        res = supabase.table("players").select("id, name, riot_id").execute()
+                        if res.data:
+                            players = pd.DataFrame(res.data)
+                            players['name_lower'] = players['name'].str.lower().str.strip()
+                            players['riot_lower'] = players['riot_id'].str.lower().str.strip().fillna("")
+                            
+                            # 1. Exact Riot ID duplicates
+                            riot_dupes = players[players['riot_lower'] != ""][players.duplicated('riot_lower', keep=False)]
+                            for rid, group in riot_dupes.groupby('riot_lower'):
+                                group = group.sort_values('id')
+                                keep_id = group.iloc[0]['id']
+                                remove_ids = group.iloc[1:]['id'].tolist()
+                                for rid_to_rem in remove_ids:
+                                    supabase.table("match_stats_map").update({"player_id": int(keep_id)}).eq("player_id", int(rid_to_rem)).execute()
+                                    supabase.table("match_stats_map").update({"subbed_for_id": int(keep_id)}).eq("subbed_for_id", int(rid_to_rem)).execute()
+                                    supabase.table("match_stats").update({"player_id": int(keep_id)}).eq("player_id", int(rid_to_rem)).execute()
+                                    supabase.table("match_stats").update({"subbed_for_id": int(keep_id)}).eq("subbed_for_id", int(rid_to_rem)).execute()
+                                    supabase.table("players").delete().eq("id", int(rid_to_rem)).execute()
+                                    merged_count += 1
+                            
+                            # 2. Case-insensitive Name duplicates
+                            res_after = supabase.table("players").select("id, name, riot_id").execute()
+                            players_after = pd.DataFrame(res_after.data)
+                            players_after['name_lower'] = players_after['name'].str.lower().str.strip()
+                            name_dupes = players_after[players_after.duplicated('name_lower', keep=False)]
+                            for name, group in name_dupes.groupby('name_lower'):
+                                group = group.sort_values('id')
+                                keep_id = group.iloc[0]['id']
+                                remove_ids = group.iloc[1:]['id'].tolist()
+                                for rid_to_rem in remove_ids:
+                                    supabase.table("match_stats_map").update({"player_id": int(keep_id)}).eq("player_id", int(rid_to_rem)).execute()
+                                    supabase.table("match_stats_map").update({"subbed_for_id": int(keep_id)}).eq("subbed_for_id", int(rid_to_rem)).execute()
+                                    supabase.table("match_stats").update({"player_id": int(keep_id)}).eq("player_id", int(rid_to_rem)).execute()
+                                    supabase.table("match_stats").update({"subbed_for_id": int(keep_id)}).eq("subbed_for_id", int(rid_to_rem)).execute()
+                                    supabase.table("players").delete().eq("id", int(rid_to_rem)).execute()
+                                    merged_count += 1
+                            saved_via_sdk = True
+                    except Exception as e:
+                        st.warning(f"SDK Cleanup failed: {e}")
+
+                if not saved_via_sdk:
+                    conn_clean = get_conn()
+                    try:
+                        # Existing SQL logic...
+                        players = pd.read_sql("SELECT id, name, riot_id FROM players", conn_clean)
+                        players['name_lower'] = players['name'].str.lower().str.strip()
+                        players['riot_lower'] = players['riot_id'].str.lower().str.strip().fillna("")
+                        
+                        riot_dupes = players[players['riot_lower'] != ""][players.duplicated('riot_lower', keep=False)]
+                        for rid, group in riot_dupes.groupby('riot_lower'):
+                            group = group.sort_values('id')
+                            keep_id = group.iloc[0]['id']
+                            remove_ids = group.iloc[1:]['id'].tolist()
+                            for rid_to_rem in remove_ids:
                                 conn_clean.execute("UPDATE match_stats_map SET player_id = %s WHERE player_id = %s", (int(keep_id), int(rid_to_rem)))
                                 conn_clean.execute("UPDATE match_stats_map SET subbed_for_id = %s WHERE subbed_for_id = %s", (int(keep_id), int(rid_to_rem)))
                                 conn_clean.execute("UPDATE match_stats SET player_id = %s WHERE player_id = %s", (int(keep_id), int(rid_to_rem)))
                                 conn_clean.execute("UPDATE match_stats SET subbed_for_id = %s WHERE subbed_for_id = %s", (int(keep_id), int(rid_to_rem)))
                                 conn_clean.execute("DELETE FROM players WHERE id = %s", (int(rid_to_rem),))
                                 merged_count += 1
-                    
-                    conn_clean.commit()
-                    if merged_count > 0:
-                        st.cache_data.clear() # Clear cache to show merged players
-                        st.success(f"Successfully merged {merged_count} duplicate records.")
-                        st.rerun()
-                    else:
-                        st.info("No duplicates found to merge.")
-                except Exception as e:
-                    st.error(f"Cleanup error: {e}")
-                finally:
-                    conn_clean.close()
+                        
+                        name_dupes = players[players.duplicated('name_lower', keep=False)]
+                        for name, group in name_dupes.groupby('name_lower'):
+                            group = group.sort_values('id')
+                            keep_id = group.iloc[0]['id']
+                            remove_ids = group.iloc[1:]['id'].tolist()
+                            for rid_to_rem in remove_ids:
+                                exists = conn_clean.execute("SELECT id FROM players WHERE id=%s", (int(rid_to_rem),)).fetchone()
+                                if exists:
+                                    conn_clean.execute("UPDATE match_stats_map SET player_id = %s WHERE player_id = %s", (int(keep_id), int(rid_to_rem)))
+                                    conn_clean.execute("UPDATE match_stats_map SET subbed_for_id = %s WHERE subbed_for_id = %s", (int(keep_id), int(rid_to_rem)))
+                                    conn_clean.execute("UPDATE match_stats SET player_id = %s WHERE player_id = %s", (int(keep_id), int(rid_to_rem)))
+                                    conn_clean.execute("UPDATE match_stats SET subbed_for_id = %s WHERE subbed_for_id = %s", (int(keep_id), int(rid_to_rem)))
+                                    conn_clean.execute("DELETE FROM players WHERE id = %s", (int(rid_to_rem),))
+                                    merged_count += 1
+                        conn_clean.commit()
+                        saved_via_sdk = True
+                    except Exception as e:
+                        st.error(f"Cleanup error: {e}")
+                    finally:
+                        conn_clean.close()
+                
+                if merged_count > 0:
+                    st.cache_data.clear()
+                    st.success(f"Successfully merged {merged_count} duplicate records.")
+                    st.rerun()
+                elif saved_via_sdk:
+                    st.info("No duplicates found to merge.")
 
             st.markdown("---")
             st.subheader("Delete Player")
@@ -4370,27 +4699,43 @@ elif page == "Admin Panel":
                         if not confirm_del:
                             st.warning("Please confirm the deletion.")
                         else:
-                            conn_exec = get_conn()
-                            try:
-                                 # Clean up references in match_stats_map and match_stats
-                                 # For player_id, we delete the stats because they belong to the deleted player
-                                 conn_exec.execute("DELETE FROM match_stats_map WHERE player_id = %s", (int(p_to_del_id),))
-                                 conn_exec.execute("DELETE FROM match_stats WHERE player_id = %s", (int(p_to_del_id),))
-                                 
-                                 # For subbed_for_id, we only set it to NULL to keep the stats of the sub
-                                 conn_exec.execute("UPDATE match_stats_map SET subbed_for_id = NULL WHERE subbed_for_id = %s", (int(p_to_del_id),))
-                                 conn_exec.execute("UPDATE match_stats SET subbed_for_id = NULL WHERE subbed_for_id = %s", (int(p_to_del_id),))
-                                 
-                                 # Delete the player
-                                 conn_exec.execute("DELETE FROM players WHERE id = %s", (int(p_to_del_id),))
-                                 conn_exec.commit()
-                                 st.cache_data.clear() # CRITICAL: Clear cache to update UI
-                                 st.success(f"Player '{p_to_del_name}' deleted.")
-                                 st.rerun()
-                            except Exception as e:
-                                st.error(f"Deletion error: {e}")
-                            finally:
-                                conn_exec.close()
+                            saved_via_sdk = False
+                            if supabase:
+                                try:
+                                    # Cleanup references in match_stats_map and match_stats
+                                    supabase.table("match_stats_map").delete().eq("player_id", int(p_to_del_id)).execute()
+                                    supabase.table("match_stats").delete().eq("player_id", int(p_to_del_id)).execute()
+                                    
+                                    # Set subbed_for_id to NULL
+                                    supabase.table("match_stats_map").update({"subbed_for_id": None}).eq("subbed_for_id", int(p_to_del_id)).execute()
+                                    supabase.table("match_stats").update({"subbed_for_id": None}).eq("subbed_for_id", int(p_to_del_id)).execute()
+                                    
+                                    # Delete player
+                                    supabase.table("players").delete().eq("id", int(p_to_del_id)).execute()
+                                    saved_via_sdk = True
+                                    st.success(f"Player '{p_to_del_name}' deleted (Cloud).")
+                                except Exception as e:
+                                    st.warning(f"SDK Deletion failed: {e}")
+
+                            if not saved_via_sdk:
+                                conn_exec = get_conn()
+                                try:
+                                     conn_exec.execute("DELETE FROM match_stats_map WHERE player_id = %s", (int(p_to_del_id),))
+                                     conn_exec.execute("DELETE FROM match_stats WHERE player_id = %s", (int(p_to_del_id),))
+                                     conn_exec.execute("UPDATE match_stats_map SET subbed_for_id = NULL WHERE subbed_for_id = %s", (int(p_to_del_id),))
+                                     conn_exec.execute("UPDATE match_stats SET subbed_for_id = NULL WHERE subbed_for_id = %s", (int(p_to_del_id),))
+                                     conn_exec.execute("DELETE FROM players WHERE id = %s", (int(p_to_del_id),))
+                                     conn_exec.commit()
+                                     st.success(f"Player '{p_to_del_name}' deleted (Local).")
+                                     saved_via_sdk = True
+                                except Exception as e:
+                                    st.error(f"Deletion error: {e}")
+                                finally:
+                                    conn_exec.close()
+                            
+                            if saved_via_sdk:
+                                st.cache_data.clear()
+                                st.rerun()
                 else:
                     st.info("No players found to delete.")
         cfa, cfb, cfc = st.columns([2,2,2])
@@ -4422,19 +4767,28 @@ elif page == "Admin Panel":
             key="player_editor_main"
         )
         if st.button("Save Players"):
-            conn_up = get_conn()
-            # Get current state to check for duplicates
-            current_players = pd.read_sql("SELECT id, name, riot_id FROM players", conn_up)
+            error_found = False
+            saved_via_sdk = False
+            
+            # Duplicate check
+            current_players = pd.DataFrame()
+            if supabase:
+                try:
+                    res = supabase.table("players").select("id, name, riot_id").execute()
+                    if res.data: current_players = pd.DataFrame(res.data)
+                except: pass
+            
+            if current_players.empty:
+                conn_chk = get_conn()
+                current_players = pd.read_sql("SELECT id, name, riot_id FROM players", conn_chk)
+                conn_chk.close()
+                
             current_players['name_lower'] = current_players['name'].str.lower().str.strip()
             current_players['riot_lower'] = current_players['riot_id'].str.lower().str.strip().fillna("")
             
-            # Vectorized duplicate check
-            error_found = False
             if not edited.empty:
                 nm_lower = edited['name'].str.lower().str.strip()
                 rid_lower = edited['riot_id'].str.lower().str.strip().fillna("")
-                
-                # 1. Check internal duplicates in 'edited'
                 if nm_lower.duplicated().any():
                     dup_name = edited.loc[nm_lower.duplicated(), 'name'].iloc[0]
                     st.error(f"Error: Player name '{dup_name}' is duplicated in your edits.")
@@ -4445,66 +4799,86 @@ elif page == "Admin Panel":
                     error_found = True
                 
                 if not error_found:
-                    # 2. Check duplicates against 'current_players'
-                    # We check each row in 'edited' against 'current_players' (excluding the same ID)
                     for row in edited.itertuples():
                         pid = getattr(row, 'id', None)
                         nm = str(row.name).strip()
                         rid = str(row.riot_id).strip() if pd.notna(row.riot_id) else ""
-                        
-                        nm_l = nm.lower()
-                        rid_l = rid.lower()
-                        
-                        # Find potential conflicts
                         others = current_players[current_players['id'] != pid] if pd.notna(pid) else current_players
-                        
-                        if nm_l in others['name_lower'].values:
-                            st.error(f"Error: Player name '{nm}' already exists in the database. Changes not saved.")
-                            error_found = True
-                            break
-                        
-                        if rid_l and rid_l in others['riot_lower'].values:
-                            st.error(f"Error: Riot ID '{rid}' already exists in the database. Changes not saved.")
-                            error_found = True
-                            break
+                        if nm.lower() in others['name_lower'].values:
+                            st.error(f"Error: Player name '{nm}' already exists. Changes not saved.")
+                            error_found = True; break
+                        if rid and rid.lower() in others['riot_lower'].values:
+                            st.error(f"Error: Riot ID '{rid}' already exists. Changes not saved.")
+                            error_found = True; break
             
             if not error_found:
-                # Identify deleted players
-                original_ids = set(fdf['id'].dropna().astype(int).tolist())
-                edited_ids = set(edited['id'].dropna().astype(int).tolist())
-                deleted_ids = original_ids - edited_ids
-                
-                if deleted_ids:
-                    for pid in deleted_ids:
-                         # For player_id, we delete the stats because they belong to the deleted player
-                         conn_up.execute("DELETE FROM match_stats_map WHERE player_id = %s", (pid,))
-                         conn_up.execute("DELETE FROM match_stats WHERE player_id = %s", (pid,))
-                         
-                         # For subbed_for_id, we only set it to NULL to keep the stats of the sub
-                         conn_up.execute("UPDATE match_stats_map SET subbed_for_id = NULL WHERE subbed_for_id = %s", (pid,))
-                         conn_up.execute("UPDATE match_stats SET subbed_for_id = NULL WHERE subbed_for_id = %s", (pid,))
-                         
-                         # Delete the player
-                         conn_up.execute("DELETE FROM players WHERE id = %s", (pid,))
+                # Try SDK First
+                if supabase:
+                    try:
+                        original_ids = set(fdf['id'].dropna().astype(int).tolist())
+                        edited_ids = set(edited['id'].dropna().astype(int).tolist())
+                        deleted_ids = original_ids - edited_ids
+                        
+                        if deleted_ids:
+                            for pid in deleted_ids:
+                                supabase.table("match_stats_map").delete().eq("player_id", pid).execute()
+                                supabase.table("match_stats").delete().eq("player_id", pid).execute()
+                                supabase.table("match_stats_map").update({"subbed_for_id": None}).eq("subbed_for_id", pid).execute()
+                                supabase.table("match_stats").update({"subbed_for_id": None}).eq("subbed_for_id", pid).execute()
+                                supabase.table("players").delete().eq("id", pid).execute()
 
-                for row in edited.itertuples():
-                    pid = getattr(row, 'id', None)
-                    nm = str(row.name).strip()
-                    rid = str(row.riot_id).strip() if pd.notna(row.riot_id) else ""
-                    rk = getattr(row, 'rank', "Unranked") or "Unranked"
-                    tmn = getattr(row, 'team', None)
-                    dtid = team_map.get(tmn) if pd.notna(tmn) else None
-                    
-                    if pd.isna(pid):
-                        if user_role in ['admin', 'dev']:
-                            conn_up.execute("INSERT INTO players (name, riot_id, rank, discord_handle, default_team_id) VALUES (%s, %s, %s, %s, %s)", (nm, rid, rk, getattr(row, 'discord_handle', ""), dtid))
-                    else:
-                        conn_up.execute("UPDATE players SET name=%s, riot_id=%s, rank=%s, discord_handle=%s, default_team_id=%s WHERE id=%s", (nm, rid, rk, getattr(row, 'discord_handle', ""), dtid, int(pid)))
-                conn_up.commit()
-                st.cache_data.clear() # Clear cache to show player changes immediately
-                st.success("Players saved")
-                st.rerun()
-            conn_up.close()
+                        for row in edited.itertuples():
+                            pid = getattr(row, 'id', None)
+                            nm = str(row.name).strip()
+                            rid = str(row.riot_id).strip() if pd.notna(row.riot_id) else ""
+                            rk = getattr(row, 'rank', "Unranked") or "Unranked"
+                            tmn = getattr(row, 'team', None)
+                            dtid = team_map.get(tmn) if pd.notna(tmn) else None
+                            dh = getattr(row, 'discord_handle', "")
+                            
+                            payload = {"name": nm, "riot_id": rid, "rank": rk, "discord_handle": dh, "default_team_id": dtid}
+                            if pd.isna(pid):
+                                if user_role in ['admin', 'dev']:
+                                    supabase.table("players").insert(payload).execute()
+                            else:
+                                supabase.table("players").update(payload).eq("id", int(pid)).execute()
+                        saved_via_sdk = True
+                    except Exception as e:
+                        st.warning(f"SDK Save Players failed: {e}")
+
+                if not saved_via_sdk:
+                    conn_up = get_conn()
+                    try:
+                        original_ids = set(fdf['id'].dropna().astype(int).tolist())
+                        edited_ids = set(edited['id'].dropna().astype(int).tolist())
+                        deleted_ids = original_ids - edited_ids
+                        if deleted_ids:
+                            for pid in deleted_ids:
+                                 conn_up.execute("DELETE FROM match_stats_map WHERE player_id = %s", (pid,))
+                                 conn_up.execute("DELETE FROM match_stats WHERE player_id = %s", (pid,))
+                                 conn_up.execute("UPDATE match_stats_map SET subbed_for_id = NULL WHERE subbed_for_id = %s", (pid,))
+                                 conn_up.execute("UPDATE match_stats SET subbed_for_id = NULL WHERE subbed_for_id = %s", (pid,))
+                                 conn_up.execute("DELETE FROM players WHERE id = %s", (pid,))
+                        for row in edited.itertuples():
+                            pid = getattr(row, 'id', None); nm = str(row.name).strip(); rid = str(row.riot_id).strip() if pd.notna(row.riot_id) else ""
+                            rk = getattr(row, 'rank', "Unranked") or "Unranked"; tmn = getattr(row, 'team', None); dtid = team_map.get(tmn) if pd.notna(tmn) else None
+                            if pd.isna(pid):
+                                if user_role in ['admin', 'dev']:
+                                    conn_up.execute("INSERT INTO players (name, riot_id, rank, discord_handle, default_team_id) VALUES (%s, %s, %s, %s, %s)", (nm, rid, rk, getattr(row, 'discord_handle', ""), dtid))
+                            else:
+                                conn_up.execute("UPDATE players SET name=%s, riot_id=%s, rank=%s, discord_handle=%s, default_team_id=%s WHERE id=%s", (nm, rid, rk, getattr(row, 'discord_handle', ""), dtid, int(pid)))
+                        conn_up.commit()
+                        saved_via_sdk = True
+                    except Exception as e:
+                        if 'conn_up' in locals(): conn_up.rollback()
+                        st.error(f"Error saving players locally: {e}")
+                    finally:
+                        conn_up.close()
+                
+                if saved_via_sdk:
+                    st.cache_data.clear()
+                    st.success("Players saved")
+                    st.rerun()
 
         st.divider()
         st.subheader("Schedule Manager")
@@ -4518,13 +4892,40 @@ elif page == "Admin Panel":
         t2 = st.selectbox("Team 2", tnames, index=(1 if len(tnames)>1 else 0))
         fmt = st.selectbox("Format", ["BO1","BO3","BO5"], index=1)
         if st.button("Add Match"):
-            conn_ins = get_conn()
             id1 = int(teams_df[teams_df['name'] == t1].iloc[0]['id'])
             id2 = int(teams_df[teams_df['name'] == t2].iloc[0]['id'])
-            conn_ins.execute("INSERT INTO matches (week, group_name, status, format, team1_id, team2_id, score_t1, score_t2, maps_played, match_type) VALUES (%s, %s, 'scheduled', %s, %s, %s, 0, 0, 0, 'regular')", (int(w), gsel or None, fmt, id1, id2))
-            conn_ins.commit()
-            conn_ins.close()
-            st.success("Match added")
+            
+            saved_via_sdk = False
+            if supabase:
+                try:
+                    payload = {
+                        "week": int(w), 
+                        "group_name": gsel or None, 
+                        "status": "scheduled", 
+                        "format": fmt, 
+                        "team1_id": id1, 
+                        "team2_id": id2, 
+                        "score_t1": 0, 
+                        "score_t2": 0, 
+                        "maps_played": 0, 
+                        "match_type": "regular"
+                    }
+                    supabase.table("matches").insert(payload).execute()
+                    saved_via_sdk = True
+                    st.success("Match added (Cloud)")
+                except Exception as e:
+                    st.warning(f"SDK Add Match failed: {e}")
+
+            if not saved_via_sdk:
+                conn_ins = get_conn()
+                try:
+                    conn_ins.execute("INSERT INTO matches (week, group_name, status, format, team1_id, team2_id, score_t1, score_t2, maps_played, match_type) VALUES (%s, %s, 'scheduled', %s, %s, %s, 0, 0, 0, 'regular')", (int(w), gsel or None, fmt, id1, id2))
+                    conn_ins.commit()
+                    st.success("Match added (Local)")
+                except Exception as e:
+                    st.error(f"Error adding match locally: {e}")
+                finally:
+                    conn_ins.close()
             st.rerun()
 
 elif page == "Substitutions Log":
