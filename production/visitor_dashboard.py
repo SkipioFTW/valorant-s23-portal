@@ -751,6 +751,56 @@ def fetch_match_from_github(match_id):
                 return None, f"GitHub API error: {r.status_code}"
         except Exception as e:
             return None, f"GitHub API fetch error: {str(e)}"
+
+def list_files_from_github(path):
+    """Lists files in a GitHub directory."""
+    owner = get_secret("GH_OWNER")
+    repo = get_secret("GH_REPO")
+    token = get_secret("GH_TOKEN")
+    branch = get_secret("GH_BRANCH", "main")
+    if not owner or not repo or not token: return []
+    url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={branch}"
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+    try:
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code == 200:
+            return [f for f in r.json() if f['type'] == 'file' and f['name'].endswith('.json')]
+    except: pass
+    return []
+
+def delete_file_from_github(path, message="Delete file"):
+    """Deletes a file from GitHub."""
+    owner = get_secret("GH_OWNER")
+    repo = get_secret("GH_REPO")
+    token = get_secret("GH_TOKEN")
+    branch = get_secret("GH_BRANCH", "main")
+    if not owner or not repo or not token: return False
+    url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+    try:
+        r = requests.get(url, headers=headers, params={"ref": branch}, timeout=10)
+        if r.status_code == 200:
+            sha = r.json().get("sha")
+            payload = {"message": message, "sha": sha, "branch": branch}
+            r_del = requests.delete(url, headers=headers, json=payload, timeout=10)
+            return r_del.status_code in [200, 204]
+    except: pass
+    return False
+
+def get_file_content_from_github(path):
+    """Fetches and parses a JSON file from GitHub."""
+    owner = get_secret("GH_OWNER")
+    repo = get_secret("GH_REPO")
+    token = get_secret("GH_TOKEN")
+    branch = get_secret("GH_BRANCH", "main")
+    if not owner or not repo or not token: return None
+    url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={branch}"
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github.raw"}
+    try:
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code == 200: return r.json()
+    except: pass
+    return None
     else:
         # Fallback to public raw URL
         raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/assets/matches/match_{match_id}.json"
@@ -3148,6 +3198,97 @@ elif page == "Admin Panel":
 
         st.markdown('<div style="margin-top: 30px;"></div>', unsafe_allow_html=True)
 
+        # START BOT PENDING REQUESTS
+        st.subheader("🤖 Bot Pending Requests")
+        
+        # Scanner for matches
+        pm_path = "assets/pending_matches"
+        pm_files = list_files_from_github(pm_path)
+        if not pm_files:
+            pm_dir = os.path.join(os.getcwd(), pm_path)
+            if os.path.exists(pm_dir):
+                pm_files = [{"name": f, "path": f"{pm_path}/{f}", "is_local": True} for f in os.listdir(pm_dir) if f.endswith(".json")]
+        else:
+            for f in pm_files: f["is_local"] = False
+
+        # Scanner for players
+        pp_path = "assets/pending_players"
+        pp_files = list_files_from_github(pp_path)
+        if not pp_files:
+            pp_dir = os.path.join(os.getcwd(), pp_path)
+            if os.path.exists(pp_dir):
+                pp_files = [{"name": f, "path": f"{pp_path}/{f}", "is_local": True} for f in os.listdir(pp_dir) if f.endswith(".json")]
+        else:
+            for f in pp_files: f["is_local"] = False
+        
+        col_pm, col_pp = st.columns(2)
+        
+        with col_pm:
+            st.markdown("#### Pending Matches")
+            if not pm_files:
+                st.info("No pending match requests.")
+            else:
+                pm_list = []
+                for f in pm_files:
+                    try:
+                        if f.get("is_local"):
+                            with open(os.path.join(os.getcwd(), f['path']), 'r') as file:
+                                d = json.load(file)
+                        else:
+                            d = get_file_content_from_github(f['path'])
+                        if d:
+                            pm_list.append({"File": f['name'], "Teams": f"{d.get('team_a')} vs {d.get('team_b')}", "By": d.get('submitted_by'), "Source": "Local" if f.get("is_local") else "GitHub"})
+                    except: pass
+                if pm_list:
+                    st.dataframe(pd.DataFrame(pm_list), use_container_width=True, hide_index=True)
+                    sel_pm_name = st.selectbox("Select Match to Process", [f['name'] for f in pm_files], key="pm_proc_sel")
+                    sel_pm_obj = next(f for f in pm_files if f['name'] == sel_pm_name)
+                    if st.button("🚀 Process Match Request"):
+                        if sel_pm_obj.get("is_local"):
+                            with open(os.path.join(os.getcwd(), sel_pm_obj['path']), 'r') as f:
+                                req = json.load(f)
+                        else:
+                            req = get_file_content_from_github(sel_pm_obj['path'])
+                        st.session_state['pending_match_request'] = req
+                        st.session_state['pending_match_file'] = sel_pm_obj['path']
+                        st.session_state['pending_match_is_local'] = sel_pm_obj.get("is_local", False)
+                        st.success("Request loaded into Match Editor below!")
+                        st.rerun()
+
+        with col_pp:
+            st.markdown("#### Pending Players")
+            if not pp_files:
+                st.info("No pending player requests.")
+            else:
+                pp_list = []
+                for f in pp_files:
+                    try:
+                        if f.get("is_local"):
+                            with open(os.path.join(os.getcwd(), f['path']), 'r') as file:
+                                d = json.load(file)
+                        else:
+                            d = get_file_content_from_github(f['path'])
+                        if d:
+                            pp_list.append({"File": f['name'], "Player": d.get('riot_id'), "By": d.get('submitted_by'), "Source": "Local" if f.get("is_local") else "GitHub"})
+                    except: pass
+                if pp_list:
+                    st.dataframe(pd.DataFrame(pp_list), use_container_width=True, hide_index=True)
+                    sel_pp_name = st.selectbox("Select Player to Process", [f['name'] for f in pp_files], key="pp_proc_sel")
+                    sel_pp_obj = next(f for f in pp_files if f['name'] == sel_pp_name)
+                    if st.button("🚀 Process Player Request"):
+                        if sel_pp_obj.get("is_local"):
+                            with open(os.path.join(os.getcwd(), sel_pp_obj['path']), 'r') as f:
+                                req = json.load(f)
+                        else:
+                            req = get_file_content_from_github(sel_pp_obj['path'])
+                        st.session_state['pending_player_request'] = req
+                        st.session_state['pending_player_file'] = sel_pp_obj['path']
+                        st.session_state['pending_player_is_local'] = sel_pp_obj.get("is_local", False)
+                        st.success("Request loaded into Player Add form below!")
+                        st.rerun()
+        
+        st.divider()
+
         if st.session_state.get('role', 'admin') == 'dev':
             st.subheader("Database Reset")
             do_reset = st.checkbox("Confirm reset all tables")
@@ -3281,9 +3422,17 @@ elif page == "Admin Panel":
                 
                     # Match ID/URL input and JSON upload for automatic pre-filling
                     st.write("#### 🤖 Auto-Fill from Tracker.gg")
+                    
+                    # PRE-FILL FROM BOT REQUEST
+                    def_val = ""
+                    if 'pending_match_request' in st.session_state:
+                        req = st.session_state['pending_match_request']
+                        def_val = req.get('url', "")
+                        st.info(f"Filling from Bot Request: {req.get('team_a')} vs {req.get('team_b')}")
+                    
                     col_json1, col_json2 = st.columns([2, 1])
                     with col_json1:
-                        match_input = st.text_input("Tracker.gg Match URL or ID", key=f"mid_{m['id']}_{map_idx}", placeholder="https://tracker.gg/valorant/match/...")
+                        match_input = st.text_input("Tracker.gg Match URL or ID", value=def_val, key=f"mid_{m['id']}_{map_idx}", placeholder="https://tracker.gg/valorant/match/...")
                     with col_json2:
                         if st.button("Apply Match Data", key=f"force_json_{m['id']}_{map_idx}", use_container_width=True):
                             if match_input:
@@ -3516,6 +3665,20 @@ elif page == "Admin Panel":
                                              (final_s1, final_s2, final_winner, played_cnt, int(m['id'])))
                                 
                                 conn_s.commit()
+                                
+                                # CLEANUP PENDING REQUEST
+                                if 'pending_match_file' in st.session_state:
+                                    try:
+                                        pfile = st.session_state['pending_match_file']
+                                        if st.session_state.get('pending_match_is_local'):
+                                            if os.path.exists(pfile): os.remove(pfile)
+                                        else:
+                                            delete_file_from_github(pfile, f"Processed bot match request: {m.get('id')}")
+                                        st.toast("Bot request cleaned up.")
+                                        del st.session_state['pending_match_file']
+                                        del st.session_state['pending_match_request']
+                                    except: pass
+
                                 st.cache_data.clear()
                                 st.success(f"Successfully saved Map {map_idx+1} and updated match totals!")
                                 st.rerun()
@@ -3539,10 +3702,21 @@ elif page == "Admin Panel":
         user_role = st.session_state.get('role', 'admin')
         if user_role in ['admin', 'dev']:
             st.subheader("Add Player")
+            # PRE-FILL FROM BOT REQUEST
+            def_name = ""
+            def_rid = ""
+            def_rk = rvals[0]
+            if 'pending_player_request' in st.session_state:
+                preq = st.session_state['pending_player_request']
+                def_rid = preq.get('riot_id', "")
+                def_rk = preq.get('rank', rvals[0])
+                if def_rk not in rvals: def_rk = rvals[0]
+                st.info(f"Filling from Bot Request: {def_rid}")
+
             with st.form("add_player_admin"):
-                nm_new = st.text_input("Name")
-                rid_new = st.text_input("Riot ID")
-                rk_new = st.selectbox("Rank", rvals, index=0)
+                nm_new = st.text_input("Name", value=def_name)
+                rid_new = st.text_input("Riot ID", value=def_rid)
+                rk_new = st.selectbox("Rank", rvals, index=rvals.index(def_rk))
                 tmn_new = st.selectbox("Team", [""] + team_names, index=0)
                 add_ok = st.form_submit_button("Create Player")
                 if add_ok and nm_new:
@@ -3572,6 +3746,20 @@ elif page == "Admin Panel":
                         conn_add.commit()
                         conn_add.close()
                         st.success("Player added")
+                        
+                        # CLEANUP PENDING PLAYER REQUEST
+                        if 'pending_player_file' in st.session_state:
+                            try:
+                                pfile = st.session_state['pending_player_file']
+                                if st.session_state.get('pending_player_is_local'):
+                                    if os.path.exists(pfile): os.remove(pfile)
+                                else:
+                                    delete_file_from_github(pfile, f"Processed bot player request: {rid_new}")
+                                st.toast("Bot player request cleaned up.")
+                                del st.session_state['pending_player_file']
+                                del st.session_state['pending_player_request']
+                            except: pass
+
                         st.rerun()
             
             if st.button("🔍 Cleanup Duplicate Players", help="Merge players with exact same Riot ID or case-insensitive name"):

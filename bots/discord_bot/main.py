@@ -85,33 +85,11 @@ def upload_to_github(path, content_str, message):
     else:
         return False, f"Error {r.status_code}: {r.text}"
 
-def scrape_match(match_url):
-    import cloudscraper
-    
-    # Extract ID
-    try:
-        if "tracker.gg" in match_url:
-            match_id = match_url.split('/')[-1]
-        else:
-            match_id = match_url
-    except:
-        return None, None, "Invalid URL format"
 
-    api_url = f"https://api.tracker.gg/api/v2/valorant/standard/matches/{match_id}"
-    
-    scraper = cloudscraper.create_scraper()
-    try:
-        r = scraper.get(api_url)
-        if r.status_code == 200:
-            return r.json(), match_id, None
-        else:
-            return None, match_id, f"Tracker API Error: {r.status_code}"
-    except Exception as e:
-        return None, match_id, str(e)
 
 # --- SLASH COMMANDS ---
 
-@bot.tree.command(name="match", description="Scrape match data and upload to Portal")
+@bot.tree.command(name="match", description="Submit a match for Admin verification")
 @discord.app_commands.describe(
     team_a="Name of Team A", 
     team_b="Name of Team B", 
@@ -119,49 +97,38 @@ def scrape_match(match_url):
     url="Tracker.gg Match URL"
 )
 async def match(interaction: discord.Interaction, team_a: str, team_b: str, group: str, url: str):
-    await interaction.response.defer(thinking=True) # Long operation
+    await interaction.response.defer(thinking=True)
     
-    data, match_id, error = scrape_match(url)
-    
-    if error:
-        await interaction.followup.send(f"❌ Scraping failed: {error}")
-        return
-        
-    # Metadata Injection
-    if 'metadata' not in data['data']: data['data']['metadata'] = {}
-    data['data']['metadata']['portal_info'] = {
+    # Extract intended ID or use random UUID if URL is weird
+    match_id = "unknown"
+    try:
+        if "tracker.gg" in url:
+            match_id = url.split('/')[-1]
+        else:
+            import uuid
+            match_id = str(uuid.uuid4())[:8]
+    except:
+        match_id = "unknown"
+
+    # Create Pending Match Object
+    data = {
         "team_a": team_a,
         "team_b": team_b,
         "group": group,
-        "submitter": str(interaction.user),
-        "params": f"{team_a} vs {team_b}"
+        "url": url,
+        "submitted_by": str(interaction.user),
+        "status": "pending_verification",
+        "timestamp": str(interaction.created_at)
     }
 
-    # Analyze Subs
-    player_count = 0
-    try:
-        segments = data['data']['segments']
-        players = [s for s in segments if s['type'] == 'player-summary']
-        player_count = len(players)
-    except:
-        pass
-        
-    warning_msg = ""
-    if player_count < 10:
-        warning_msg += "\n⚠️ **Warning**: Less than 10 players found."
-    elif player_count > 10:
-        warning_msg += f"\n⚠️ **Warning**: Found {player_count} players. Possible substitutions."
-
-    # Upload
+    # Upload to pending_matches folder
     json_str = json.dumps(data, indent=4)
-    file_path = f"assets/matches/match_{match_id}.json"
-    success, result = upload_to_github(file_path, json_str, f"Bot Add Match {match_id}")
+    file_path = f"assets/pending_matches/pending_{match_id}.json"
+    
+    success, result = upload_to_github(file_path, json_str, f"Bot Add Pending Match {match_id}")
     
     if success:
-        await interaction.followup.send(f"✅ **Match Uploaded!**\nFile: `{file_path}`\nLink: {result}{warning_msg}")
-        if "Warning" in warning_msg:
-             # Try to find admin role if possible, or just print text
-             await interaction.followup.send(f"⚠️ **Note to Admins**: Please check for substitutions.", ephemeral=True)
+        await interaction.followup.send(f"✅ **Match Queued for Verification!**\nAdmin will verify scrape data.\nFile: `{file_path}`")
     else:
         await interaction.followup.send(f"❌ GitHub Upload Failed: {result}")
 
