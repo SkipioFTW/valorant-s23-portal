@@ -122,6 +122,14 @@ class UnifiedCursorWrapper:
     def __iter__(self):
         return iter(self.cur)
 
+    # Add Context Manager support
+    def __enter__(self):
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if hasattr(self.cur, "close"):
+            self.cur.close()
+
 class UnifiedDBWrapper:
     def __init__(self, conn):
         self.conn = conn
@@ -143,36 +151,60 @@ class UnifiedDBWrapper:
         self.conn.rollback()
     def __getattr__(self, name):
         return getattr(self.conn, name)
+    
+    # Add Context Manager support
+    def __enter__(self):
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.conn.close()
 
 def get_conn():
-    supabase_url = get_secret("SUPABASE_URL")
+    # Priority: SUPABASE_DB_URL (connection string), then legacy SUPABASE_URL
+    supabase_db_url = get_secret("SUPABASE_DB_URL") or get_secret("SUPABASE_URL")
     
-    if supabase_url:
-        import psycopg2
+    import psycopg2
+    conn = None
+    
+    if supabase_db_url and (supabase_db_url.startswith("postgresql") or "db.tekwoxehaktajyizaacj.supabase.co" in supabase_db_url):
         try:
-            conn = psycopg2.connect(supabase_url)
-            return UnifiedDBWrapper(conn)
+            # Try connecting with the URL string first
+            conn = psycopg2.connect(supabase_db_url)
         except Exception as e:
-            # Check if this is a streamlit environment to use st.error
+            # If URL fails (likely due to special characters), attempt manual parse
+            # Format: postgresql://user:password@host:port/dbname
             try:
-                import streamlit as st
-                st.error(f"⚠️ Supabase Connection Failed: {str(e)}")
+                import re
+                match = re.search(r'postgresql://([^:]+):([^@]+)@([^:/]+):(\d+)/(.+)', supabase_db_url)
+                if match:
+                    user, pwd, host, port, db = match.groups()
+                    # Decode URL encoded chars like %3e to >
+                    from urllib.parse import unquote
+                    conn = psycopg2.connect(
+                        user=unquote(user),
+                        password=unquote(pwd),
+                        host=unquote(host),
+                        port=port,
+                        database=unquote(db),
+                        connect_timeout=10
+                    )
             except:
-                print(f"Supabase Connection Failed: {e}")
-                
-            # Fallback to local if allowed
-            if os.path.exists(DB_PATH):
-                try:
-                    import streamlit as st
-                    st.warning("🔄 Falling back to local database...")
-                except:
-                    print("Falling back to local database...")
-                return UnifiedDBWrapper(sqlite3.connect(DB_PATH))
-            raise e
-    else:
-        if os.path.exists(DB_PATH):
-            return UnifiedDBWrapper(sqlite3.connect(DB_PATH))
-        raise ValueError("No database connection available (SUPABASE_URL missing and local DB not found).")
+                pass
+    
+    if conn:
+        return UnifiedDBWrapper(conn)
+    
+    # Fallback to local
+    if os.path.exists(DB_PATH):
+        try:
+            import streamlit as st
+            if supabase_url:
+                st.warning("⚠️ Supabase connection failed. Falling back to local database.")
+        except:
+            pass
+        return UnifiedDBWrapper(sqlite3.connect(DB_PATH))
+    
+    raise ValueError("No database connection available (Supabase failed and local DB missing).")
 
 def should_use_cache():
     # If no admin is active in the last 5 minutes, we can use cache

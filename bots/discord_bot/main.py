@@ -113,6 +113,14 @@ class UnifiedCursorWrapper:
     def __iter__(self):
         return iter(self.cur)
 
+    # Add Context Manager support
+    def __enter__(self):
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if hasattr(self.cur, "close"):
+            self.cur.close()
+
 class UnifiedDBWrapper:
     def __init__(self, conn):
         self.conn = conn
@@ -130,25 +138,60 @@ class UnifiedDBWrapper:
         self.conn.commit()
     def close(self):
         self.conn.close()
+    def rollback(self):
+        self.conn.rollback()
     def __getattr__(self, name):
         return getattr(self.conn, name)
+    
+    # Add Context Manager support
+    def __enter__(self):
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.conn.close()
 
 def get_db_conn():
-    if SUPABASE_URL:
+    # Priority: SUPABASE_DB_URL, then legacy SUPABASE_URL
+    db_url = os.getenv("SUPABASE_DB_URL") or os.getenv("SUPABASE_URL")
+    
+    if db_url:
         import psycopg2
-        try:
-            # Check if it's a URL or a dictionary (if parsed)
-            if isinstance(SUPABASE_URL, str):
-                conn = psycopg2.connect(SUPABASE_URL)
-            else:
-                conn = psycopg2.connect(**SUPABASE_URL)
+        conn = None
+        # Check if it's a connection string
+        if isinstance(db_url, str) and (db_url.startswith("postgresql") or "db.tekwoxehaktajyizaacj.supabase.co" in db_url):
+            try:
+                conn = psycopg2.connect(db_url)
+            except Exception as e:
+                # Fallback to manual parse if URL fails
+                try:
+                    import re
+                    match = re.search(r'postgresql://([^:]+):([^@]+)@([^:/]+):(\d+)/(.+)', db_url)
+                    if match:
+                        user, pwd, host, port, db = match.groups()
+                        from urllib.parse import unquote
+                        conn = psycopg2.connect(
+                            user=unquote(user),
+                            password=unquote(pwd),
+                            host=unquote(host),
+                            port=port,
+                            database=unquote(db),
+                            connect_timeout=10
+                        )
+                except:
+                    pass
+        elif isinstance(db_url, dict):
+            try:
+                conn = psycopg2.connect(**db_url)
+            except:
+                pass
+                
+        if conn:
             return UnifiedDBWrapper(conn)
-        except Exception as e:
-            print(f"Supabase connection error: {e}")
-            # Fallback to local if absolutely necessary
-            if os.path.exists(DB_PATH):
-                return UnifiedDBWrapper(sqlite3.connect(DB_PATH))
-            return None
+            
+        print("Supabase connection failed, checking for local fallback...")
+        if os.path.exists(DB_PATH):
+            return UnifiedDBWrapper(sqlite3.connect(DB_PATH))
+        return None
     
     if os.path.exists(DB_PATH):
         return UnifiedDBWrapper(sqlite3.connect(DB_PATH))
