@@ -182,93 +182,35 @@ class UnifiedDBWrapper:
         self.conn.close()
 
 def get_conn():
-    # Priority: SUPABASE_DB_URL, then legacy SUPABASE_URL (filtering for Postgres only)
+    # Priority: SUPABASE_DB_URL if available for direct Postgres access
     db_url = get_secret("SUPABASE_DB_URL")
-    fallback_used = False
     
-    if not db_url or not str(db_url).startswith("postgresql"):
-        # Fallback to SUPABASE_URL only if it looks like a postgres string
-        potential_fallback = get_secret("SUPABASE_URL")
-        if potential_fallback and str(potential_fallback).startswith("postgresql"):
-            db_url = potential_fallback
-            fallback_used = True
-            
     import psycopg2
     conn = None
-    last_error = None
     
     if db_url:
         db_url_str = str(db_url).strip().strip('"').strip("'")
-        
-        # Method 1: Try direct connection string
-        try:
-            # Force target_session_attrs=read-write and sslmode=require for stability
-            params = db_url_str
-            if "sslmode" not in db_url_str:
-                params += "?sslmode=require" if "?" not in db_url_str else "&sslmode=require"
-            conn = psycopg2.connect(params, connect_timeout=10)
-        except Exception as e:
-            last_error = f"psycopg2 URL Error: {e}"
-            # Method 2: Robust Manual Parsing
+        if db_url_str.startswith("postgresql"):
             try:
-                from urllib.parse import unquote
-                prefix_len = 0
-                if "://" in db_url_str:
-                    prefix_len = db_url_str.find("://") + 3
-                core = db_url_str[prefix_len:]
-                
-                at_idx = core.rfind("@")
-                if at_idx > 0:
-                    creds = core[:at_idx]
-                    host_info = core[at_idx+1:]
-                    
-                    col_idx = creds.find(":")
-                    if col_idx > 0:
-                        user = unquote(creds[:col_idx])
-                        pwd = unquote(creds[col_idx+1:])
-                        
-                        slash_idx = host_info.find("/")
-                        if slash_idx > 0:
-                            host_port = host_info[:slash_idx]
-                            db_name = unquote(host_info[slash_idx+1:])
-                            
-                            if ":" in host_port:
-                                host, port = host_port.split(":")
-                            else:
-                                host, port = host_port, "5432"
-                            
-                            conn = psycopg2.connect(
-                                user=user,
-                                password=pwd,
-                                host=host,
-                                port=port,
-                                database=db_name,
-                                connect_timeout=15,
-                                sslmode='require'
-                            )
-            except Exception as e2:
-                last_error += f" | Manual Parse Error: {e2}"
-    else:
-        last_error = "SUPABASE_DB_URL secret NOT FOUND or is not a postgresql:// string."
+                # Add sslmode if not present
+                params = db_url_str
+                if "sslmode" not in db_url_str:
+                    params += "?sslmode=require" if "?" not in db_url_str else "&sslmode=require"
+                conn = psycopg2.connect(params, connect_timeout=5)
+            except Exception:
+                # Silent failure, will fallback to SQLite
+                pass
     
     if conn:
         return UnifiedDBWrapper(conn)
     
-    # Fallback to local
-    if os.path.exists(DB_PATH):
-        try:
-            import streamlit as st
-            # Only show error ONCE per session to avoid clutter
-            if 'db_conn_error_shown' not in st.session_state:
-                st.warning(f"⚠️ Supabase connection failed. Using local data fallback.")
-                if last_error:
-                    st.error(f"Engine Debug: {last_error}")
-                st.session_state['db_conn_error_shown'] = True
-        except:
-            pass
-        return UnifiedDBWrapper(sqlite3.connect(DB_PATH))
-    
-    raise ValueError(f"Database connection unavailable. Error: {last_error}")
+    # Fallback to local SQLite
+    # Ensure data directory exists
+    data_dir = os.path.join(ROOT_DIR, "data")
+    if not os.path.exists(data_dir):
+        os.makedirs(data_dir, exist_ok=True)
+        
+    return UnifiedDBWrapper(sqlite3.connect(DB_PATH))
 
 def run_connection_diagnostics():
     """Runs a series of tests to help the user fix connection issues."""
@@ -1479,66 +1421,115 @@ def get_substitutions_log():
 @st.cache_data(ttl=300)
 def get_player_profile(player_id):
     import pandas as pd
-    conn = get_conn()
-    try:
-        info = pd.read_sql(
-            "SELECT p.id, p.name, p.riot_id, p.rank, t.tag as team FROM players p LEFT JOIN teams t ON p.default_team_id=t.id WHERE p.id=%s",
-            conn,
-            params=(int(player_id),),
-        )
-        if info.empty:
+    info = pd.DataFrame()
+    stats = pd.DataFrame()
+    bench = None
+    
+    # Try Supabase SDK First
+    if supabase:
+        try:
+            # 1. Player Info
+            res_p = supabase.table("players").select("*, teams!default_team_id(tag)").eq("id", player_id).execute()
+            if res_p.data:
+                item = res_p.data[0]
+                item['team'] = item.get('teams', {}).get('tag')
+                info = pd.DataFrame([item])
+                
+                # 2. Stats for this player
+                res_s = supabase.table("match_stats_map").select("*, matches(*)").eq("player_id", player_id).execute()
+                if res_s.data:
+                    s_list = []
+                    for s in res_s.data:
+                        if s.get('matches', {}).get('status') == 'completed':
+                            s['week'] = s.get('matches', {}).get('week')
+                            s_list.append(s)
+                    stats = pd.DataFrame(s_list)
+                    
+                # 3. Benchmarks (League Avg & Rank Avg)
+                rank_val = info.iloc[0]['rank']
+                # We fetch all match stats for completed matches to compute averages
+                # Note: For large datasets, this should be an RPC or a pre-computed view
+                res_all = supabase.rpc("get_player_benchmarks", {"p_rank": rank_val}).execute()
+                if res_all.data:
+                    bench = pd.Series(res_all.data[0])
+                else:
+                    # Fallback to fetching and calculating in Pandas if RPC missing
+                    res_m = supabase.table("matches").select("id").eq("status", "completed").execute()
+                    c_ids = [m['id'] for m in res_m.data] if res_m.data else []
+                    if c_ids:
+                        res_bench = supabase.table("match_stats_map")\
+                            .select("acs, kills, deaths, assists, players(rank)")\
+                            .in_("match_id", c_ids)\
+                            .execute()
+                        if res_bench.data:
+                            bdf = pd.DataFrame(res_bench.data)
+                            bdf['rank'] = bdf['players'].apply(lambda x: x.get('rank') if x else None)
+                            bench = pd.Series({
+                                'lg_acs': bdf['acs'].mean(), 'lg_k': bdf['kills'].mean(), 
+                                'lg_d': bdf['deaths'].mean(), 'lg_a': bdf['assists'].mean(),
+                                'r_acs': bdf[bdf['rank'] == rank_val]['acs'].mean(),
+                                'r_k': bdf[bdf['rank'] == rank_val]['kills'].mean(),
+                                'r_d': bdf[bdf['rank'] == rank_val]['deaths'].mean(),
+                                'r_a': bdf[bdf['rank'] == rank_val]['assists'].mean()
+                            })
+        except Exception:
+            pass
+
+    # Fallback to SQL (SQLite)
+    if info.empty:
+        conn = get_conn()
+        try:
+            info = pd.read_sql(
+                "SELECT p.id, p.name, p.riot_id, p.rank, t.tag as team FROM players p LEFT JOIN teams t ON p.default_team_id=t.id WHERE p.id=%s",
+                conn, params=(int(player_id),)
+            )
+            if info.empty:
+                conn.close()
+                return {}
+                
+            rank_val = info.iloc[0]['rank']
+            stats = pd.read_sql(
+                """
+                SELECT msm.match_id, msm.map_index, msm.agent, msm.acs, msm.kills, msm.deaths, msm.assists, msm.is_sub, m.week
+                FROM match_stats_map msm
+                JOIN matches m ON msm.match_id = m.id
+                WHERE msm.player_id=%s AND m.status = 'completed'
+                """,
+                conn, params=(int(player_id),)
+            )
+            
+            bench = pd.read_sql(
+                """
+                SELECT 
+                    AVG(msm.acs) as lg_acs, AVG(msm.kills) as lg_k, AVG(msm.deaths) as lg_d, AVG(msm.assists) as lg_a,
+                    AVG(CASE WHEN p.rank = %s THEN msm.acs ELSE NULL END) as r_acs,
+                    AVG(CASE WHEN p.rank = %s THEN msm.kills ELSE NULL END) as r_k,
+                    AVG(CASE WHEN p.rank = %s THEN msm.deaths ELSE NULL END) as r_d,
+                    AVG(CASE WHEN p.rank = %s THEN msm.assists ELSE NULL END) as r_a
+                FROM match_stats_map msm
+                JOIN matches m ON msm.match_id = m.id
+                JOIN players p ON msm.player_id = p.id
+                WHERE m.status = 'completed'
+                """,
+                conn, params=(rank_val, rank_val, rank_val, rank_val)
+            ).iloc[0]
             conn.close()
+        except Exception:
+            if 'conn' in locals(): conn.close()
             return {}
             
-        # Format name to include Riot ID if available
-        p_name = info.iloc[0]['name']
-        p_riot = info.iloc[0]['riot_id']
-        display_name = f"{p_name} ({p_riot})" if p_riot and str(p_riot).strip() else p_name
-        
-        rank_val = info.iloc[0]['rank']
-        
-        # Stats with match metadata in one go
-        stats = pd.read_sql(
-            """
-            SELECT msm.match_id, msm.map_index, msm.agent, msm.acs, msm.kills, msm.deaths, msm.assists, msm.is_sub, m.week
-            FROM match_stats_map msm
-            JOIN matches m ON msm.match_id = m.id
-            WHERE msm.player_id=%s AND m.status = 'completed'
-            """,
-            conn,
-            params=(int(player_id),),
-        )
-        
-        # Combined Benchmarks
-        bench = pd.read_sql(
-            """
-            SELECT 
-                AVG(msm.acs) as lg_acs, AVG(msm.kills) as lg_k, AVG(msm.deaths) as lg_d, AVG(msm.assists) as lg_a,
-                AVG(CASE WHEN p.rank = %s THEN msm.acs ELSE NULL END) as r_acs,
-                AVG(CASE WHEN p.rank = %s THEN msm.kills ELSE NULL END) as r_k,
-                AVG(CASE WHEN p.rank = %s THEN msm.deaths ELSE NULL END) as r_d,
-                AVG(CASE WHEN p.rank = %s THEN msm.assists ELSE NULL END) as r_a
-            FROM match_stats_map msm
-            JOIN matches m ON msm.match_id = m.id
-            JOIN players p ON msm.player_id = p.id
-            WHERE m.status = 'completed'
-            """,
-            conn,
-            params=(rank_val, rank_val, rank_val, rank_val)
-        ).iloc[0]
-        
-        trend = pd.DataFrame()
-        if not stats.empty:
-            agg = stats.groupby('match_id').agg({'acs':'mean','kills':'sum','deaths':'sum','week':'first'}).reset_index()
-            agg['kda'] = agg['kills'] / agg['deaths'].replace(0, 1)
-            agg['label'] = 'W' + agg['week'].fillna(0).astype(int).astype(str) + '-M' + agg['match_id'].astype(int).astype(str)
-            agg = agg.rename(columns={'acs':'avg_acs'})
-            trend = agg[['label','avg_acs','kda']]
-            
-        conn.close()
-    except Exception:
-        if 'conn' in locals(): conn.close()
-        return {}
+    # Post-processing
+    p_name = info.iloc[0]['name']
+    p_riot = info.iloc[0]['riot_id']
+    display_name = f"{p_name} ({p_riot})" if p_riot and str(p_riot).strip() else p_name
+    
+    trend = pd.DataFrame()
+    if not stats.empty:
+        agg = stats.groupby('match_id').agg({'acs':'mean','kills':'sum','deaths':'sum','week':'first'}).reset_index()
+        agg['kda'] = agg['kills'] / agg['deaths'].replace(0, 1)
+        agg['label'] = 'W' + agg['week'].fillna(0).astype(int).astype(str) + '-M' + agg['match_id'].astype(int).astype(str)
+        agg = agg.rename(columns={'acs':'avg_acs'})
+        trend = agg[['label','avg_acs','kda']]
         
     games = stats['match_id'].nunique() if not stats.empty else 0
     avg_acs = float(stats['acs'].mean()) if not stats.empty else 0.0
@@ -1707,23 +1698,65 @@ def upsert_match_maps(match_id, maps_data):
 def _get_standings_cached():
     import pandas as pd
     import numpy as np
-    conn = get_conn()
-    try:
-        teams_df = pd.read_sql_query("SELECT id, name, group_name, logo_path FROM teams", conn)
-        # Join with match_maps to get round scores for BO1
-        matches_df = pd.read_sql_query("""
-            SELECT m.*, mm.team1_rounds, mm.team2_rounds 
-            FROM matches m
-            LEFT JOIN match_maps mm ON m.id = mm.match_id AND mm.map_index = 0
-            WHERE m.status='completed' AND m.match_type='regular' AND (UPPER(m.format)='BO1' OR m.format IS NULL)
-        """, conn)
-    except Exception:
+    
+    teams_df = pd.DataFrame()
+    matches_df = pd.DataFrame()
+    
+    # Try Supabase SDK First
+    if supabase:
+        try:
+            # Fetch teams
+            res_teams = supabase.table("teams").select("id, name, group_name, logo_path").execute()
+            if res_teams.data:
+                teams_df = pd.DataFrame(res_teams.data)
+                
+            # Fetch completed regular matches with map rounds (BO1 focus)
+            # We use resource embedding to get match_maps related to each match
+            res_matches = supabase.table("matches")\
+                .select("*, match_maps(team1_rounds, team2_rounds)")\
+                .eq("status", "completed")\
+                .eq("match_type", "regular")\
+                .execute()
+            
+            if res_matches.data:
+                m_list = []
+                for item in res_matches.data:
+                    # Flatten the match_maps data (get index 0 for BO1 rounds)
+                    maps = item.get("match_maps", [])
+                    item['team1_rounds'] = maps[0].get("team1_rounds") if maps else None
+                    item['team2_rounds'] = maps[0].get("team2_rounds") if maps else None
+                    
+                    # Filter for BO1 or null format in Python to simplify SDK query
+                    fmt = str(item.get("format", "")).upper()
+                    if fmt == "BO1" or not fmt or fmt == "NONE":
+                        m_list.append(item)
+                
+                matches_df = pd.DataFrame(m_list)
+        except Exception as e:
+            # fall through to SQL if SDK fails
+            pass
+
+    # Fallback to SQL (SQLite) if SDK didn't provide data
+    if teams_df.empty:
+        conn = get_conn()
+        try:
+            teams_df = pd.read_sql_query("SELECT id, name, group_name, logo_path FROM teams", conn)
+            # Join with match_maps to get round scores for BO1
+            matches_df = pd.read_sql_query("""
+                SELECT m.*, mm.team1_rounds, mm.team2_rounds 
+                FROM matches m
+                LEFT JOIN match_maps mm ON m.id = mm.match_id AND mm.map_index = 0
+                WHERE m.status='completed' AND m.match_type='regular' AND (UPPER(m.format)='BO1' OR m.format IS NULL)
+            """, conn)
+        except Exception:
+            conn.close()
+            return pd.DataFrame()
         conn.close()
+    
+    if teams_df.empty:
         return pd.DataFrame()
-    conn.close()
     
     # Pre-calculate logo display safety to cache it
-    # Vectorized check using list comprehension (faster than .apply for small/medium DFs)
     teams_df['logo_display'] = [
         p if p and not (".." in p or p.startswith("/") or p.startswith("\\")) and os.path.exists(p) 
         else None 
@@ -1733,7 +1766,8 @@ def _get_standings_cached():
     exclude_ids = set(teams_df[teams_df['name'].isin(['FAT1','FAT2'])]['id'].tolist())
     if exclude_ids:
         teams_df = teams_df[~teams_df['id'].isin(exclude_ids)]
-        matches_df = matches_df[~(matches_df['team1_id'].isin(exclude_ids) | matches_df['team2_id'].isin(exclude_ids))]
+        if not matches_df.empty:
+            matches_df = matches_df[~(matches_df['team1_id'].isin(exclude_ids) | matches_df['team2_id'].isin(exclude_ids))]
     
     # Initialize stats using vectorization
     if matches_df.empty:
@@ -1744,28 +1778,22 @@ def _get_standings_cached():
     # Calculate match-level stats
     m = matches_df.copy()
     
-    # Ensure scores are numeric to prevent alignment/broadcasting errors
-    m['score_t1'] = pd.to_numeric(m['score_t1'], errors='coerce').fillna(0)
-    m['score_t2'] = pd.to_numeric(m['score_t2'], errors='coerce').fillna(0)
+    # Ensure scores/rounds are numeric to prevent alignment/broadcasting errors
+    cols_to_fix = ['score_t1', 'score_t2', 'team1_rounds', 'team2_rounds']
+    for col in cols_to_fix:
+        if col in m.columns:
+            m[col] = pd.to_numeric(m[col], errors='coerce').fillna(0)
     
     # For BO1, if we have map rounds, use them instead of map wins for points/RD
     if 'team1_rounds' in m.columns and 'team2_rounds' in m.columns:
-        m['score_t1'] = np.where(m['team1_rounds'].notna(), m['team1_rounds'], m['score_t1'])
-        m['score_t2'] = np.where(m['team2_rounds'].notna(), m['team2_rounds'], m['score_t2'])
+        # Only use rounds if it's a BO1 or effectively a BO1
+        m['score_t1'] = np.where(m['team1_rounds'] > 0, m['team1_rounds'], m['score_t1'])
+        m['score_t2'] = np.where(m['team2_rounds'] > 0, m['team2_rounds'], m['score_t2'])
     
     # Points for Team 1
-    m['p1'] = np.where(
-        m['score_t1'] > m['score_t2'],
-        15,
-        np.minimum(m['score_t1'], 12)
-    )
-    
+    m['p1'] = np.where(m['score_t1'] > m['score_t2'], 15, np.minimum(m['score_t1'], 12))
     # Points for Team 2
-    m['p2'] = np.where(
-        m['score_t2'] > m['score_t1'],
-        15,
-        np.minimum(m['score_t2'], 12)
-    )
+    m['p2'] = np.where(m['score_t2'] > m['score_t1'], 15, np.minimum(m['score_t2'], 12))
     
     # Wins/Losses
     m['t1_win'] = (m['score_t1'] > m['score_t2']).astype(int)
@@ -1773,19 +1801,11 @@ def _get_standings_cached():
     
     # Reshape to team-level
     t1_stats = m.groupby('team1_id').agg({
-        't1_win': 'sum',
-        't2_win': 'sum',
-        'p1': 'sum',
-        'p2': 'sum',
-        'id': 'count'
+        't1_win': 'sum', 't2_win': 'sum', 'p1': 'sum', 'p2': 'sum', 'id': 'count'
     }).rename(columns={'t1_win': 'Wins', 't2_win': 'Losses', 'p1': 'Points', 'p2': 'Points Against', 'id': 'Played'})
     
     t2_stats = m.groupby('team2_id').agg({
-        't2_win': 'sum',
-        't1_win': 'sum',
-        'p2': 'sum',
-        'p1': 'sum',
-        'id': 'count'
+        't2_win': 'sum', 't1_win': 'sum', 'p2': 'sum', 'p1': 'sum', 'id': 'count'
     }).rename(columns={'t2_win': 'Wins', 't1_win': 'Losses', 'p2': 'Points', 'p1': 'Points Against', 'id': 'Played'})
 
     # Combine stats
@@ -1808,33 +1828,79 @@ def get_standings():
 @st.cache_data(ttl=900)
 def _get_player_leaderboard_cached():
     import pandas as pd
-    conn = get_conn()
-    try:
-        df = pd.read_sql_query(
-            """
-            SELECT p.id as player_id,
-                   p.name,
-                   p.riot_id,
-                   t.tag as team,
-                   COUNT(DISTINCT msm.match_id) as games,
-                   AVG(msm.acs) as avg_acs,
-                   SUM(msm.kills) as total_kills,
-                   SUM(msm.deaths) as total_deaths,
-                   SUM(msm.assists) as total_assists
-            FROM match_stats_map msm
-            JOIN matches m ON msm.match_id = m.id
-            JOIN players p ON msm.player_id = p.id
-            LEFT JOIN teams t ON p.default_team_id = t.id
-            WHERE m.status = 'completed'
-            GROUP BY p.id, p.name, p.riot_id
-            HAVING games > 0
-            """,
-            conn,
-        )
-    except Exception:
+    df = pd.DataFrame()
+    
+    # Try Supabase SDK First
+    if supabase:
+        try:
+            # 1. Get completed matches
+            res_m = supabase.table("matches").select("id").eq("status", "completed").execute()
+            comp_ids = [m['id'] for m in res_m.data] if res_m.data else []
+            
+            if comp_ids:
+                # 2. Get stats for those matches
+                res_s = supabase.table("match_stats_map")\
+                    .select("player_id, match_id, acs, kills, deaths, assists")\
+                    .in_("match_id", comp_ids)\
+                    .execute()
+                
+                if res_s.data:
+                    stats_df = pd.DataFrame(res_s.data)
+                    # 3. Get players and teams
+                    res_p = supabase.table("players").select("id, name, riot_id, default_team_id").execute()
+                    res_t = supabase.table("teams").select("id, tag").execute()
+                    
+                    if res_p.data:
+                        pdf = pd.DataFrame(res_p.data)
+                        tdf = pd.DataFrame(res_t.data) if res_t.data else pd.DataFrame(columns=['id', 'tag'])
+                        
+                        # Join
+                        m1 = stats_df.merge(pdf, left_on='player_id', right_on='id')
+                        m2 = m1.merge(tdf, left_on='default_team_id', right_on='id', how='left')
+                        
+                        # Aggregate
+                        df = m2.groupby(['player_id', 'name', 'riot_id', 'tag']).agg({
+                            'match_id': 'nunique',
+                            'acs': 'mean',
+                            'kills': 'sum',
+                            'deaths': 'sum',
+                            'assists': 'sum'
+                        }).reset_index()
+                        
+                        df.columns = ['player_id', 'name', 'riot_id', 'team', 'games', 'avg_acs', 'total_kills', 'total_deaths', 'total_assists']
+                        df = df[df['games'] > 0]
+        except Exception:
+            pass
+
+    # Fallback to SQL (SQLite)
+    if df.empty:
+        conn = get_conn()
+        try:
+            df = pd.read_sql_query(
+                """
+                SELECT p.id as player_id,
+                       p.name,
+                       p.riot_id,
+                       t.tag as team,
+                       COUNT(DISTINCT msm.match_id) as games,
+                       AVG(msm.acs) as avg_acs,
+                       SUM(msm.kills) as total_kills,
+                       SUM(msm.deaths) as total_deaths,
+                       SUM(msm.assists) as total_assists
+                FROM match_stats_map msm
+                JOIN matches m ON msm.match_id = m.id
+                JOIN players p ON msm.player_id = p.id
+                LEFT JOIN teams t ON p.default_team_id = t.id
+                WHERE m.status = 'completed'
+                GROUP BY p.id, p.name, p.riot_id
+                HAVING games > 0
+                """,
+                conn,
+            )
+        except Exception:
+            conn.close()
+            return pd.DataFrame()
         conn.close()
-        return pd.DataFrame()
-    conn.close()
     
     if not df.empty:
         # Format name to include Riot ID if available
@@ -1845,123 +1911,158 @@ def _get_player_leaderboard_cached():
         df['kd_ratio'] = df['kd_ratio'].round(2)
     return df.sort_values('avg_acs', ascending=False)
 
-def get_player_leaderboard():
-    if not should_use_cache():
-        return _get_player_leaderboard_cached.run()
-    return _get_player_leaderboard_cached()
-    import pandas as pd
-    conn = get_conn()
-    try:
-        df = pd.read_sql_query(
-            """
-            SELECT p.id as player_id,
-                   p.name,
-                   p.riot_id,
-                   t.tag as team,
-                   COUNT(DISTINCT msm.match_id) as games,
-                   AVG(msm.acs) as avg_acs,
-                   SUM(msm.kills) as total_kills,
-                   SUM(msm.deaths) as total_deaths,
-                   SUM(msm.assists) as total_assists
-            FROM match_stats_map msm
-            JOIN matches m ON msm.match_id = m.id
-            JOIN players p ON msm.player_id = p.id
-            LEFT JOIN teams t ON p.default_team_id = t.id
-            WHERE m.status = 'completed'
-            GROUP BY p.id, p.name, p.riot_id
-            HAVING games > 0
-            """,
-            conn,
-        )
-    except Exception:
-        conn.close()
-        return pd.DataFrame()
-    conn.close()
-    
-    if not df.empty:
-        # Format name to include Riot ID if available
-        df['name'] = df.apply(lambda r: f"{r['name']} ({r['riot_id']})" if r['riot_id'] and str(r['riot_id']).strip() else r['name'], axis=1)
-        df = df.drop(columns=['riot_id'])
-        df['kd_ratio'] = df['total_kills'] / df['total_deaths'].replace(0, 1)
-        df['avg_acs'] = df['avg_acs'].round(1)
-        df['kd_ratio'] = df['kd_ratio'].round(2)
     return df.sort_values('avg_acs', ascending=False)
 
 @st.cache_data(ttl=60)
 def get_week_matches(week):
     import pandas as pd
-    conn = get_conn()
-    df = pd.read_sql_query(
-        """
-        SELECT m.id, m.week, m.group_name, m.status, m.format, m.maps_played, m.is_forfeit,
-               t1.name as t1_name, t2.name as t2_name,
-               m.score_t1, m.score_t2, t1.id as t1_id, t2.id as t2_id,
-               mm.team1_rounds, mm.team2_rounds
-        FROM matches m
-        JOIN teams t1 ON m.team1_id = t1.id
-        JOIN teams t2 ON m.team2_id = t2.id
-        LEFT JOIN match_maps mm ON m.id = mm.match_id AND mm.map_index = 0
-        WHERE m.week = %s AND m.match_type = 'regular'
-        ORDER BY m.id
-        """,
-        conn,
-        params=(week,),
-    )
-    # For BO1, if we have map rounds, use them as the primary scores for display
+    df = pd.DataFrame()
+    
+    if supabase:
+        try:
+            res = supabase.table("matches")\
+                .select("*, t1:teams!team1_id(name), t2:teams!team2_id(name), match_maps(team1_rounds, team2_rounds)")\
+                .eq("week", week)\
+                .eq("match_type", "regular")\
+                .order("id")\
+                .execute()
+            if res.data:
+                m_list = []
+                for item in res.data:
+                    item['t1_name'] = item.get('t1', {}).get('name')
+                    item['t2_name'] = item.get('t2', {}).get('name')
+                    item['t1_id'] = item.get('team1_id')
+                    item['t2_id'] = item.get('team2_id')
+                    maps = item.get('match_maps', [])
+                    item['team1_rounds'] = maps[0].get('team1_rounds') if maps else None
+                    item['team2_rounds'] = maps[0].get('team2_rounds') if maps else None
+                    m_list.append(item)
+                df = pd.DataFrame(m_list)
+        except Exception:
+            pass
+
+    if df.empty:
+        conn = get_conn()
+        try:
+            df = pd.read_sql_query(
+                """
+                SELECT m.id, m.week, m.group_name, m.status, m.format, m.maps_played, m.is_forfeit,
+                       t1.name as t1_name, t2.name as t2_name,
+                       m.score_t1, m.score_t2, t1.id as t1_id, t2.id as t2_id,
+                       mm.team1_rounds, mm.team2_rounds
+                FROM matches m
+                JOIN teams t1 ON m.team1_id = t1.id
+                JOIN teams t2 ON m.team2_id = t2.id
+                LEFT JOIN match_maps mm ON m.id = mm.match_id AND mm.map_index = 0
+                WHERE m.week = %s AND m.match_type = 'regular'
+                ORDER BY m.id
+                """,
+                conn,
+                params=(week,),
+            )
+        except Exception:
+            conn.close()
+            return pd.DataFrame()
+        conn.close()
+
     if not df.empty and 'team1_rounds' in df.columns:
         is_bo1 = (df['format'].str.upper() == 'BO1') | (df['format'].isna())
         df.loc[is_bo1 & df['team1_rounds'].notna(), 'score_t1'] = df.loc[is_bo1 & df['team1_rounds'].notna(), 'team1_rounds']
         df.loc[is_bo1 & df['team2_rounds'].notna(), 'score_t2'] = df.loc[is_bo1 & df['team2_rounds'].notna(), 'team2_rounds']
-        
-        # Ensure integer type for scores to avoid .0 display
-        df['score_t1'] = df['score_t1'].astype(int)
-        df['score_t2'] = df['score_t2'].astype(int)
-    conn.close()
+        df['score_t1'] = pd.to_numeric(df['score_t1'], errors='coerce').fillna(0).astype(int)
+        df['score_t2'] = pd.to_numeric(df['score_t2'], errors='coerce').fillna(0).astype(int)
     return df
 
 @st.cache_data(ttl=300)
 def get_playoff_matches():
     import pandas as pd
-    conn = get_conn()
-    df = pd.read_sql_query(
-        """
-        SELECT m.id, m.playoff_round, m.bracket_pos, m.status, m.format, m.maps_played, m.is_forfeit,
-               m.bracket_label,
-               t1.name as t1_name, t2.name as t2_name,
-               m.score_t1, m.score_t2, t1.id as t1_id, t2.id as t2_id,
-               m.winner_id,
-               mm.team1_rounds, mm.team2_rounds
-        FROM matches m
-        LEFT JOIN teams t1 ON m.team1_id = t1.id
-        LEFT JOIN teams t2 ON m.team2_id = t2.id
-        LEFT JOIN match_maps mm ON m.id = mm.match_id AND mm.map_index = 0
-        WHERE m.match_type = 'playoff'
-        ORDER BY m.playoff_round ASC, m.bracket_pos ASC
-        """,
-        conn
-    )
-    # For BO1, if we have map rounds, use them as the primary scores for display
+    df = pd.DataFrame()
+    
+    if supabase:
+        try:
+            res = supabase.table("matches")\
+                .select("*, t1:teams!team1_id(name), t2:teams!team2_id(name), match_maps(team1_rounds, team2_rounds)")\
+                .eq("match_type", "playoff")\
+                .order("playoff_round", desc=False)\
+                .order("bracket_pos", desc=False)\
+                .execute()
+            if res.data:
+                m_list = []
+                for item in res.data:
+                    item['t1_name'] = item.get('t1', {}).get('name')
+                    item['t2_name'] = item.get('t2', {}).get('name')
+                    item['t1_id'] = item.get('team1_id')
+                    item['t2_id'] = item.get('team2_id')
+                    maps = item.get('match_maps', [])
+                    item['team1_rounds'] = maps[0].get('team1_rounds') if maps else None
+                    item['team2_rounds'] = maps[0].get('team2_rounds') if maps else None
+                    m_list.append(item)
+                df = pd.DataFrame(m_list)
+        except Exception:
+            pass
+
+    if df.empty:
+        conn = get_conn()
+        try:
+            df = pd.read_sql_query(
+                """
+                SELECT m.id, m.playoff_round, m.bracket_pos, m.status, m.format, m.maps_played, m.is_forfeit,
+                       m.bracket_label,
+                       t1.name as t1_name, t2.name as t2_name,
+                       m.score_t1, m.score_t2, t1.id as t1_id, t2.id as t2_id,
+                       m.winner_id,
+                       mm.team1_rounds, mm.team2_rounds
+                FROM matches m
+                LEFT JOIN teams t1 ON m.team1_id = t1.id
+                LEFT JOIN teams t2 ON m.team2_id = t2.id
+                LEFT JOIN match_maps mm ON m.id = mm.match_id AND mm.map_index = 0
+                WHERE m.match_type = 'playoff'
+                ORDER BY m.playoff_round ASC, m.bracket_pos ASC
+                """,
+                conn
+            )
+        except Exception:
+            conn.close()
+            return pd.DataFrame()
+        conn.close()
+
     if not df.empty and 'team1_rounds' in df.columns:
         is_bo1 = (df['format'].str.upper() == 'BO1') | (df['format'].isna())
         df.loc[is_bo1 & df['team1_rounds'].notna(), 'score_t1'] = df.loc[is_bo1 & df['team1_rounds'].notna(), 'team1_rounds']
         df.loc[is_bo1 & df['team2_rounds'].notna(), 'score_t2'] = df.loc[is_bo1 & df['team2_rounds'].notna(), 'team2_rounds']
-        
-        # Ensure integer type for scores to avoid .0 display
-        df['score_t1'] = df['score_t1'].astype(int)
-        df['score_t2'] = df['score_t2'].astype(int)
-    conn.close()
+        df['score_t1'] = pd.to_numeric(df['score_t1'], errors='coerce').fillna(0).astype(int)
+        df['score_t2'] = pd.to_numeric(df['score_t2'], errors='coerce').fillna(0).astype(int)
     return df
 
 @st.cache_data(ttl=300)
 def get_match_maps(match_id):
     import pandas as pd
-    conn = get_conn()
-    df = pd.read_sql_query(
-        "SELECT map_index, map_name, team1_rounds, team2_rounds, winner_id, is_forfeit FROM match_maps WHERE match_id=%s ORDER BY map_index",
-        conn,
-        params=(match_id,),
-    )
-    conn.close()
+    df = pd.DataFrame()
+    
+    if supabase:
+        try:
+            res = supabase.table("match_maps")\
+                .select("*")\
+                .eq("match_id", match_id)\
+                .order("map_index")\
+                .execute()
+            if res.data:
+                df = pd.DataFrame(res.data)
+        except Exception:
+            pass
+
+    if df.empty:
+        conn = get_conn()
+        try:
+            df = pd.read_sql_query(
+                "SELECT map_index, map_name, team1_rounds, team2_rounds, winner_id, is_forfeit FROM match_maps WHERE match_id=%s ORDER BY map_index",
+                conn,
+                params=(match_id,),
+            )
+        except Exception:
+            conn.close()
+            return pd.DataFrame()
+        conn.close()
     return df
 
 @st.cache_data(ttl=900)
