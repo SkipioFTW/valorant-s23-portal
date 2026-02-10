@@ -26,7 +26,8 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-
+.env
+/bots/discord_bot/.env
 # Database (optional - keeping it if the user wants the DB in repo, but usually ignored)
 # data/*.db
 # !data/valorant_s23.db
