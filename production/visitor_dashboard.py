@@ -37,7 +37,7 @@ def init_pending_tables(conn=None):
         conn = get_conn()
         should_close = True
     
-    is_postgres = not isinstance(conn, sqlite3.Connection)
+    is_postgres = not getattr(conn, 'is_sqlite', isinstance(conn, sqlite3.Connection))
     pk_def = "SERIAL PRIMARY KEY" if is_postgres else "INTEGER PRIMARY KEY AUTOINCREMENT"
     timestamp_def = "TIMESTAMP DEFAULT CURRENT_TIMESTAMP" if is_postgres else "DATETIME DEFAULT CURRENT_TIMESTAMP"
 
@@ -75,8 +75,15 @@ def init_player_discord_column(conn=None):
         should_close = True
     
     # Check if discord_handle column exists
-    cursor = conn.execute("PRAGMA table_info(players)")
-    columns = [row[1] for row in cursor.fetchall()]
+    is_postgres = not getattr(conn, 'is_sqlite', isinstance(conn, sqlite3.Connection))
+    if is_postgres:
+        cur = conn.cursor()
+        cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name='players'")
+        columns = [row[0] for row in cur.fetchall()]
+    else:
+        cursor = conn.execute("PRAGMA table_info(players)")
+        columns = [row[1] for row in cursor.fetchall()]
+
     if 'discord_handle' not in columns:
         conn.execute("ALTER TABLE players ADD COLUMN discord_handle TEXT")
         
@@ -187,25 +194,50 @@ def get_conn():
         # Method 1: Try direct connection string
         try:
             conn = psycopg2.connect(db_url_str, connect_timeout=5)
-        except Exception as e:
-            # Method 2: Manual Parsing (Robust against special characters in passwords)
+        except Exception:
+            # Method 2: Robust Manual Parsing
+            # Logic: user:password@host:port/database
             try:
-                import re
                 from urllib.parse import unquote
-                # regex to extract components from postgresql://user:pass@host:port/dbname
-                match = re.search(r'postgresql://([^:]+):([^@]+)@([^:/]+):(\d+)/(.+)', db_url_str)
-                if match:
-                    user, pwd, host, port, db = match.groups()
-                    conn = psycopg2.connect(
-                        user=unquote(user),
-                        password=unquote(pwd),
-                        host=unquote(host),
-                        port=port,
-                        database=unquote(db),
-                        connect_timeout=10
-                    )
-            except Exception as e2:
-                # If everything fails, it will fall back to SQLite below
+                # Trim the 'postgresql://' prefix
+                prefix_len = 0
+                if "://" in db_url_str:
+                    prefix_len = db_url_str.find("://") + 3
+                core = db_url_str[prefix_len:]
+                
+                # Find the split between credentials and host (rightmost @)
+                at_idx = core.rfind("@")
+                if at_idx > 0:
+                    creds = core[:at_idx]
+                    host_info = core[at_idx+1:]
+                    
+                    # Split creds by first colon (user:pass)
+                    col_idx = creds.find(":")
+                    if col_idx > 0:
+                        user = unquote(creds[:col_idx])
+                        pwd = unquote(creds[col_idx+1:])
+                        
+                        # Split host_info by first slash (host:port/db)
+                        slash_idx = host_info.find("/")
+                        if slash_idx > 0:
+                            host_port = host_info[:slash_idx]
+                            db_name = unquote(host_info[slash_idx+1:])
+                            
+                            # Split host_port by colon (host:port)
+                            if ":" in host_port:
+                                host, port = host_port.split(":")
+                            else:
+                                host, port = host_port, "5432"
+                            
+                            conn = psycopg2.connect(
+                                user=user,
+                                password=pwd,
+                                host=host,
+                                port=port,
+                                database=db_name,
+                                connect_timeout=10
+                            )
+            except Exception:
                 pass
     
     if conn:
@@ -237,7 +269,7 @@ def init_admin_table(conn=None):
         conn = get_conn()
         should_close = True
         
-    is_postgres = not isinstance(conn, sqlite3.Connection)
+    is_postgres = not getattr(conn, 'is_sqlite', isinstance(conn, sqlite3.Connection))
     pk_def = "SERIAL PRIMARY KEY" if is_postgres else "INTEGER PRIMARY KEY AUTOINCREMENT"
     blob_def = "BYTEA" if is_postgres else "BLOB"
 
@@ -262,7 +294,7 @@ def init_session_activity_table(conn=None):
         conn = get_conn()
         should_close = True
     
-    is_postgres = not isinstance(conn, sqlite3.Connection)
+    is_postgres = not getattr(conn, 'is_sqlite', isinstance(conn, sqlite3.Connection))
     pk_type = "TEXT PRIMARY KEY"
     real_type = "DOUBLE PRECISION" if is_postgres else "REAL"
     
@@ -399,7 +431,7 @@ def track_user_activity():
         conn = get_conn()
         
         # Always update current session
-        is_postgres = not isinstance(conn, sqlite3.Connection)
+        is_postgres = not getattr(conn, 'is_sqlite', isinstance(conn, sqlite3.Connection))
         if is_postgres:
             conn.execute(
                 """
@@ -461,7 +493,7 @@ def ensure_base_schema(conn=None):
         should_close = True
     c = conn.cursor()
     
-    is_postgres = not isinstance(conn, sqlite3.Connection)
+    is_postgres = not getattr(conn, 'is_sqlite', isinstance(conn, sqlite3.Connection))
     pk_def = "SERIAL PRIMARY KEY" if is_postgres else "INTEGER PRIMARY KEY AUTOINCREMENT"
 
     c.execute(f'''CREATE TABLE IF NOT EXISTS teams (
@@ -530,7 +562,7 @@ def ensure_column(table, column_name, column_def_sql, conn=None):
         conn = get_conn()
         should_close = True
     
-    is_postgres = not isinstance(conn, sqlite3.Connection)
+    is_postgres = not getattr(conn, 'is_sqlite', isinstance(conn, sqlite3.Connection))
     if is_postgres:
         cur = conn.cursor()
         cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name=%s", (table,))
@@ -555,7 +587,7 @@ def ensure_upgrade_schema(conn=None):
         conn = get_conn()
         should_close = True
     
-    is_postgres = not isinstance(conn, sqlite3.Connection)
+    is_postgres = not getattr(conn, 'is_sqlite', isinstance(conn, sqlite3.Connection))
     pk_def = "PRIMARY KEY" if is_postgres else "PRIMARY KEY" # SERIAL handled in create
     serial_def = "SERIAL PRIMARY KEY" if is_postgres else "INTEGER PRIMARY KEY AUTOINCREMENT"
 
@@ -587,7 +619,7 @@ def ensure_upgrade_schema(conn=None):
     ensure_column("matches", "bracket_label", "bracket_label TEXT", conn=conn)
     ensure_column("match_maps", "is_forfeit", "is_forfeit INTEGER DEFAULT 0", conn=conn)
     
-    is_postgres = not isinstance(conn, sqlite3.Connection)
+    is_postgres = not getattr(conn, 'is_sqlite', isinstance(conn, sqlite3.Connection))
     ignore_clause = "ON CONFLICT DO NOTHING" if is_postgres else "OR IGNORE"
     
     try:
@@ -1550,7 +1582,7 @@ def ensure_seed_admins(conn=None):
         should_close = True
     
     c = conn.cursor()
-    is_postgres = not isinstance(conn, sqlite3.Connection)
+    is_postgres = not getattr(conn, 'is_sqlite', isinstance(conn, sqlite3.Connection))
     ignore_clause = "ON CONFLICT DO NOTHING" if is_postgres else "OR IGNORE"
     
     if su and sp:
