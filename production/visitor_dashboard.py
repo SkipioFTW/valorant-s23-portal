@@ -25,6 +25,55 @@ def get_secret(key, default=None):
     except Exception:
         return os.getenv(key, default)
 
+def init_pending_tables(conn=None):
+    should_close = False
+    if conn is None:
+        conn = get_conn()
+        should_close = True
+    
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS pending_matches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            team_a TEXT,
+            team_b TEXT,
+            group_name TEXT,
+            url TEXT,
+            submitted_by TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS pending_players (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            riot_id TEXT,
+            rank TEXT,
+            discord_handle TEXT,
+            submitted_by TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    if should_close:
+        conn.commit()
+        conn.close()
+
+def init_player_discord_column(conn=None):
+    should_close = False
+    if conn is None:
+        conn = get_conn()
+        should_close = True
+    
+    # Check if discord_handle column exists
+    cursor = conn.execute("PRAGMA table_info(players)")
+    columns = [row[1] for row in cursor.fetchall()]
+    if 'discord_handle' not in columns:
+        conn.execute("ALTER TABLE players ADD COLUMN discord_handle TEXT")
+        
+    if should_close:
+        conn.commit()
+        conn.close()
+
 # Use data folder for database
 DEFAULT_DB_PATH = os.path.join(ROOT_DIR, "data", "valorant_s23.db")
 SECRET_DB_PATH = get_secret("DB_PATH")
@@ -90,6 +139,39 @@ def init_session_activity_table(conn=None):
     if 'ip_address' not in columns:
         conn.execute("ALTER TABLE session_activity ADD COLUMN ip_address TEXT")
         
+    if should_close:
+        conn.commit()
+        conn.close()
+
+def init_pending_tables(conn=None):
+    should_close = False
+    if conn is None:
+        conn = get_conn()
+        should_close = True
+    
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS pending_matches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            team_a TEXT,
+            team_b TEXT,
+            group_name TEXT,
+            url TEXT,
+            submitted_by TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS pending_players (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            riot_id TEXT,
+            rank TEXT,
+            discord_handle TEXT,
+            submitted_by TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
     if should_close:
         conn.commit()
         conn.close()
@@ -3199,94 +3281,67 @@ elif page == "Admin Panel":
 
         st.markdown('<div style="margin-top: 30px;"></div>', unsafe_allow_html=True)
 
-        # START BOT PENDING REQUESTS
         st.subheader("🤖 Bot Pending Requests")
         
-        # Scanner for matches
-        pm_path = "assets/pending_matches"
-        pm_files = list_files_from_github(pm_path)
-        if not pm_files:
-            pm_dir = os.path.join(os.getcwd(), pm_path)
-            if os.path.exists(pm_dir):
-                pm_files = [{"name": f, "path": f"{pm_path}/{f}", "is_local": True} for f in os.listdir(pm_dir) if f.endswith(".json")]
-        else:
-            for f in pm_files: f["is_local"] = False
-
-        # Scanner for players
-        pp_path = "assets/pending_players"
-        pp_files = list_files_from_github(pp_path)
-        if not pp_files:
-            pp_dir = os.path.join(os.getcwd(), pp_path)
-            if os.path.exists(pp_dir):
-                pp_files = [{"name": f, "path": f"{pp_path}/{f}", "is_local": True} for f in os.listdir(pp_dir) if f.endswith(".json")]
-        else:
-            for f in pp_files: f["is_local"] = False
+        init_pending_tables() # Ensure tables exist
+        init_player_discord_column() # Ensure players have discord_handle
+        conn_preq = get_conn()
+        pm_df = pd.read_sql("SELECT * FROM pending_matches", conn_preq)
+        pp_df = pd.read_sql("SELECT * FROM pending_players", conn_preq)
+        conn_preq.close()
         
         col_pm, col_pp = st.columns(2)
         
         with col_pm:
             st.markdown("#### Pending Matches")
-            if not pm_files:
+            if pm_df.empty:
                 st.info("No pending match requests.")
             else:
-                pm_list = []
-                for f in pm_files:
-                    try:
-                        if f.get("is_local"):
-                            with open(os.path.join(os.getcwd(), f['path']), 'r') as file:
-                                d = json.load(file)
-                        else:
-                            d = get_file_content_from_github(f['path'])
-                        if d:
-                            pm_list.append({"File": f['name'], "Teams": f"{d.get('team_a')} vs {d.get('team_b')}", "By": d.get('submitted_by'), "Source": "Local" if f.get("is_local") else "GitHub"})
-                    except: pass
-                if pm_list:
-                    st.dataframe(pd.DataFrame(pm_list), use_container_width=True, hide_index=True)
-                    sel_pm_name = st.selectbox("Select Match to Process", [f['name'] for f in pm_files], key="pm_proc_sel")
-                    sel_pm_obj = next(f for f in pm_files if f['name'] == sel_pm_name)
-                    if st.button("🚀 Process Match Request"):
-                        if sel_pm_obj.get("is_local"):
-                            with open(os.path.join(os.getcwd(), sel_pm_obj['path']), 'r') as f:
-                                req = json.load(f)
-                        else:
-                            req = get_file_content_from_github(sel_pm_obj['path'])
-                        st.session_state['pending_match_request'] = req
-                        st.session_state['pending_match_file'] = sel_pm_obj['path']
-                        st.session_state['pending_match_is_local'] = sel_pm_obj.get("is_local", False)
-                        st.success("Request loaded into Match Editor below!")
-                        st.rerun()
+                pm_display = pm_df.rename(columns={"team_a": "Team A", "team_b": "Team B", "submitted_by": "By"})
+                st.dataframe(pm_display[["Team A", "Team B", "By"]], use_container_width=True, hide_index=True)
+                sel_pm_id = st.selectbox("Select Match to Process", pm_df["id"].tolist(), format_func=lambda x: f"{pm_df[pm_df['id']==x]['team_a'].iloc[0]} vs {pm_df[pm_df['id']==x]['team_b'].iloc[0]}")
+                if st.button("🚀 Process Match Request"):
+                    req = pm_df[pm_df['id'] == sel_pm_id].iloc[0].to_dict()
+                    st.session_state['pending_match_request'] = req
+                    st.session_state['pending_match_db_id'] = sel_pm_id
+                    
+                    # AUTO-SELECT MATCH ID
+                    conn_find = get_conn()
+                    find_sql = """
+                        SELECT m.id, m.week FROM matches m
+                        JOIN teams t1 ON m.team1_id = t1.id
+                        JOIN teams t2 ON m.team2_id = t2.id
+                        WHERE (LOWER(t1.name) = LOWER(?) AND LOWER(t2.name) = LOWER(?))
+                           OR (LOWER(t1.name) = LOWER(?) AND LOWER(t2.name) = LOWER(?))
+                        AND m.status = 'scheduled'
+                        LIMIT 1
+                    """
+                    m_row = conn_find.execute(find_sql, (req['team_a'], req['team_b'], req['team_b'], req['team_a'])).fetchone()
+                    conn_find.close()
+                    
+                    if m_row:
+                        st.session_state['auto_selected_match_week'] = m_row[1]
+                        st.session_state['auto_selected_match_id'] = m_row[0]
+                        st.success(f"Linked to Scheduled Match (Week {m_row[1]})!")
+                    else:
+                        st.warning("Could not find a scheduled match for these teams. Please select manually.")
+                    
+                    st.rerun()
 
         with col_pp:
             st.markdown("#### Pending Players")
-            if not pp_files:
+            if pp_df.empty:
                 st.info("No pending player requests.")
             else:
-                pp_list = []
-                for f in pp_files:
-                    try:
-                        if f.get("is_local"):
-                            with open(os.path.join(os.getcwd(), f['path']), 'r') as file:
-                                d = json.load(file)
-                        else:
-                            d = get_file_content_from_github(f['path'])
-                        if d:
-                            pp_list.append({"File": f['name'], "Player": d.get('riot_id'), "By": d.get('submitted_by'), "Source": "Local" if f.get("is_local") else "GitHub"})
-                    except: pass
-                if pp_list:
-                    st.dataframe(pd.DataFrame(pp_list), use_container_width=True, hide_index=True)
-                    sel_pp_name = st.selectbox("Select Player to Process", [f['name'] for f in pp_files], key="pp_proc_sel")
-                    sel_pp_obj = next(f for f in pp_files if f['name'] == sel_pp_name)
-                    if st.button("🚀 Process Player Request"):
-                        if sel_pp_obj.get("is_local"):
-                            with open(os.path.join(os.getcwd(), sel_pp_obj['path']), 'r') as f:
-                                req = json.load(f)
-                        else:
-                            req = get_file_content_from_github(sel_pp_obj['path'])
-                        st.session_state['pending_player_request'] = req
-                        st.session_state['pending_player_file'] = sel_pp_obj['path']
-                        st.session_state['pending_player_is_local'] = sel_pp_obj.get("is_local", False)
-                        st.success("Request loaded into Player Add form below!")
-                        st.rerun()
+                pp_display = pp_df.rename(columns={"riot_id": "Player", "rank": "Rank", "submitted_by": "By"})
+                st.dataframe(pp_display[["Player", "Rank", "By"]], use_container_width=True, hide_index=True)
+                sel_pp_id = st.selectbox("Select Player to Process", pp_df["id"].tolist(), format_func=lambda x: pp_df[pp_df['id']==x]['riot_id'].iloc[0])
+                if st.button("🚀 Process Player Request"):
+                    req = pp_df[pp_df['id'] == sel_pp_id].iloc[0].to_dict()
+                    st.session_state['pending_player_request'] = req
+                    st.session_state['pending_player_db_id'] = sel_pp_id
+                    st.success("Request loaded into Player Add form below!")
+                    st.rerun()
         
         st.divider()
 
@@ -3343,7 +3398,15 @@ elif page == "Admin Panel":
                         st.error("Failed to create admin")
         st.subheader("Match Editor")
         wk_list = get_match_weeks()
-        wk = st.selectbox("Week", wk_list) if wk_list else None
+        
+        # USE AUTO-SELECTED WEEK IF AVAILABLE
+        def_wk_idx = 0
+        if 'auto_selected_match_week' in st.session_state:
+            try:
+                def_wk_idx = wk_list.index(st.session_state['auto_selected_match_week'])
+            except: pass
+
+        wk = st.selectbox("Week", wk_list, index=def_wk_idx) if wk_list else None
         if wk is None:
             st.info("No matches yet")
         else:
@@ -3353,7 +3416,17 @@ elif page == "Admin Panel":
             else:
                 # Vectorized option generation
                 match_opts = ("ID " + dfm['id'].astype(str) + ": " + dfm['t1_name'].fillna('') + " vs " + dfm['t2_name'].fillna('') + " (" + dfm['group_name'].fillna('') + ")").tolist()
-                idx = st.selectbox("Match", list(range(len(match_opts))), format_func=lambda i: match_opts[i])
+                
+                # USE AUTO-SELECTED MATCH ID IF AVAILABLE
+                def_idx = 0
+                if 'auto_selected_match_id' in st.session_state:
+                    try:
+                        def_idx = dfm[dfm['id'] == st.session_state['auto_selected_match_id']].index[0]
+                        # Wait, idx is relative to dfm, need the list index
+                        def_idx = list(dfm['id']).index(st.session_state['auto_selected_match_id'])
+                    except: pass
+
+                idx = st.selectbox("Match", list(range(len(match_opts))), index=def_idx, format_func=lambda i: match_opts[i])
                 m = dfm.iloc[idx]
 
                 c0, c1, c2 = st.columns([1,1,1])
@@ -3667,18 +3740,17 @@ elif page == "Admin Panel":
                                 
                                 conn_s.commit()
                                 
-                                # CLEANUP PENDING REQUEST
-                                if 'pending_match_file' in st.session_state:
-                                    try:
-                                        pfile = st.session_state['pending_match_file']
-                                        if st.session_state.get('pending_match_is_local'):
-                                            if os.path.exists(pfile): os.remove(pfile)
-                                        else:
-                                            delete_file_from_github(pfile, f"Processed bot match request: {m.get('id')}")
-                                        st.toast("Bot request cleaned up.")
-                                        del st.session_state['pending_match_file']
-                                        del st.session_state['pending_match_request']
-                                    except: pass
+                                 # CLEANUP PENDING REQUEST (DATABASE)
+                                 if 'pending_match_db_id' in st.session_state:
+                                     try:
+                                         pdbid = st.session_state['pending_match_db_id']
+                                         conn_s.execute("DELETE FROM pending_matches WHERE id=?", (int(pdbid),))
+                                         st.toast("Bot request cleared from database.")
+                                         del st.session_state['pending_match_db_id']
+                                         del st.session_state['pending_match_request']
+                                         if 'auto_selected_match_id' in st.session_state: del st.session_state['auto_selected_match_id']
+                                         if 'auto_selected_match_week' in st.session_state: del st.session_state['auto_selected_match_week']
+                                     except: pass
 
                                 st.cache_data.clear()
                                 st.success(f"Successfully saved Map {map_idx+1} and updated match totals!")
@@ -3711,12 +3783,14 @@ elif page == "Admin Panel":
                 preq = st.session_state['pending_player_request']
                 def_rid = preq.get('riot_id', "")
                 def_rk = preq.get('rank', rvals[0])
+                def_dh = preq.get('discord_handle', "")
                 if def_rk not in rvals: def_rk = rvals[0]
-                st.info(f"Filling from Bot Request: {def_rid}")
+                st.info(f"Filling from Bot Request: {def_rid} ({def_dh})")
 
             with st.form("add_player_admin"):
                 nm_new = st.text_input("Name", value=def_name)
                 rid_new = st.text_input("Riot ID", value=def_rid)
+                dh_new = st.text_input("Discord Handle", value=def_dh)
                 rk_new = st.selectbox("Rank", rvals, index=rvals.index(def_rk))
                 tmn_new = st.selectbox("Team", [""] + team_names, index=0)
                 add_ok = st.form_submit_button("Create Player")
@@ -3743,21 +3817,21 @@ elif page == "Admin Panel":
 
                     if can_add:
                         dtid_new = team_map.get(tmn_new) if tmn_new else None
-                        conn_add.execute("INSERT INTO players (name, riot_id, rank, default_team_id) VALUES (?, ?, ?, ?)", (nm_clean, rid_clean, rk_new, dtid_new))
+                        conn_add.execute("INSERT INTO players (name, riot_id, rank, discord_handle, default_team_id) VALUES (?, ?, ?, ?, ?)", (nm_clean, rid_clean, rk_new, dh_new, dtid_new))
                         conn_add.commit()
                         conn_add.close()
                         st.success("Player added")
                         
-                        # CLEANUP PENDING PLAYER REQUEST
-                        if 'pending_player_file' in st.session_state:
+                        # CLEANUP PENDING PLAYER REQUEST (DATABASE)
+                        if 'pending_player_db_id' in st.session_state:
                             try:
-                                pfile = st.session_state['pending_player_file']
-                                if st.session_state.get('pending_player_is_local'):
-                                    if os.path.exists(pfile): os.remove(pfile)
-                                else:
-                                    delete_file_from_github(pfile, f"Processed bot player request: {rid_new}")
-                                st.toast("Bot player request cleaned up.")
-                                del st.session_state['pending_player_file']
+                                pdbid = st.session_state['pending_player_db_id']
+                                conn_d = get_conn()
+                                conn_d.execute("DELETE FROM pending_players WHERE id=?", (int(pdbid),))
+                                conn_d.commit()
+                                conn_d.close()
+                                st.toast("Bot player request cleared from database.")
+                                del st.session_state['pending_player_db_id']
                                 del st.session_state['pending_player_request']
                             except: pass
 
@@ -3881,7 +3955,8 @@ elif page == "Admin Panel":
             column_config={
                 "id": st.column_config.NumberColumn("ID", disabled=True),
                 "team": st.column_config.SelectboxColumn("Team", options=[""] + team_names, required=False),
-                "rank": st.column_config.SelectboxColumn("Rank", options=rvals, required=False)
+                "rank": st.column_config.SelectboxColumn("Rank", options=rvals, required=False),
+                "discord_handle": st.column_config.TextColumn("Discord Handle")
             },
             key="player_editor_main"
         )
@@ -3961,9 +4036,9 @@ elif page == "Admin Panel":
                     
                     if pd.isna(pid):
                         if user_role in ['admin', 'dev']:
-                            conn_up.execute("INSERT INTO players (name, riot_id, rank, default_team_id) VALUES (?, ?, ?, ?)", (nm, rid, rk, dtid))
+                            conn_up.execute("INSERT INTO players (name, riot_id, rank, discord_handle, default_team_id) VALUES (?, ?, ?, ?, ?)", (nm, rid, rk, getattr(row, 'discord_handle', ""), dtid))
                     else:
-                        conn_up.execute("UPDATE players SET name=?, riot_id=?, rank=?, default_team_id=? WHERE id=?", (nm, rid, rk, dtid, int(pid)))
+                        conn_up.execute("UPDATE players SET name=?, riot_id=?, rank=?, discord_handle=?, default_team_id=? WHERE id=?", (nm, rid, rk, getattr(row, 'discord_handle', ""), dtid, int(pid)))
                 conn_up.commit()
                 st.cache_data.clear() # Clear cache to show player changes immediately
                 st.success("Players saved")

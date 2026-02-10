@@ -8,6 +8,7 @@ import re
 import sys
 import base64
 import requests
+import sqlite3
 from io import BytesIO
 from dotenv import load_dotenv
 
@@ -25,6 +26,9 @@ GH_TOKEN = os.getenv("GH_TOKEN")
 GH_OWNER = os.getenv("GH_OWNER", "SkipioFTW") # Default owner
 GH_REPO = os.getenv("GH_REPO", "valorant-s23-portal") # Default repo
 GUILD_ID = int(os.getenv("GUILD_ID", "1470636024110776322"))
+
+# Database path (relative or absolute)
+DB_PATH = os.getenv("DB_PATH", os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data", "valorant_s23.db"))
 
 # Intents
 intents = discord.Intents.default()
@@ -85,6 +89,16 @@ def upload_to_github(path, content_str, message):
     else:
         return False, f"Error {r.status_code}: {r.text}"
 
+def get_db_conn():
+    try:
+        return sqlite3.connect(DB_PATH)
+    except Exception as e:
+        print(f"Database connection error: {e}")
+        return None
+
+# Allowed ranks for validation
+ALLOWED_RANKS = ["Unranked", "Iron/Bronze", "Silver", "Gold", "Platinum", "Diamond", "Ascendant", "Immortal 1/2", "Immortal 3/Radiant"]
+
 
 
 # --- SLASH COMMANDS ---
@@ -99,38 +113,37 @@ def upload_to_github(path, content_str, message):
 async def match(interaction: discord.Interaction, team_a: str, team_b: str, group: str, url: str):
     await interaction.response.defer(thinking=True)
     
-    # Extract intended ID or use random UUID if URL is weird
-    match_id = "unknown"
+    conn = get_db_conn()
+    if not conn:
+        await interaction.followup.send("❌ Error: Could not connect to the database. Please contact an Admin.")
+        return
+
+    # 1. VALIDATION: Check if Teams exist
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM teams WHERE LOWER(name) = LOWER(?)", (team_a,))
+    if not cursor.fetchone():
+        await interaction.followup.send(f"❌ Error: **Team A ('{team_a}')** not found in the database. Please check the spelling.")
+        conn.close()
+        return
+        
+    cursor.execute("SELECT name FROM teams WHERE LOWER(name) = LOWER(?)", (team_b,))
+    if not cursor.fetchone():
+        await interaction.followup.send(f"❌ Error: **Team B ('{team_b}')** not found in the database. Please check the spelling.")
+        conn.close()
+        return
+
+    # 2. INSERT into Pending Table
     try:
-        if "tracker.gg" in url:
-            match_id = url.split('/')[-1]
-        else:
-            import uuid
-            match_id = str(uuid.uuid4())[:8]
-    except:
-        match_id = "unknown"
-
-    # Create Pending Match Object
-    data = {
-        "team_a": team_a,
-        "team_b": team_b,
-        "group": group,
-        "url": url,
-        "submitted_by": str(interaction.user),
-        "status": "pending_verification",
-        "timestamp": str(interaction.created_at)
-    }
-
-    # Upload to pending_matches folder
-    json_str = json.dumps(data, indent=4)
-    file_path = f"assets/pending_matches/pending_{match_id}.json"
-    
-    success, result = upload_to_github(file_path, json_str, f"Bot Add Pending Match {match_id}")
-    
-    if success:
-        await interaction.followup.send(f"✅ **Match Queued for Verification!**\nAdmin will verify scrape data.\nFile: `{file_path}`")
-    else:
-        await interaction.followup.send(f"❌ GitHub Upload Failed: {result}")
+        cursor.execute("""
+            INSERT INTO pending_matches (team_a, team_b, group_name, url, submitted_by)
+            VALUES (?, ?, ?, ?, ?)
+        """, (team_a, team_b, group, url, str(interaction.user)))
+        conn.commit()
+        await interaction.followup.send(f"✅ **Match Queued!**\nTeams: `{team_a} vs {team_b}`\nAdmin will verify the data in the dashboard.")
+    except Exception as e:
+        await interaction.followup.send(f"❌ Database Error: {str(e)}")
+    finally:
+        conn.close()
 
 @bot.tree.command(name="player", description="Register a new player for approval")
 @discord.app_commands.describe(
@@ -141,27 +154,31 @@ async def match(interaction: discord.Interaction, team_a: str, team_b: str, grou
 async def player(interaction: discord.Interaction, discord_handle: str, riot_id: str, rank: str):
     await interaction.response.defer()
     
-    # Create valid filename
-    safe_name = re.sub(r'[^a-zA-Z0-9]', '_', riot_id)
-    
-    data = {
-        "discord_handle": discord_handle,
-        "riot_id": riot_id,
-        "rank": rank,
-        "submitted_by": str(interaction.user),
-        "status": "pending",
-        "timestamp": str(interaction.created_at)
-    }
-    
-    json_str = json.dumps(data, indent=4)
-    file_path = f"assets/pending_players/{safe_name}.json"
-    
-    success, result = upload_to_github(file_path, json_str, f"Bot Add Pending Player {riot_id}")
-    
-    if success:
-        await interaction.followup.send(f"✅ **Player Registration Submitted!**\nPlayer: `{riot_id}`\nRank: `{rank}`\nPending Approval in Admin Panel.")
-    else:
-        await interaction.followup.send(f"❌ Upload Failed: {result}")
+    # 1. VALIDATION: Check Rank
+    clean_rank = rank.strip()
+    if clean_rank not in ALLOWED_RANKS:
+        ranks_list = "\n".join([f"- {r}" for r in ALLOWED_RANKS])
+        await interaction.followup.send(f"❌ Error: **'{rank}'** is not a valid rank.\nPlease use one of the following:\n{ranks_list}")
+        return
+
+    # 2. INSERT into Pending Table
+    conn = get_db_conn()
+    if not conn:
+        await interaction.followup.send("❌ Error: Could not connect to the database.")
+        return
+
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO pending_players (riot_id, rank, discord_handle, submitted_by)
+            VALUES (?, ?, ?, ?)
+        """, (riot_id, clean_rank, discord_handle, str(interaction.user)))
+        conn.commit()
+        await interaction.followup.send(f"✅ **Registration Submitted!**\nPlayer: `{riot_id}`\nRank: `{clean_rank}`\nPending Approval in Admin Panel.")
+    except Exception as e:
+        await interaction.followup.send(f"❌ Database Error: {str(e)}")
+    finally:
+        conn.close()
 
 @bot.event
 async def on_ready():
