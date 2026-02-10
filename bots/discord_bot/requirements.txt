@@ -5,4 +5,4 @@ pandas
 requests
 PyGithub
 python-dotenv
-psycopg2
+psycopg2-binary

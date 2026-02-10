@@ -9,4 +9,4 @@ requests
 numpy
 joblib
 selenium
-psycopg2
+psycopg2-binary
