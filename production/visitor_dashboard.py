@@ -182,48 +182,53 @@ class UnifiedDBWrapper:
         self.conn.close()
 
 def get_conn():
-    # Priority: SUPABASE_DB_URL, then legacy SUPABASE_URL
-    db_url = get_secret("SUPABASE_DB_URL") or get_secret("SUPABASE_URL")
-    
+    # Priority: SUPABASE_DB_URL, then legacy SUPABASE_URL (filtering for Postgres only)
+    db_url = get_secret("SUPABASE_DB_URL")
+    if not db_url or "postgresql" not in str(db_url):
+        # Fallback to SUPABASE_URL only if it looks like a postgres string
+        potential_fallback = get_secret("SUPABASE_URL")
+        if potential_fallback and "postgresql" in str(potential_fallback):
+            db_url = potential_fallback
+            
     import psycopg2
     conn = None
+    last_error = None
     
     if db_url:
         db_url_str = str(db_url).strip().strip('"').strip("'")
         
         # Method 1: Try direct connection string
         try:
-            conn = psycopg2.connect(db_url_str, connect_timeout=5)
-        except Exception:
+            # Add sslmode if missing for Supabase
+            params = db_url_str
+            if "supabase" in db_url_str and "sslmode" not in db_url_str:
+                params += "?sslmode=require" if "?" not in db_url_str else "&sslmode=require"
+            conn = psycopg2.connect(params, connect_timeout=5)
+        except Exception as e:
+            last_error = f"psycopg2 URL Error: {e}"
             # Method 2: Robust Manual Parsing
-            # Logic: user:password@host:port/database
             try:
                 from urllib.parse import unquote
-                # Trim the 'postgresql://' prefix
                 prefix_len = 0
                 if "://" in db_url_str:
                     prefix_len = db_url_str.find("://") + 3
                 core = db_url_str[prefix_len:]
                 
-                # Find the split between credentials and host (rightmost @)
                 at_idx = core.rfind("@")
                 if at_idx > 0:
                     creds = core[:at_idx]
                     host_info = core[at_idx+1:]
                     
-                    # Split creds by first colon (user:pass)
                     col_idx = creds.find(":")
                     if col_idx > 0:
                         user = unquote(creds[:col_idx])
                         pwd = unquote(creds[col_idx+1:])
                         
-                        # Split host_info by first slash (host:port/db)
                         slash_idx = host_info.find("/")
                         if slash_idx > 0:
                             host_port = host_info[:slash_idx]
                             db_name = unquote(host_info[slash_idx+1:])
                             
-                            # Split host_port by colon (host:port)
                             if ":" in host_port:
                                 host, port = host_port.split(":")
                             else:
@@ -235,10 +240,11 @@ def get_conn():
                                 host=host,
                                 port=port,
                                 database=db_name,
-                                connect_timeout=10
+                                connect_timeout=10,
+                                sslmode='require'
                             )
-            except Exception:
-                pass
+            except Exception as e2:
+                last_error += f" | Manual Parse Error: {e2}"
     
     if conn:
         return UnifiedDBWrapper(conn)
@@ -246,15 +252,18 @@ def get_conn():
     # Fallback to local
     if os.path.exists(DB_PATH):
         try:
-            # If we are in a streamlit context, show a warning
             import streamlit as st
-            if db_url:
-                st.warning("⚠️ PostgreSQL connection failed. Falling back to local data.")
+            # Only show error ONCE per session to avoid clutter
+            if db_url and 'db_conn_error_shown' not in st.session_state:
+                st.warning(f"⚠️ Supabase connection failed. Using local data fallback.")
+                if last_error:
+                    st.error(f"Engine Debug: {last_error}")
+                st.session_state['db_conn_error_shown'] = True
         except:
             pass
         return UnifiedDBWrapper(sqlite3.connect(DB_PATH))
     
-    raise ValueError("No database connection available (Supabase failed and local DB missing).")
+    raise ValueError(f"Database connection unavailable. Error: {last_error}")
 
 def should_use_cache():
     # If no admin is active in the last 5 minutes, we can use cache
