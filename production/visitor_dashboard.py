@@ -184,11 +184,14 @@ class UnifiedDBWrapper:
 def get_conn():
     # Priority: SUPABASE_DB_URL, then legacy SUPABASE_URL (filtering for Postgres only)
     db_url = get_secret("SUPABASE_DB_URL")
-    if not db_url or "postgresql" not in str(db_url):
+    fallback_used = False
+    
+    if not db_url or not str(db_url).startswith("postgresql"):
         # Fallback to SUPABASE_URL only if it looks like a postgres string
         potential_fallback = get_secret("SUPABASE_URL")
-        if potential_fallback and "postgresql" in str(potential_fallback):
+        if potential_fallback and str(potential_fallback).startswith("postgresql"):
             db_url = potential_fallback
+            fallback_used = True
             
     import psycopg2
     conn = None
@@ -199,11 +202,11 @@ def get_conn():
         
         # Method 1: Try direct connection string
         try:
-            # Add sslmode if missing for Supabase
+            # Force target_session_attrs=read-write and sslmode=require for stability
             params = db_url_str
-            if "supabase" in db_url_str and "sslmode" not in db_url_str:
+            if "sslmode" not in db_url_str:
                 params += "?sslmode=require" if "?" not in db_url_str else "&sslmode=require"
-            conn = psycopg2.connect(params, connect_timeout=5)
+            conn = psycopg2.connect(params, connect_timeout=10)
         except Exception as e:
             last_error = f"psycopg2 URL Error: {e}"
             # Method 2: Robust Manual Parsing
@@ -240,11 +243,13 @@ def get_conn():
                                 host=host,
                                 port=port,
                                 database=db_name,
-                                connect_timeout=10,
+                                connect_timeout=15,
                                 sslmode='require'
                             )
             except Exception as e2:
                 last_error += f" | Manual Parse Error: {e2}"
+    else:
+        last_error = "SUPABASE_DB_URL secret NOT FOUND or is not a postgresql:// string."
     
     if conn:
         return UnifiedDBWrapper(conn)
@@ -254,7 +259,7 @@ def get_conn():
         try:
             import streamlit as st
             # Only show error ONCE per session to avoid clutter
-            if db_url and 'db_conn_error_shown' not in st.session_state:
+            if 'db_conn_error_shown' not in st.session_state:
                 st.warning(f"⚠️ Supabase connection failed. Using local data fallback.")
                 if last_error:
                     st.error(f"Engine Debug: {last_error}")
@@ -264,6 +269,53 @@ def get_conn():
         return UnifiedDBWrapper(sqlite3.connect(DB_PATH))
     
     raise ValueError(f"Database connection unavailable. Error: {last_error}")
+
+def run_connection_diagnostics():
+    """Runs a series of tests to help the user fix connection issues."""
+    st.markdown("### 🔍 Connection Diagnostics")
+    
+    # 1. Check Secrets
+    db_url = get_secret("SUPABASE_DB_URL")
+    api_url = get_secret("SUPABASE_URL")
+    api_key = get_secret("SUPABASE_KEY")
+    
+    cols = st.columns(3)
+    with cols[0]:
+        st.write("**SUPABASE_DB_URL**")
+        if db_url:
+            st.success("Found ✅")
+            if not str(db_url).startswith("postgresql"):
+                st.warning("Invalid prefix (should be `postgresql://`)")
+        else:
+            st.error("MISSING ❌")
+            
+    with cols[1]:
+        st.write("**SUPABASE_URL (API)**")
+        if api_url:
+            st.success("Found ✅")
+        else:
+            st.error("MISSING ❌")
+            
+    with cols[2]:
+        st.write("**SUPABASE_KEY**")
+        if api_key:
+            st.success("Found ✅")
+        else:
+            st.error("MISSING ❌")
+            
+    # 2. Test Supabase SDK Connectivity (HTTP)
+    st.write("**Testing Supabase SDK (HTTP/REST)...**")
+    if supabase:
+        try:
+            # Try to fetch a single row from teams to test API
+            res = supabase.table("teams").select("count", count="exact").limit(1).execute()
+            st.success(f"Supabase SDK connection SUCCESS! API is reachable.")
+        except Exception as e:
+            st.error(f"Supabase SDK failed: {e}")
+    else:
+        st.error("Supabase SDK is not initialized.")
+        
+    st.info("💡 If SDK works but PostgreSQL doesn't, Streamlit Cloud might be blocking port 5432. Try using port 6543 (transaction cooler) in your DB URL.")
 
 def should_use_cache():
     # If no admin is active in the last 5 minutes, we can use cache
@@ -2281,6 +2333,8 @@ if st.session_state['is_admin']:
         pages.insert(pages.index("Admin Panel") if "Admin Panel" in pages else len(pages), "Playoffs")
     if "Admin Panel" not in pages:
         pages.append("Admin Panel")
+    if "Diagnostics" not in pages:
+        pages.append("Diagnostics")
 
 # Top Navigation Bar
 st.markdown('<div class="nav-wrapper"><div class="nav-logo">VALORANT S23 • PORTAL</div></div>', unsafe_allow_html=True)
@@ -4518,3 +4572,26 @@ elif page == "Player Profile":
                 maps_display = prof['maps'][['match_id','map_index','agent','acs','kills','deaths','assists','is_sub']].copy()
                 maps_display.columns = ['Match ID', 'Map', 'Agent', 'ACS', 'K', 'D', 'A', 'Sub']
                 st.dataframe(maps_display, hide_index=True, use_container_width=True)
+
+elif page == "Diagnostics":
+    st.markdown('<h1 class="main-header">CONNECTION DIAGNOSTICS</h1>', unsafe_allow_html=True)
+    st.info("Use this page to troubleshoot database connection issues and verify Supabase configuration.")
+    run_connection_diagnostics()
+    
+    st.markdown("---")
+    st.subheader("Manual Connection Test")
+    if st.button("Run PostgreSQL Connection Test"):
+        with st.spinner("Connecting..."):
+            try:
+                conn = get_conn()
+                is_postgres = not getattr(conn, 'is_sqlite', isinstance(conn, sqlite3.Connection))
+                if is_postgres:
+                    st.success("✅ Successfully connected to PostgreSQL via psycopg2!")
+                    # Try a simple query
+                    res = conn.execute("SELECT 1").fetchone()
+                    st.write(f"Test Query Result: {res}")
+                else:
+                    st.warning("⚠️ Connected to local SQLite fallback. PostgreSQL connection failing.")
+                conn.close()
+            except Exception as e:
+                st.error(f"Connection Failed: {e}")
