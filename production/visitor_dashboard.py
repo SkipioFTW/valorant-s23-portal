@@ -125,6 +125,11 @@ if supabase_api_url and supabase_api_key:
     except Exception as e:
         st.error(f"Error initializing Supabase SDK: {e}")
 
+# Enforce Supabase-only mode
+if supabase is None:
+    st.error("Supabase is not configured. Please set SUPABASE_URL and SUPABASE_KEY.")
+    st.stop()
+
 class UnifiedCursorWrapper:
     def __init__(self, cur, is_sqlite):
         self.cur = cur
@@ -1430,34 +1435,7 @@ def get_substitutions_log():
         except Exception:
             pass
 
-    # Fallback to SQL (SQLite)
-    if df.empty:
-        conn = get_conn()
-        try:
-            df = pd.read_sql(
-                """
-                SELECT msm.match_id, msm.map_index, m.week, m.group_name,
-                       t.name AS team, p.name AS player, p.riot_id AS player_riot,
-                       sp.name AS subbed_for, sp.riot_id AS sub_riot,
-                       msm.agent, msm.acs, msm.kills, msm.deaths, msm.assists
-                FROM match_stats_map msm
-                JOIN matches m ON msm.match_id = m.id
-                LEFT JOIN teams t ON msm.team_id = t.id
-                LEFT JOIN players p ON msm.player_id = p.id
-                LEFT JOIN players sp ON msm.subbed_for_id = sp.id
-                WHERE msm.is_sub = 1 AND m.status = 'completed'
-                ORDER BY m.week, msm.match_id, msm.map_index
-                """,
-                conn,
-            )
-            if not df.empty:
-                df['player'] = df.apply(lambda r: f"{r['player']} ({r['player_riot']})" if r['player_riot'] and str(r['player_riot']).strip() else r['player'], axis=1)
-                df['subbed_for'] = df.apply(lambda r: f"{r['subbed_for']} ({r['sub_riot']})" if r['sub_riot'] and str(r['sub_riot']).strip() else r['subbed_for'], axis=1)
-                df = df.drop(columns=['player_riot', 'sub_riot'])
-        except Exception:
-            conn.close()
-            return pd.DataFrame()
-        conn.close()
+    # Supabase-only: return df (may be empty) without SQLite fallback
     return df
 
 @st.cache_data(ttl=300)
@@ -1517,48 +1495,9 @@ def get_player_profile(player_id):
         except Exception:
             pass
 
-    # Fallback to SQL (SQLite)
+    # Supabase-only: if not found via Supabase, return {}
     if info.empty:
-        conn = get_conn()
-        try:
-            info = pd.read_sql(
-                "SELECT p.id, p.name, p.riot_id, p.rank, t.tag as team FROM players p LEFT JOIN teams t ON p.default_team_id=t.id WHERE p.id=%s",
-                conn, params=(int(player_id),)
-            )
-            if info.empty:
-                conn.close()
-                return {}
-                
-            rank_val = info.iloc[0]['rank']
-            stats = pd.read_sql(
-                """
-                SELECT msm.match_id, msm.map_index, msm.agent, msm.acs, msm.kills, msm.deaths, msm.assists, msm.is_sub, m.week
-                FROM match_stats_map msm
-                JOIN matches m ON msm.match_id = m.id
-                WHERE msm.player_id=%s AND m.status = 'completed'
-                """,
-                conn, params=(int(player_id),)
-            )
-            
-            bench = pd.read_sql(
-                """
-                SELECT 
-                    AVG(msm.acs) as lg_acs, AVG(msm.kills) as lg_k, AVG(msm.deaths) as lg_d, AVG(msm.assists) as lg_a,
-                    AVG(CASE WHEN p.rank = %s THEN msm.acs ELSE NULL END) as r_acs,
-                    AVG(CASE WHEN p.rank = %s THEN msm.kills ELSE NULL END) as r_k,
-                    AVG(CASE WHEN p.rank = %s THEN msm.deaths ELSE NULL END) as r_d,
-                    AVG(CASE WHEN p.rank = %s THEN msm.assists ELSE NULL END) as r_a
-                FROM match_stats_map msm
-                JOIN matches m ON msm.match_id = m.id
-                JOIN players p ON msm.player_id = p.id
-                WHERE m.status = 'completed'
-                """,
-                conn, params=(rank_val, rank_val, rank_val, rank_val)
-            ).iloc[0]
-            conn.close()
-        except Exception:
-            if 'conn' in locals(): conn.close()
-            return {}
+        return {}
             
     # Post-processing
     p_name = info.iloc[0]['name']
@@ -1837,7 +1776,7 @@ def _get_standings_cached():
     
     # Initialize stats using vectorization
     if matches_df.empty:
-        for col in ['Wins', 'Losses', 'RD', 'Points', 'Points Against', 'Played']:
+        for col in ['Wins', 'Losses', 'PD', 'Points', 'Points Against', 'Played']:
             teams_df[col] = 0
         return teams_df
 
@@ -1938,35 +1877,7 @@ def _get_player_leaderboard_cached():
         except Exception:
             pass
 
-    # Fallback to SQL (SQLite)
-    if df.empty:
-        conn = get_conn()
-        try:
-            df = pd.read_sql_query(
-                """
-                SELECT p.id as player_id,
-                       p.name,
-                       p.riot_id,
-                       t.tag as team,
-                       COUNT(DISTINCT msm.match_id) as games,
-                       AVG(msm.acs) as avg_acs,
-                       SUM(msm.kills) as total_kills,
-                       SUM(msm.deaths) as total_deaths,
-                       SUM(msm.assists) as total_assists
-                FROM match_stats_map msm
-                JOIN matches m ON msm.match_id = m.id
-                JOIN players p ON msm.player_id = p.id
-                LEFT JOIN teams t ON p.default_team_id = t.id
-                WHERE m.status = 'completed'
-                GROUP BY p.id, p.name, p.riot_id
-                HAVING games > 0
-                """,
-                conn,
-            )
-        except Exception:
-            conn.close()
-            return pd.DataFrame()
-        conn.close()
+    # Supabase-only: no SQLite fallback
     
     if not df.empty:
         # Format name to include Riot ID if available
@@ -2007,29 +1918,7 @@ def get_week_matches(week):
         except Exception:
             pass
 
-    if df.empty:
-        conn = get_conn()
-        try:
-            df = pd.read_sql_query(
-                """
-                SELECT m.id, m.week, m.group_name, m.status, m.format, m.maps_played, m.is_forfeit,
-                       t1.name as t1_name, t2.name as t2_name,
-                       m.score_t1, m.score_t2, t1.id as t1_id, t2.id as t2_id,
-                       mm.team1_rounds, mm.team2_rounds
-                FROM matches m
-                JOIN teams t1 ON m.team1_id = t1.id
-                JOIN teams t2 ON m.team2_id = t2.id
-                LEFT JOIN match_maps mm ON m.id = mm.match_id AND mm.map_index = 0
-                WHERE m.week = %s AND m.match_type = 'regular'
-                ORDER BY m.id
-                """,
-                conn,
-                params=(week,),
-            )
-        except Exception:
-            conn.close()
-            return pd.DataFrame()
-        conn.close()
+    # Supabase-only: no SQLite fallback
 
     if not df.empty and 'team1_rounds' in df.columns:
         is_bo1 = (df['format'].str.upper() == 'BO1') | (df['format'].isna())
@@ -2067,30 +1956,7 @@ def get_playoff_matches():
         except Exception:
             pass
 
-    if df.empty:
-        conn = get_conn()
-        try:
-            df = pd.read_sql_query(
-                """
-                SELECT m.id, m.playoff_round, m.bracket_pos, m.status, m.format, m.maps_played, m.is_forfeit,
-                       m.bracket_label,
-                       t1.name as t1_name, t2.name as t2_name,
-                       m.score_t1, m.score_t2, t1.id as t1_id, t2.id as t2_id,
-                       m.winner_id,
-                       mm.team1_rounds, mm.team2_rounds
-                FROM matches m
-                LEFT JOIN teams t1 ON m.team1_id = t1.id
-                LEFT JOIN teams t2 ON m.team2_id = t2.id
-                LEFT JOIN match_maps mm ON m.id = mm.match_id AND mm.map_index = 0
-                WHERE m.match_type = 'playoff'
-                ORDER BY m.playoff_round ASC, m.bracket_pos ASC
-                """,
-                conn
-            )
-        except Exception:
-            conn.close()
-            return pd.DataFrame()
-        conn.close()
+    # Supabase-only: no SQLite fallback
 
     if not df.empty and 'team1_rounds' in df.columns:
         is_bo1 = (df['format'].str.upper() == 'BO1') | (df['format'].isna())
