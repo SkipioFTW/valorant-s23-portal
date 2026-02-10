@@ -103,39 +103,76 @@ else:
 # Valorant Map Catalog
 maps_catalog = ["Abyss", "Ascent", "Bind", "Breeze", "Fracture", "Haven", "Icebox", "Lotus", "Pearl", "Split", "Sunset", "Corrode"]
 
-class PostgresConnectionWrapper:
+class UnifiedCursorWrapper:
+    def __init__(self, cur, is_sqlite):
+        self.cur = cur
+        self.is_sqlite = is_sqlite
+    
+    def execute(self, sql, params=None):
+        final_sql = sql
+        if self.is_sqlite and "%s" in sql:
+            final_sql = sql.replace("%s", "?")
+        if params:
+            return self.cur.execute(final_sql, params)
+        return self.cur.execute(final_sql)
+        
+    def __getattr__(self, name):
+        return getattr(self.cur, name)
+    
+    def __iter__(self):
+        return iter(self.cur)
+
+class UnifiedDBWrapper:
     def __init__(self, conn):
         self.conn = conn
+        self.is_sqlite = isinstance(conn, sqlite3.Connection)
+        
     def execute(self, sql, params=None):
-        cur = self.conn.cursor()
+        cur = self.cursor()
         cur.execute(sql, params)
         return cur
+        
+    def cursor(self):
+        return UnifiedCursorWrapper(self.conn.cursor(), self.is_sqlite)
+        
     def commit(self):
         self.conn.commit()
     def close(self):
         self.conn.close()
-    def cursor(self):
-        return self.conn.cursor()
     def rollback(self):
         self.conn.rollback()
+    def __getattr__(self, name):
+        return getattr(self.conn, name)
 
 def get_conn():
     supabase_url = get_secret("SUPABASE_URL")
-    if not supabase_url:
-        # Absolute fallback to local if really needed, but user wants Supabase produce
-        if os.path.exists(DB_PATH):
-            return sqlite3.connect(DB_PATH)
-        raise ValueError("SUPABASE_URL not found in secrets or environment.")
     
-    import psycopg2
-    try:
-        conn = psycopg2.connect(supabase_url)
-        return PostgresConnectionWrapper(conn)
-    except Exception as e:
-        # Last resort fallback if Supabase is down
+    if supabase_url:
+        import psycopg2
+        try:
+            conn = psycopg2.connect(supabase_url)
+            return UnifiedDBWrapper(conn)
+        except Exception as e:
+            # Check if this is a streamlit environment to use st.error
+            try:
+                import streamlit as st
+                st.error(f"⚠️ Supabase Connection Failed: {str(e)}")
+            except:
+                print(f"Supabase Connection Failed: {e}")
+                
+            # Fallback to local if allowed
+            if os.path.exists(DB_PATH):
+                try:
+                    import streamlit as st
+                    st.warning("🔄 Falling back to local database...")
+                except:
+                    print("Falling back to local database...")
+                return UnifiedDBWrapper(sqlite3.connect(DB_PATH))
+            raise e
+    else:
         if os.path.exists(DB_PATH):
-            return sqlite3.connect(DB_PATH)
-        raise e
+            return UnifiedDBWrapper(sqlite3.connect(DB_PATH))
+        raise ValueError("No database connection available (SUPABASE_URL missing and local DB not found).")
 
 def should_use_cache():
     # If no admin is active in the last 5 minutes, we can use cache

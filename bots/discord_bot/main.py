@@ -94,28 +94,64 @@ def upload_to_github(path, content_str, message):
     else:
         return False, f"Error {r.status_code}: {r.text}"
 
+class UnifiedCursorWrapper:
+    def __init__(self, cur, is_sqlite):
+        self.cur = cur
+        self.is_sqlite = is_sqlite
+    
+    def execute(self, sql, params=None):
+        final_sql = sql
+        if self.is_sqlite and "%s" in sql:
+            final_sql = sql.replace("%s", "?")
+        if params:
+            return self.cur.execute(final_sql, params)
+        return self.cur.execute(final_sql)
+        
+    def __getattr__(self, name):
+        return getattr(self.cur, name)
+    
+    def __iter__(self):
+        return iter(self.cur)
+
+class UnifiedDBWrapper:
+    def __init__(self, conn):
+        self.conn = conn
+        self.is_sqlite = isinstance(conn, sqlite3.Connection)
+        
+    def execute(self, sql, params=None):
+        cur = self.cursor()
+        cur.execute(sql, params)
+        return cur
+        
+    def cursor(self):
+        return UnifiedCursorWrapper(self.conn.cursor(), self.is_sqlite)
+        
+    def commit(self):
+        self.conn.commit()
+    def close(self):
+        self.conn.close()
+    def __getattr__(self, name):
+        return getattr(self.conn, name)
+
 def get_db_conn():
     if SUPABASE_URL:
+        import psycopg2
         try:
             # Check if it's a URL or a dictionary (if parsed)
             if isinstance(SUPABASE_URL, str):
-                return psycopg2.connect(SUPABASE_URL)
+                conn = psycopg2.connect(SUPABASE_URL)
             else:
-                return psycopg2.connect(**SUPABASE_URL)
+                conn = psycopg2.connect(**SUPABASE_URL)
+            return UnifiedDBWrapper(conn)
         except Exception as e:
             print(f"Supabase connection error: {e}")
-            # Fallback to local if absolutely necessary for dev, but production should use Supabase
-            try:
-                if os.path.exists(DB_PATH):
-                    return sqlite3.connect(DB_PATH)
-            except:
-                pass
+            # Fallback to local if absolutely necessary
+            if os.path.exists(DB_PATH):
+                return UnifiedDBWrapper(sqlite3.connect(DB_PATH))
             return None
-    try:
-        if os.path.exists(DB_PATH):
-            return sqlite3.connect(DB_PATH)
-    except Exception as e:
-        print(f"Database connection error: {e}")
+    
+    if os.path.exists(DB_PATH):
+        return UnifiedDBWrapper(sqlite3.connect(DB_PATH))
     return None
 
 # Allowed ranks for validation
