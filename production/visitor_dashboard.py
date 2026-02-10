@@ -8,6 +8,11 @@ import re
 import pandas as pd
 import hmac
 import time
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+except ImportError:
+    psycopg2 = None
 import base64
 import requests
 
@@ -31,26 +36,30 @@ def init_pending_tables(conn=None):
         conn = get_conn()
         should_close = True
     
-    conn.execute("""
+    is_postgres = not isinstance(conn, sqlite3.Connection)
+    pk_def = "SERIAL PRIMARY KEY" if is_postgres else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    timestamp_def = "TIMESTAMP DEFAULT CURRENT_TIMESTAMP" if is_postgres else "DATETIME DEFAULT CURRENT_TIMESTAMP"
+
+    conn.execute(f"""
         CREATE TABLE IF NOT EXISTS pending_matches (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {pk_def},
             team_a TEXT,
             team_b TEXT,
             group_name TEXT,
             url TEXT,
             submitted_by TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            timestamp {timestamp_def}
         )
     """)
     
-    conn.execute("""
+    conn.execute(f"""
         CREATE TABLE IF NOT EXISTS pending_players (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {pk_def},
             riot_id TEXT,
             rank TEXT,
             discord_handle TEXT,
             submitted_by TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            timestamp {timestamp_def}
         )
     """)
     
@@ -94,21 +103,64 @@ else:
 # Valorant Map Catalog
 maps_catalog = ["Abyss", "Ascent", "Bind", "Breeze", "Fracture", "Haven", "Icebox", "Lotus", "Pearl", "Split", "Sunset", "Corrode"]
 
+class PostgresConnectionWrapper:
+    def __init__(self, conn):
+        self.conn = conn
+    def execute(self, sql, params=None):
+        cur = self.conn.cursor()
+        cur.execute(sql, params)
+        return cur
+    def commit(self):
+        self.conn.commit()
+    def close(self):
+        self.conn.close()
+    def cursor(self):
+        return self.conn.cursor()
+    def rollback(self):
+        self.conn.rollback()
+
 def get_conn():
-    return sqlite3.connect(DB_PATH)
+    supabase_url = get_secret("SUPABASE_URL")
+    if not supabase_url:
+        # Absolute fallback to local if really needed, but user wants Supabase produce
+        if os.path.exists(DB_PATH):
+            return sqlite3.connect(DB_PATH)
+        raise ValueError("SUPABASE_URL not found in secrets or environment.")
+    
+    import psycopg2
+    try:
+        conn = psycopg2.connect(supabase_url)
+        return PostgresConnectionWrapper(conn)
+    except Exception as e:
+        # Last resort fallback if Supabase is down
+        if os.path.exists(DB_PATH):
+            return sqlite3.connect(DB_PATH)
+        raise e
+
+def should_use_cache():
+    # If no admin is active in the last 5 minutes, we can use cache
+    active_admin = get_active_admin_session()
+    if active_admin:
+        return False
+    return True
 
 def init_admin_table(conn=None):
     should_close = False
     if conn is None:
         conn = get_conn()
         should_close = True
+        
+    is_postgres = not isinstance(conn, sqlite3.Connection)
+    pk_def = "SERIAL PRIMARY KEY" if is_postgres else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    blob_def = "BYTEA" if is_postgres else "BLOB"
+
     conn.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS admins (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {pk_def},
             username TEXT UNIQUE NOT NULL,
-            password_hash BLOB NOT NULL,
-            salt BLOB NOT NULL,
+            password_hash {blob_def} NOT NULL,
+            salt {blob_def} NOT NULL,
             is_active INTEGER NOT NULL DEFAULT 1
         )
         """
@@ -122,22 +174,35 @@ def init_session_activity_table(conn=None):
     if conn is None:
         conn = get_conn()
         should_close = True
+    
+    is_postgres = not isinstance(conn, sqlite3.Connection)
+    pk_type = "TEXT PRIMARY KEY"
+    real_type = "DOUBLE PRECISION" if is_postgres else "REAL"
+    
     conn.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS session_activity (
-            session_id TEXT PRIMARY KEY,
+            session_id {pk_type},
             username TEXT,
             role TEXT,
-            last_activity REAL,
+            last_activity {real_type},
             ip_address TEXT
         )
         """
     )
-    # Check if ip_address column exists (for existing databases)
-    cursor = conn.execute("PRAGMA table_info(session_activity)")
-    columns = [row[1] for row in cursor.fetchall()]
-    if 'ip_address' not in columns:
-        conn.execute("ALTER TABLE session_activity ADD COLUMN ip_address TEXT")
+    
+    # Column check logic
+    if is_postgres:
+        with conn.cursor() as cur:
+            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name='session_activity'")
+            columns = [row[0] for row in cur.fetchall()]
+            if 'ip_address' not in columns:
+                cur.execute("ALTER TABLE session_activity ADD COLUMN ip_address TEXT")
+    else:
+        cursor = conn.execute("PRAGMA table_info(session_activity)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if 'ip_address' not in columns:
+            conn.execute("ALTER TABLE session_activity ADD COLUMN ip_address TEXT")
         
     if should_close:
         conn.commit()
@@ -247,12 +312,27 @@ def track_user_activity():
         conn = get_conn()
         
         # Always update current session
-        conn.execute(
-            "INSERT OR REPLACE INTO session_activity (session_id, username, role, last_activity, ip_address) VALUES (?, ?, ?, ?, ?)",
-            (session_id, username, role, time.time(), ip_address)
-        )
+        is_postgres = not isinstance(conn, sqlite3.Connection)
+        if is_postgres:
+            conn.execute(
+                """
+                INSERT INTO session_activity (session_id, username, role, last_activity, ip_address) 
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (session_id) DO UPDATE SET 
+                    username = EXCLUDED.username, 
+                    role = EXCLUDED.role, 
+                    last_activity = EXCLUDED.last_activity, 
+                    ip_address = EXCLUDED.ip_address
+                """,
+                (session_id, username, role, time.time(), ip_address)
+            )
+        else:
+            conn.execute(
+                "INSERT OR REPLACE INTO session_activity (session_id, username, role, last_activity, ip_address) VALUES (%s, %s, %s, %s, %s)",
+                (session_id, username, role, time.time(), ip_address)
+            )
         # Cleanup old sessions (older than 30 minutes)
-        conn.execute("DELETE FROM session_activity WHERE last_activity < ?", (time.time() - 1800,))
+        conn.execute("DELETE FROM session_activity WHERE last_activity < %s", (time.time() - 1800,))
         conn.commit()
         conn.close()
     except Exception:
@@ -261,7 +341,7 @@ def track_user_activity():
 def get_active_user_count():
     conn = get_conn()
     # Count distinct IPs active in last 5 minutes
-    res = conn.execute("SELECT COUNT(DISTINCT ip_address) FROM session_activity WHERE last_activity > ?", (time.time() - 300,)).fetchone()
+    res = conn.execute("SELECT COUNT(DISTINCT ip_address) FROM session_activity WHERE last_activity > %s", (time.time() - 300,)).fetchone()
     conn.close()
     return res[0] if res else 0
 
@@ -272,7 +352,7 @@ def get_active_admin_session():
     
     # Get all active admin sessions
     res = conn.execute(
-        "SELECT username, role, ip_address FROM session_activity WHERE (role='admin' OR role='dev') AND last_activity > ?", 
+        "SELECT username, role, ip_address FROM session_activity WHERE (role='admin' OR role='dev') AND last_activity > %s", 
         (time.time() - 300,)
     ).fetchall()
     conn.close()
@@ -293,59 +373,59 @@ def ensure_base_schema(conn=None):
         conn = get_conn()
         should_close = True
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS teams (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+    
+    is_postgres = not isinstance(conn, sqlite3.Connection)
+    pk_def = "SERIAL PRIMARY KEY" if is_postgres else "INTEGER PRIMARY KEY AUTOINCREMENT"
+
+    c.execute(f'''CREATE TABLE IF NOT EXISTS teams (
+        id {pk_def},
         tag TEXT,
         name TEXT UNIQUE,
         group_name TEXT,
         captain TEXT,
         co_captain TEXT
     )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS players (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+    c.execute(f'''CREATE TABLE IF NOT EXISTS players (
+        id {pk_def},
         name TEXT UNIQUE,
         riot_id TEXT,
         rank TEXT,
-        default_team_id INTEGER,
-        FOREIGN KEY(default_team_id) REFERENCES teams(id)
+        default_team_id INTEGER REFERENCES teams(id)
     )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS matches (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+    c.execute(f'''CREATE TABLE IF NOT EXISTS matches (
+        id {pk_def},
         week INTEGER,
         group_name TEXT,
-        team1_id INTEGER,
-        team2_id INTEGER,
-        winner_id INTEGER,
+        team1_id INTEGER REFERENCES teams(id),
+        team2_id INTEGER REFERENCES teams(id),
+        winner_id INTEGER REFERENCES teams(id),
         score_t1 INTEGER DEFAULT 0,
         score_t2 INTEGER DEFAULT 0,
         status TEXT DEFAULT 'scheduled',
         format TEXT,
-        maps_played INTEGER DEFAULT 0,
-        FOREIGN KEY(team1_id) REFERENCES teams(id),
-        FOREIGN KEY(team2_id) REFERENCES teams(id),
-        FOREIGN KEY(winner_id) REFERENCES teams(id)
+        maps_played INTEGER DEFAULT 0
     )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS match_maps (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        match_id INTEGER NOT NULL,
+    c.execute(f'''CREATE TABLE IF NOT EXISTS match_maps (
+        id {pk_def},
+        match_id INTEGER NOT NULL REFERENCES matches(id),
         map_index INTEGER NOT NULL,
         map_name TEXT,
         team1_rounds INTEGER,
         team2_rounds INTEGER,
         winner_id INTEGER
     )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS match_stats (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        match_id INTEGER NOT NULL,
-        player_id INTEGER NOT NULL,
+    c.execute(f'''CREATE TABLE IF NOT EXISTS match_stats (
+        id {pk_def},
+        match_id INTEGER NOT NULL REFERENCES matches(id),
+        player_id INTEGER NOT NULL REFERENCES players(id),
         team_id INTEGER,
         acs INTEGER,
         kills INTEGER,
         deaths INTEGER,
         assists INTEGER
     )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS agents (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+    c.execute(f'''CREATE TABLE IF NOT EXISTS agents (
+        id {pk_def},
         name TEXT UNIQUE
     )''')
     if should_close:
@@ -363,15 +443,19 @@ def ensure_column(table, column_name, column_def_sql, conn=None):
         conn = get_conn()
         should_close = True
     
-    c = conn.cursor()
-    # Use string interpolation only for table names which are now validated against ALLOWED_TABLES
-    cols = [r[1] for r in c.execute(f"PRAGMA table_info({table})").fetchall()]
+    is_postgres = not isinstance(conn, sqlite3.Connection)
+    if is_postgres:
+        cur = conn.cursor()
+        cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name=%s", (table,))
+        cols = [row[0] for row in cur.fetchall()]
+    else:
+        cursor = conn.execute(f"PRAGMA table_info({table})")
+        cols = [row[1] for row in cursor.fetchall()]
+
     if column_name not in cols:
         try:
-            # Validate column_def_sql basic structure to prevent injection if it comes from untrusted source
-            # In this app, it is hardcoded, but good practice to validate
-            c.execute(f"ALTER TABLE {table} ADD COLUMN {column_def_sql}")
-        except sqlite3.OperationalError:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column_def_sql}")
+        except Exception:
             pass
     
     if should_close:
@@ -383,22 +467,24 @@ def ensure_upgrade_schema(conn=None):
     if conn is None:
         conn = get_conn()
         should_close = True
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS seasons (
+    
+    is_postgres = not isinstance(conn, sqlite3.Connection)
+    pk_def = "PRIMARY KEY" if is_postgres else "PRIMARY KEY" # SERIAL handled in create
+    serial_def = "SERIAL PRIMARY KEY" if is_postgres else "INTEGER PRIMARY KEY AUTOINCREMENT"
+
+    conn.execute(f'''CREATE TABLE IF NOT EXISTS seasons (
         id INTEGER PRIMARY KEY,
         name TEXT UNIQUE,
         start_date TEXT,
         end_date TEXT,
-        is_active BOOLEAN DEFAULT 0
+        is_active BOOLEAN DEFAULT FALSE
     )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS team_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        team_id INTEGER,
-        season_id INTEGER,
+    conn.execute(f'''CREATE TABLE IF NOT EXISTS team_history (
+        id {serial_def},
+        team_id INTEGER REFERENCES teams(id),
+        season_id INTEGER REFERENCES seasons(id),
         final_rank INTEGER,
-        group_name TEXT,
-        FOREIGN KEY(team_id) REFERENCES teams(id),
-        FOREIGN KEY(season_id) REFERENCES seasons(id)
+        group_name TEXT
     )''')
     
     ensure_column("teams", "logo_path", "logo_path TEXT", conn=conn)
@@ -414,13 +500,16 @@ def ensure_upgrade_schema(conn=None):
     ensure_column("matches", "bracket_label", "bracket_label TEXT", conn=conn)
     ensure_column("match_maps", "is_forfeit", "is_forfeit INTEGER DEFAULT 0", conn=conn)
     
+    is_postgres = not isinstance(conn, sqlite3.Connection)
+    ignore_clause = "ON CONFLICT DO NOTHING" if is_postgres else "OR IGNORE"
+    
     try:
-        c.execute("INSERT OR IGNORE INTO seasons (id, name, is_active) VALUES (22, 'Season 22', 0)")
-        c.execute("INSERT OR IGNORE INTO seasons (id, name, is_active) VALUES (23, 'Season 23', 1)")
+        conn.execute(f"INSERT {ignore_clause} INTO seasons (id, name, is_active) VALUES (22, 'Season 22', 0)")
+        conn.execute(f"INSERT {ignore_clause} INTO seasons (id, name, is_active) VALUES (23, 'Season 23', 1)")
     except Exception:
         pass
     try:
-        c.execute("INSERT OR IGNORE INTO team_history (team_id, season_id, group_name) SELECT id, 23, group_name FROM teams")
+        conn.execute(f"INSERT {ignore_clause} INTO team_history (team_id, season_id, group_name) SELECT id, 23, group_name FROM teams")
     except Exception:
         pass
     
@@ -480,7 +569,7 @@ init_match_stats_map_table()
 track_user_activity()
 
 # Hide standard sidebar navigation and other streamlit elements
-st.markdown("""<link href='https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Rajdhani:wght@400;600&family=Inter:wght@400;700&display=swap' rel='stylesheet'>""", unsafe_allow_html=True)
+st.markdown("""<link href='https://fonts.googleapis.com/css2%sfamily=Orbitron:wght@400;700&family=Rajdhani:wght@400;600&family=Inter:wght@400;700&display=swap' rel='stylesheet'>""", unsafe_allow_html=True)
 
 st.markdown("""
 <style>
@@ -782,7 +871,7 @@ def ocr_extract(image_bytes, crop_box=None):
         try:
             df = pytesseract.image_to_data(img_thresh, output_type=pytesseract.Output.DATAFRAME)
         except Exception as e:
-            # If data extraction fails, we might still get text? 
+            # If data extraction fails, we might still get text%s 
             # Usually if one fails, both fail, but let's try.
             # Also catch if tesseract is missing
             return "", None, f"Tesseract Error: {str(e)}"
@@ -813,7 +902,7 @@ def list_files_from_github(path):
     token = get_secret("GH_TOKEN")
     branch = get_secret("GH_BRANCH", "main")
     if not owner or not repo or not token: return []
-    url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={branch}"
+    url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}%sref={branch}"
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
     try:
         r = requests.get(url, headers=headers, timeout=10)
@@ -848,7 +937,7 @@ def get_file_content_from_github(path):
     token = get_secret("GH_TOKEN")
     branch = get_secret("GH_BRANCH", "main")
     if not owner or not repo or not token: return None
-    url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={branch}"
+    url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}%sref={branch}"
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github.raw"}
     try:
         r = requests.get(url, headers=headers, timeout=10)
@@ -870,7 +959,7 @@ def fetch_match_from_github(match_id):
         
     # Use API for both public and private repos if token is available
     if token:
-        url = f"https://api.github.com/repos/{owner}/{repo}/contents/assets/matches/match_{match_id}.json?ref={branch}"
+        url = f"https://api.github.com/repos/{owner}/{repo}/contents/assets/matches/match_{match_id}.json%sref={branch}"
         headers = {
             "Authorization": f"Bearer {token}",
             "Accept": "application/vnd.github.raw"
@@ -983,7 +1072,7 @@ def parse_tracker_json(jsdata, team1_id, team2_id):
         elif score_b > score_a:
             tracker_team_1_id = team_ids_in_json[1]
         else:
-            # Tie or 0 matches? Default to first team
+            # Tie or 0 matches%s Default to first team
             tracker_team_1_id = team_ids_in_json[0]
     else:
         if team_segments:
@@ -1096,7 +1185,7 @@ def import_sqlite_db(upload_bytes):
             use = [c for c in df.columns if c in cols]
             if not use:
                 continue
-            q = f"INSERT OR REPLACE INTO {t} (" + ",".join(use) + ") VALUES (" + ",".join(["?"]*len(use)) + ")"
+            q = f"INSERT OR REPLACE INTO {t} (" + ",".join(use) + ") VALUES (" + ",".join(["%s"]*len(use)) + ")"
             vals = df[use].values.tolist()
             tgt.executemany(q, vals)
             summary[t] = len(vals)
@@ -1213,7 +1302,7 @@ def get_player_profile(player_id):
     conn = get_conn()
     try:
         info = pd.read_sql(
-            "SELECT p.id, p.name, p.riot_id, p.rank, t.tag as team FROM players p LEFT JOIN teams t ON p.default_team_id=t.id WHERE p.id=?",
+            "SELECT p.id, p.name, p.riot_id, p.rank, t.tag as team FROM players p LEFT JOIN teams t ON p.default_team_id=t.id WHERE p.id=%s",
             conn,
             params=(int(player_id),),
         )
@@ -1234,7 +1323,7 @@ def get_player_profile(player_id):
             SELECT msm.match_id, msm.map_index, msm.agent, msm.acs, msm.kills, msm.deaths, msm.assists, msm.is_sub, m.week
             FROM match_stats_map msm
             JOIN matches m ON msm.match_id = m.id
-            WHERE msm.player_id=? AND m.status = 'completed'
+            WHERE msm.player_id=%s AND m.status = 'completed'
             """,
             conn,
             params=(int(player_id),),
@@ -1245,10 +1334,10 @@ def get_player_profile(player_id):
             """
             SELECT 
                 AVG(msm.acs) as lg_acs, AVG(msm.kills) as lg_k, AVG(msm.deaths) as lg_d, AVG(msm.assists) as lg_a,
-                AVG(CASE WHEN p.rank = ? THEN msm.acs ELSE NULL END) as r_acs,
-                AVG(CASE WHEN p.rank = ? THEN msm.kills ELSE NULL END) as r_k,
-                AVG(CASE WHEN p.rank = ? THEN msm.deaths ELSE NULL END) as r_d,
-                AVG(CASE WHEN p.rank = ? THEN msm.assists ELSE NULL END) as r_a
+                AVG(CASE WHEN p.rank = %s THEN msm.acs ELSE NULL END) as r_acs,
+                AVG(CASE WHEN p.rank = %s THEN msm.kills ELSE NULL END) as r_k,
+                AVG(CASE WHEN p.rank = %s THEN msm.deaths ELSE NULL END) as r_d,
+                AVG(CASE WHEN p.rank = %s THEN msm.assists ELSE NULL END) as r_a
             FROM match_stats_map msm
             JOIN matches m ON msm.match_id = m.id
             JOIN players p ON msm.player_id = p.id
@@ -1352,14 +1441,14 @@ def create_admin(username, password):
     salt, ph = hash_password(password)
     conn = get_conn()
     role = get_secret("ADMIN_SEED_ROLE", "admin") if not admin_exists() else "admin"
-    conn.execute("INSERT INTO admins (username, password_hash, salt, is_active, role) VALUES (?, ?, ?, 1, ?)", (username, ph, salt, role))
+    conn.execute("INSERT INTO admins (username, password_hash, salt, is_active, role) VALUES (%s, %s, %s, 1, %s)", (username, ph, salt, role))
     conn.commit()
     conn.close()
 
 def create_admin_with_role(username, password, role):
     salt, ph = hash_password(password)
     conn = get_conn()
-    conn.execute("INSERT INTO admins (username, password_hash, salt, is_active, role) VALUES (?, ?, ?, 1, ?)", (username, ph, salt, role))
+    conn.execute("INSERT INTO admins (username, password_hash, salt, is_active, role) VALUES (%s, %s, %s, 1, %s)", (username, ph, salt, role))
     conn.commit()
     conn.close()
 
@@ -1374,26 +1463,29 @@ def ensure_seed_admins(conn=None):
         should_close = True
     
     c = conn.cursor()
+    is_postgres = not isinstance(conn, sqlite3.Connection)
+    ignore_clause = "ON CONFLICT DO NOTHING" if is_postgres else "OR IGNORE"
+    
     if su and sp:
-        row = c.execute("SELECT id, role FROM admins WHERE username=?", (su,)).fetchone()
+        row = c.execute("SELECT id, role FROM admins WHERE username=%s", (su,)).fetchone()
         if not row:
             salt, ph = hash_password(sp)
             c.execute(
-                "INSERT INTO admins (username, password_hash, salt, is_active, role) VALUES (?, ?, ?, 1, ?)",
+                f"INSERT {ignore_clause} INTO admins (username, password_hash, salt, is_active, role) VALUES (%s, %s, %s, 1, %s)",
                 (su, ph, salt, sr)
             )
         else:
             if row[1] != sr:
-                c.execute("UPDATE admins SET role=? WHERE id=?", (sr, int(row[0])))
+                c.execute("UPDATE admins SET role=%s WHERE id=%s", (sr, int(row[0])))
     su2 = get_secret("ADMIN2_USER")
     sp2 = get_secret("ADMIN2_PWD")
     sr2 = get_secret("ADMIN2_ROLE", "admin")
     if su2 and sp2:
-        row2 = c.execute("SELECT id FROM admins WHERE username=?", (su2,)).fetchone()
+        row2 = c.execute("SELECT id FROM admins WHERE username=%s", (su2,)).fetchone()
         if not row2:
             salt2, ph2 = hash_password(sp2)
             c.execute(
-                "INSERT INTO admins (username, password_hash, salt, is_active, role) VALUES (?, ?, ?, 1, ?)",
+                "INSERT INTO admins (username, password_hash, salt, is_active, role) VALUES (%s, %s, %s, 1, %s)",
                 (su2, ph2, salt2, sr2)
             )
     
@@ -1403,7 +1495,7 @@ def ensure_seed_admins(conn=None):
 
 def authenticate(username, password):
     conn = get_conn()
-    row = conn.execute("SELECT username, password_hash, salt, role FROM admins WHERE username=? AND is_active=1", (username,)).fetchone()
+    row = conn.execute("SELECT username, password_hash, salt, role FROM admins WHERE username=%s AND is_active=1", (username,)).fetchone()
     conn.close()
     if not row:
         return None
@@ -1416,23 +1508,23 @@ def upsert_match_maps(match_id, maps_data):
     conn = get_conn()
     c = conn.cursor()
     for m in maps_data:
-        c.execute("SELECT id FROM match_maps WHERE match_id=? AND map_index=?", (match_id, m['map_index']))
+        c.execute("SELECT id FROM match_maps WHERE match_id=%s AND map_index=%s", (match_id, m['map_index']))
         ex = c.fetchone()
         if ex:
             c.execute(
-                "UPDATE match_maps SET map_name=?, team1_rounds=?, team2_rounds=?, winner_id=?, is_forfeit=? WHERE id=?",
+                "UPDATE match_maps SET map_name=%s, team1_rounds=%s, team2_rounds=%s, winner_id=%s, is_forfeit=%s WHERE id=%s",
                 (m['map_name'], m['team1_rounds'], m['team2_rounds'], m['winner_id'], m.get('is_forfeit', 0), ex[0])
             )
         else:
             c.execute(
-                "INSERT INTO match_maps (match_id, map_index, map_name, team1_rounds, team2_rounds, winner_id, is_forfeit) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO match_maps (match_id, map_index, map_name, team1_rounds, team2_rounds, winner_id, is_forfeit) VALUES (%s, %s, %s, %s, %s, %s, %s)",
                 (match_id, m['map_index'], m['map_name'], m['team1_rounds'], m['team2_rounds'], m['winner_id'], m.get('is_forfeit', 0))
             )
     conn.commit()
     conn.close()
 
-@st.cache_data(ttl=300)
-def get_standings():
+@st.cache_data(ttl=900)
+def _get_standings_cached():
     import pandas as pd
     import numpy as np
     conn = get_conn()
@@ -1529,8 +1621,54 @@ def get_standings():
         
     return df.sort_values(by=['Points', 'Points Against'], ascending=[False, True])
 
-@st.cache_data(ttl=60)
+def get_standings():
+    if not should_use_cache():
+        return _get_standings_cached.run()
+    return _get_standings_cached()
+@st.cache_data(ttl=900)
+def _get_player_leaderboard_cached():
+    import pandas as pd
+    conn = get_conn()
+    try:
+        df = pd.read_sql_query(
+            """
+            SELECT p.id as player_id,
+                   p.name,
+                   p.riot_id,
+                   t.tag as team,
+                   COUNT(DISTINCT msm.match_id) as games,
+                   AVG(msm.acs) as avg_acs,
+                   SUM(msm.kills) as total_kills,
+                   SUM(msm.deaths) as total_deaths,
+                   SUM(msm.assists) as total_assists
+            FROM match_stats_map msm
+            JOIN matches m ON msm.match_id = m.id
+            JOIN players p ON msm.player_id = p.id
+            LEFT JOIN teams t ON p.default_team_id = t.id
+            WHERE m.status = 'completed'
+            GROUP BY p.id, p.name, p.riot_id
+            HAVING games > 0
+            """,
+            conn,
+        )
+    except Exception:
+        conn.close()
+        return pd.DataFrame()
+    conn.close()
+    
+    if not df.empty:
+        # Format name to include Riot ID if available
+        df['name'] = df.apply(lambda r: f"{r['name']} ({r['riot_id']})" if r['riot_id'] and str(r['riot_id']).strip() else r['name'], axis=1)
+        df = df.drop(columns=['riot_id'])
+        df['kd_ratio'] = df['total_kills'] / df['total_deaths'].replace(0, 1)
+        df['avg_acs'] = df['avg_acs'].round(1)
+        df['kd_ratio'] = df['kd_ratio'].round(2)
+    return df.sort_values('avg_acs', ascending=False)
+
 def get_player_leaderboard():
+    if not should_use_cache():
+        return _get_player_leaderboard_cached.run()
+    return _get_player_leaderboard_cached()
     import pandas as pd
     conn = get_conn()
     try:
@@ -1583,7 +1721,7 @@ def get_week_matches(week):
         JOIN teams t1 ON m.team1_id = t1.id
         JOIN teams t2 ON m.team2_id = t2.id
         LEFT JOIN match_maps mm ON m.id = mm.match_id AND mm.map_index = 0
-        WHERE m.week = ? AND m.match_type = 'regular'
+        WHERE m.week = %s AND m.match_type = 'regular'
         ORDER BY m.id
         """,
         conn,
@@ -1639,15 +1777,15 @@ def get_match_maps(match_id):
     import pandas as pd
     conn = get_conn()
     df = pd.read_sql_query(
-        "SELECT map_index, map_name, team1_rounds, team2_rounds, winner_id, is_forfeit FROM match_maps WHERE match_id=? ORDER BY map_index",
+        "SELECT map_index, map_name, team1_rounds, team2_rounds, winner_id, is_forfeit FROM match_maps WHERE match_id=%s ORDER BY map_index",
         conn,
         params=(match_id,),
     )
     conn.close()
     return df
 
-@st.cache_data(ttl=300)
-def get_all_players_directory(format_names=True):
+@st.cache_data(ttl=900)
+def _get_all_players_directory_cached(format_names=True):
     import pandas as pd
     conn = get_conn()
     try:
@@ -1670,8 +1808,13 @@ def get_all_players_directory(format_names=True):
     
     return df
 
-@st.cache_data(ttl=300)
-def get_map_stats(match_id, map_index, team_id):
+def get_all_players_directory(format_names=True):
+    if not should_use_cache():
+        return _get_all_players_directory_cached.run(format_names)
+    return _get_all_players_directory_cached(format_names)
+
+@st.cache_data(ttl=900)
+def _get_map_stats_cached(match_id, map_index, team_id):
     import pandas as pd
     conn = get_conn()
     try:
@@ -1680,7 +1823,7 @@ def get_map_stats(match_id, map_index, team_id):
             SELECT p.name, p.riot_id, ms.agent, ms.acs, ms.kills, ms.deaths, ms.assists, ms.is_sub 
             FROM match_stats_map ms 
             JOIN players p ON ms.player_id=p.id 
-            WHERE ms.match_id=? AND ms.map_index=? AND ms.team_id=?
+            WHERE ms.match_id=%s AND ms.map_index=%s AND ms.team_id=%s
             """, 
             conn, 
             params=(int(match_id), int(map_index), int(team_id))
@@ -1693,8 +1836,13 @@ def get_map_stats(match_id, map_index, team_id):
     conn.close()
     return df
 
-@st.cache_data(ttl=300)
-def get_team_history_counts():
+def get_map_stats(match_id, map_index, team_id):
+    if not should_use_cache():
+        return _get_map_stats_cached.run(match_id, map_index, team_id)
+    return _get_map_stats_cached(match_id, map_index, team_id)
+
+@st.cache_data(ttl=900)
+def _get_team_history_counts_cached():
     import pandas as pd
     conn = get_conn()
     try:
@@ -1707,8 +1855,13 @@ def get_team_history_counts():
     conn.close()
     return df
 
-@st.cache_data(ttl=300)
-def get_all_players():
+def get_team_history_counts():
+    if not should_use_cache():
+        return _get_team_history_counts_cached.run()
+    return _get_team_history_counts_cached()
+
+@st.cache_data(ttl=900)
+def _get_all_players_cached():
     import pandas as pd
     conn = get_conn()
     try:
@@ -1718,8 +1871,13 @@ def get_all_players():
     conn.close()
     return df
 
-@st.cache_data(ttl=300)
-def get_teams_list_full():
+def get_all_players():
+    if not should_use_cache():
+        return _get_all_players_cached.run()
+    return _get_all_players_cached()
+
+@st.cache_data(ttl=900)
+def _get_teams_list_full_cached():
     import pandas as pd
     conn = get_conn()
     try:
@@ -1729,6 +1887,11 @@ def get_teams_list_full():
     conn.close()
     return df
 
+def get_teams_list_full():
+    if not should_use_cache():
+        return _get_teams_list_full_cached.run()
+    return _get_teams_list_full_cached()
+
 @st.cache_data(ttl=300)
 def get_teams_list():
     import pandas as pd
@@ -1736,7 +1899,7 @@ def get_teams_list():
     return df[['id', 'name']] if not df.empty else pd.DataFrame(columns=['id', 'name'])
 
 @st.cache_data(ttl=3600)
-def get_agents_list():
+def _get_agents_list_cached():
     import pandas as pd
     conn = get_conn()
     try:
@@ -1746,8 +1909,13 @@ def get_agents_list():
     conn.close()
     return df['name'].tolist() if not df.empty else []
 
-@st.cache_data(ttl=300)
-def get_match_weeks():
+def get_agents_list():
+    if not should_use_cache():
+        return _get_agents_list_cached.run()
+    return _get_agents_list_cached()
+
+@st.cache_data(ttl=900)
+def _get_match_weeks_cached():
     import pandas as pd
     conn = get_conn()
     try:
@@ -1757,12 +1925,17 @@ def get_match_weeks():
     conn.close()
     return df['week'].tolist() if not df.empty else []
 
+def get_match_weeks():
+    if not should_use_cache():
+        return _get_match_weeks_cached.run()
+    return _get_match_weeks_cached()
+
 @st.cache_data(ttl=300)
 def get_match_maps_cached(match_id):
     return get_match_maps(match_id)
 
-@st.cache_data(ttl=300)
-def get_completed_matches():
+@st.cache_data(ttl=900)
+def _get_completed_matches_cached():
     import pandas as pd
     conn = get_conn()
     try:
@@ -1771,6 +1944,11 @@ def get_completed_matches():
         df = pd.DataFrame()
     conn.close()
     return df
+
+def get_completed_matches():
+    if not should_use_cache():
+        return _get_completed_matches_cached.run()
+    return _get_completed_matches_cached()
 
 def apply_plotly_theme(fig):
     fig.update_layout(
@@ -1874,7 +2052,7 @@ if st.session_state['app_mode'] == 'admin' and not st.session_state.get('is_admi
                 if st.button("🔓 UNLOCK MY ID", use_container_width=True):
                     try:
                         conn = get_conn()
-                        conn.execute("DELETE FROM session_activity WHERE ip_address = ? AND (role = 'admin' OR role = 'dev')", (curr_ip,))
+                        conn.execute("DELETE FROM session_activity WHERE ip_address = %s AND (role = 'admin' OR role = 'dev')", (curr_ip,))
                         conn.commit()
                         conn.close()
                         st.success("Your ID has been cleared. Try logging in below.")
@@ -2061,7 +2239,7 @@ if page == "Overview & Standings":
                     if b64:
                         logo_html = f"<img src='data:image/png;base64,{b64}' width='40' style='border-radius: 4px;'/>"
                     else:
-                        logo_html = "<div style='width:40px;height:40px;background:rgba(255,255,255,0.05);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--text-dim);'>?</div>"
+                        logo_html = "<div style='width:40px;height:40px;background:rgba(255,255,255,0.05);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--text-dim);'>%s</div>"
                     
                     st.markdown(f"""<div class="custom-card" style="height: 100%;">
 <div style="display: flex; align-items: center; gap: 15px; margin-bottom: 10px;">
@@ -2386,7 +2564,7 @@ elif page == "Match Predictor":
             
             # Heuristic Score
             # Win Rate (40%), Avg Score (30%), H2H (30%)
-            # Normalize scores? No, just compare raw weighted sums or probabilities
+            # Normalize scores%s No, just compare raw weighted sums or probabilities
             
             # Heuristic Score (Fallback if ML fails or data too small)
             score1 = (s1['win_rate'] * 40) + (s1['avg_score'] * 2) + (h2h_wins_t1 * 5)
@@ -2657,7 +2835,7 @@ elif page == "Teams":
         with st.container():
             # Team Header Card
             b64 = get_base64_image(row.logo_path)
-            logo_img_html = f"<img src='data:image/png;base64,{b64}' width='60'/>" if b64 else "<div style='width:60px;height:60px;background:rgba(255,255,255,0.05);border-radius:8px;display:flex;align-items:center;justify-content:center;color:var(--text-dim);'>?</div>"
+            logo_img_html = f"<img src='data:image/png;base64,{b64}' width='60'/>" if b64 else "<div style='width:60px;height:60px;background:rgba(255,255,255,0.05);border-radius:8px;display:flex;align-items:center;justify-content:center;color:var(--text-dim);'>%s</div>"
             
             st.markdown(f"""<div class="custom-card" style="margin-bottom: 10px;">
 <div style="display: flex; align-items: center; gap: 20px;">
@@ -2703,7 +2881,7 @@ elif page == "Teams":
                                     st.error("Invalid logo path. Path traversal or absolute paths are not allowed.")
                                 else:
                                     conn_u = get_conn()
-                                    conn_u.execute("UPDATE teams SET name=?, tag=?, group_name=?, logo_path=? WHERE id=?", (new_name, new_tag or None, new_group or None, new_logo or None, int(row.id)))
+                                    conn_u.execute("UPDATE teams SET name=%s, tag=%s, group_name=%s, logo_path=%s WHERE id=%s", (new_name, new_tag or None, new_group or None, new_logo or None, int(row.id)))
                                     conn_u.commit()
                                     conn_u.close()
                                     st.success("Team updated")
@@ -2718,7 +2896,7 @@ elif page == "Teams":
                         if add_sel:
                             pid = int(unassigned[unassigned['display_name'] == add_sel].iloc[0]['id'])
                             conn_a = get_conn()
-                            conn_a.execute("UPDATE players SET default_team_id=? WHERE id=?", (int(row.id), pid))
+                            conn_a.execute("UPDATE players SET default_team_id=%s WHERE id=%s", (int(row.id), pid))
                             conn_a.commit()
                             conn_a.close()
                             st.success("Player added")
@@ -2730,7 +2908,7 @@ elif page == "Teams":
                             if rem_sel:
                                 pid = int(roster[roster['display_name'] == rem_sel].iloc[0]['id'])
                                 conn_d = get_conn()
-                                conn_d.execute("UPDATE players SET default_team_id=NULL WHERE id=?", (pid,))
+                                conn_d.execute("UPDATE players SET default_team_id=NULL WHERE id=%s", (pid,))
                                 conn_d.commit()
                                 conn_d.close()
                                 st.success("Player removed")
@@ -2785,17 +2963,17 @@ elif page == "Playoffs":
                 t2_id = int(teams_df[teams_df['name'] == t2].iloc[0]['id']) if t2 else None
                 
                 # Check if exists
-                existing = conn.execute("SELECT id FROM matches WHERE match_type='playoff' AND playoff_round=? AND bracket_pos=?", (round_idx, pos)).fetchone()
+                existing = conn.execute("SELECT id FROM matches WHERE match_type='playoff' AND playoff_round=%s AND bracket_pos=%s", (round_idx, pos)).fetchone()
                 
                 if existing:
                     conn.execute("""
-                        UPDATE matches SET team1_id=?, team2_id=?, format=?, bracket_label=?
-                        WHERE id=?
+                        UPDATE matches SET team1_id=%s, team2_id=%s, format=%s, bracket_label=%s
+                        WHERE id=%s
                     """, (t1_id, t2_id, fmt, label, existing[0]))
                 else:
                     conn.execute("""
                         INSERT INTO matches (match_type, playoff_round, bracket_pos, team1_id, team2_id, format, status, score_t1, score_t2, bracket_label)
-                        VALUES ('playoff', ?, ?, ?, ?, ?, 'scheduled', 0, 0, ?)
+                        VALUES ('playoff', %s, %s, %s, %s, %s, 'scheduled', 0, 0, %s)
                     """, (round_idx, pos, t1_id, t2_id, fmt, label))
                 conn.commit()
                 conn.close()
@@ -2830,10 +3008,10 @@ elif page == "Playoffs":
                 if st.button("Save Forfeit Playoff Match"):
                     conn_u = get_conn()
                     winner_id = t1_id_val if s1 > s2 else t2_id_val
-                    conn_u.execute("UPDATE matches SET score_t1=?, score_t2=?, winner_id=?, status=?, format=?, maps_played=?, is_forfeit=1 WHERE id=?", (int(s1), int(s2), winner_id, 'completed', fmt, 0, int(m['id'])))
+                    conn_u.execute("UPDATE matches SET score_t1=%s, score_t2=%s, winner_id=%s, status=%s, format=%s, maps_played=%s, is_forfeit=1 WHERE id=%s", (int(s1), int(s2), winner_id, 'completed', fmt, 0, int(m['id'])))
                     # Clear any existing maps/stats if it's now a forfeit
-                    conn_u.execute("DELETE FROM match_maps WHERE match_id=?", (int(m['id']),))
-                    conn_u.execute("DELETE FROM match_stats_map WHERE match_id=?", (int(m['id']),))
+                    conn_u.execute("DELETE FROM match_maps WHERE match_id=%s", (int(m['id']),))
+                    conn_u.execute("DELETE FROM match_stats_map WHERE match_id=%s", (int(m['id']),))
                     conn_u.commit()
                     conn_u.close()
                     st.cache_data.clear()
@@ -2968,7 +3146,7 @@ elif page == "Playoffs":
                         win_idx = 1 if pre_map_win == t1_id_val else (2 if pre_map_win == t2_id_val else 0)
                         winner_input = st.selectbox("Map Winner", win_options, index=win_idx, key=f"po_win_uni_{map_idx}_{force_map_cnt}")
                     
-                    is_forfeit_input = st.checkbox("Forfeit?", value=pre_map_ff, key=f"po_ff_uni_{map_idx}_{force_map_cnt}")
+                    is_forfeit_input = st.checkbox("Forfeit%s", value=pre_map_ff, key=f"po_ff_uni_{map_idx}_{force_map_cnt}")
                     st.divider()
                     
                     agents_list = get_agents_list()
@@ -2985,7 +3163,7 @@ elif page == "Playoffs":
                         global_list, global_map, label_to_riot, riot_to_label, player_lookup = [], {}, {}, {}, {}
 
                     conn_p = get_conn()
-                    all_map_stats = pd.read_sql("SELECT * FROM match_stats_map WHERE match_id=? AND map_index=?", conn_p, params=(int(m['id']), map_idx))
+                    all_map_stats = pd.read_sql("SELECT * FROM match_stats_map WHERE match_id=%s AND map_index=%s", conn_p, params=(int(m['id']), map_idx))
                     conn_p.close()
 
                     all_teams_entries = []
@@ -3035,7 +3213,7 @@ elif page == "Playoffs":
                                 rows.append({'player': l, 'is_sub': False, 'subbed_for': l, 'agent': agents_list[0] if agents_list else "", 'acs': 0, 'k': 0, 'd': 0, 'a': 0})
 
                         h1,h2,h3,h4,h5,h6,h7,h8,h9 = st.columns([2,1.2,2,2,1,1,1,1,0.8])
-                        h1.write("Player"); h2.write("Sub?"); h3.write("Subbing For"); h4.write("Agent"); h5.write("ACS"); h6.write("K"); h7.write("D"); h8.write("A"); h9.write("Conf")
+                        h1.write("Player"); h2.write("Sub%s"); h3.write("Subbing For"); h4.write("Agent"); h5.write("ACS"); h6.write("K"); h7.write("D"); h8.write("A"); h9.write("Conf")
                         
                         team_entries = []
                         force_cnt = st.session_state.get(f"force_apply_po_{m['id']}_{map_idx}", 0)
@@ -3065,28 +3243,28 @@ elif page == "Playoffs":
                         conn_s = get_conn()
                         try:
                             # Use DELETE + INSERT for maximum compatibility and to avoid ON CONFLICT issues
-                            conn_s.execute("DELETE FROM match_maps WHERE match_id=? AND map_index=?", (int(m['id']), map_idx))
+                            conn_s.execute("DELETE FROM match_maps WHERE match_id=%s AND map_index=%s", (int(m['id']), map_idx))
                             conn_s.execute("""
                                 INSERT INTO match_maps (match_id, map_index, map_name, team1_rounds, team2_rounds, winner_id, is_forfeit)
-                                VALUES (?, ?, ?, ?, ?, ?, ?)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s)
                             """, (int(m['id']), map_idx, map_name_input, int(t1r_input), int(t2r_input), wid, int(is_forfeit_input)))
 
                             for t_id, t_entries in all_teams_entries:
-                                conn_s.execute("DELETE FROM match_stats_map WHERE match_id=? AND map_index=? AND team_id=?", (int(m['id']), map_idx, t_id))
+                                conn_s.execute("DELETE FROM match_stats_map WHERE match_id=%s AND map_index=%s AND team_id=%s", (int(m['id']), map_idx, t_id))
                                 for e in t_entries:
                                     if e['player_id']:
                                         conn_s.execute("""
                                             INSERT INTO match_stats_map (match_id, map_index, team_id, player_id, is_sub, subbed_for_id, agent, acs, kills, deaths, assists)
-                                            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                                         """, (int(m['id']), map_idx, t_id, e['player_id'], e['is_sub'], e['subbed_for_id'], e['agent'], e['acs'], e['kills'], e['deaths'], e['assists']))
                             
-                            maps_df_final = pd.read_sql("SELECT winner_id, team1_rounds, team2_rounds FROM match_maps WHERE match_id=?", conn_s, params=(int(m['id']),))
+                            maps_df_final = pd.read_sql("SELECT winner_id, team1_rounds, team2_rounds FROM match_maps WHERE match_id=%s", conn_s, params=(int(m['id']),))
                             final_s1 = len(maps_df_final[maps_df_final['winner_id'] == t1_id_val])
                             final_s2 = len(maps_df_final[maps_df_final['winner_id'] == t2_id_val])
                             final_winner = t1_id_val if final_s1 > final_s2 else (t2_id_val if final_s2 > final_s1 else None)
                             played_cnt = len(maps_df_final[(maps_df_final['team1_rounds'] + maps_df_final['team2_rounds']) > 0])
                             
-                            conn_s.execute("UPDATE matches SET score_t1=?, score_t2=?, winner_id=?, status='completed', maps_played=? WHERE id=?", 
+                            conn_s.execute("UPDATE matches SET score_t1=%s, score_t2=%s, winner_id=%s, status='completed', maps_played=%s WHERE id=%s", 
                                          (final_s1, final_s2, final_winner, played_cnt, int(m['id'])))
                             conn_s.commit()
                             st.cache_data.clear()
@@ -3311,8 +3489,8 @@ elif page == "Admin Panel":
                         SELECT m.id, m.week FROM matches m
                         JOIN teams t1 ON m.team1_id = t1.id
                         JOIN teams t2 ON m.team2_id = t2.id
-                        WHERE (LOWER(t1.name) = LOWER(?) AND LOWER(t2.name) = LOWER(?))
-                           OR (LOWER(t1.name) = LOWER(?) AND LOWER(t2.name) = LOWER(?))
+                        WHERE (LOWER(t1.name) = LOWER(%s) AND LOWER(t2.name) = LOWER(%s))
+                           OR (LOWER(t1.name) = LOWER(%s) AND LOWER(t2.name) = LOWER(%s))
                         AND m.status = 'scheduled'
                         LIMIT 1
                     """
@@ -3449,10 +3627,10 @@ elif page == "Admin Panel":
                     if st.button("Save Forfeit Match"):
                         conn_u = get_conn()
                         winner_id = t1_id_val if s1 > s2 else t2_id_val
-                        conn_u.execute("UPDATE matches SET score_t1=?, score_t2=?, winner_id=?, status=?, format=?, maps_played=?, is_forfeit=1 WHERE id=?", (int(s1), int(s2), winner_id, 'completed', fmt, 0, int(m['id'])))
+                        conn_u.execute("UPDATE matches SET score_t1=%s, score_t2=%s, winner_id=%s, status=%s, format=%s, maps_played=%s, is_forfeit=1 WHERE id=%s", (int(s1), int(s2), winner_id, 'completed', fmt, 0, int(m['id'])))
                         # Clear any existing maps/stats if it's now a forfeit
-                        conn_u.execute("DELETE FROM match_maps WHERE match_id=?", (int(m['id']),))
-                        conn_u.execute("DELETE FROM match_stats_map WHERE match_id=?", (int(m['id']),))
+                        conn_u.execute("DELETE FROM match_maps WHERE match_id=%s", (int(m['id']),))
+                        conn_u.execute("DELETE FROM match_stats_map WHERE match_id=%s", (int(m['id']),))
                         conn_u.commit()
                         conn_u.close()
                         st.cache_data.clear()
@@ -3600,7 +3778,7 @@ elif page == "Admin Panel":
                             win_idx = 1 if pre_map_win == t1_id_val else (2 if pre_map_win == t2_id_val else 0)
                             winner_input = st.selectbox("Map Winner", win_options, index=win_idx, key=f"win_uni_{map_idx}_{force_map_cnt}")
                         
-                        is_forfeit_input = st.checkbox("Forfeit?", value=pre_map_ff, key=f"ff_uni_{map_idx}_{force_map_cnt}")
+                        is_forfeit_input = st.checkbox("Forfeit%s", value=pre_map_ff, key=f"ff_uni_{map_idx}_{force_map_cnt}")
                         
                         st.divider()
                         
@@ -3619,7 +3797,7 @@ elif page == "Admin Panel":
                             global_list, global_map, label_to_riot, riot_to_label, player_lookup = [], {}, {}, {}, {}
 
                         conn_p = get_conn()
-                        all_map_stats = pd.read_sql("SELECT * FROM match_stats_map WHERE match_id=? AND map_index=?", conn_p, params=(int(m['id']), map_idx))
+                        all_map_stats = pd.read_sql("SELECT * FROM match_stats_map WHERE match_id=%s AND map_index=%s", conn_p, params=(int(m['id']), map_idx))
                         conn_p.close()
 
                         all_teams_entries = [] # To store (team_id, entries)
@@ -3672,7 +3850,7 @@ elif page == "Admin Panel":
 
                             # Render team table
                             h1,h2,h3,h4,h5,h6,h7,h8,h9 = st.columns([2,1.2,2,2,1,1,1,1,0.8])
-                            h1.write("Player"); h2.write("Sub?"); h3.write("Subbing For"); h4.write("Agent"); h5.write("ACS"); h6.write("K"); h7.write("D"); h8.write("A"); h9.write("Conf")
+                            h1.write("Player"); h2.write("Sub%s"); h3.write("Subbing For"); h4.write("Agent"); h5.write("ACS"); h6.write("K"); h7.write("D"); h8.write("A"); h9.write("Conf")
                             
                             team_entries = []
                             force_cnt = st.session_state.get(f"force_apply_{m['id']}_{map_idx}", 0)
@@ -3712,30 +3890,30 @@ elif page == "Admin Panel":
                             try:
                                 # A. Save Map Info
                                 # Use DELETE + INSERT for maximum compatibility and to avoid ON CONFLICT issues
-                                conn_s.execute("DELETE FROM match_maps WHERE match_id=? AND map_index=?", (int(m['id']), map_idx))
+                                conn_s.execute("DELETE FROM match_maps WHERE match_id=%s AND map_index=%s", (int(m['id']), map_idx))
                                 conn_s.execute("""
                                     INSERT INTO match_maps (match_id, map_index, map_name, team1_rounds, team2_rounds, winner_id, is_forfeit)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                                 """, (int(m['id']), map_idx, map_name_input, int(t1r_input), int(t2r_input), wid, int(is_forfeit_input)))
 
                                 # B. Save Stats for both teams
                                 for t_id, t_entries in all_teams_entries:
-                                    conn_s.execute("DELETE FROM match_stats_map WHERE match_id=? AND map_index=? AND team_id=?", (int(m['id']), map_idx, t_id))
+                                    conn_s.execute("DELETE FROM match_stats_map WHERE match_id=%s AND map_index=%s AND team_id=%s", (int(m['id']), map_idx, t_id))
                                     for e in t_entries:
                                         if e['player_id']:
                                             conn_s.execute("""
                                                 INSERT INTO match_stats_map (match_id, map_index, team_id, player_id, is_sub, subbed_for_id, agent, acs, kills, deaths, assists)
-                                                VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                                                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                                             """, (int(m['id']), map_idx, t_id, e['player_id'], e['is_sub'], e['subbed_for_id'], e['agent'], e['acs'], e['kills'], e['deaths'], e['assists']))
                                 
                                 # C. Recalculate Match Totals
-                                maps_df_final = pd.read_sql("SELECT team1_rounds, team2_rounds, winner_id FROM match_maps WHERE match_id=?", conn_s, params=(int(m['id']),))
+                                maps_df_final = pd.read_sql("SELECT team1_rounds, team2_rounds, winner_id FROM match_maps WHERE match_id=%s", conn_s, params=(int(m['id']),))
                                 final_s1 = len(maps_df_final[maps_df_final['winner_id'] == t1_id_val])
                                 final_s2 = len(maps_df_final[maps_df_final['winner_id'] == t2_id_val])
                                 final_winner = t1_id_val if final_s1 > final_s2 else (t2_id_val if final_s2 > final_s1 else None)
                                 played_cnt = len(maps_df_final[(maps_df_final['team1_rounds'] + maps_df_final['team2_rounds']) > 0])
                                 
-                                conn_s.execute("UPDATE matches SET score_t1=?, score_t2=?, winner_id=?, status='completed', maps_played=? WHERE id=?", 
+                                conn_s.execute("UPDATE matches SET score_t1=%s, score_t2=%s, winner_id=%s, status='completed', maps_played=%s WHERE id=%s", 
                                              (final_s1, final_s2, final_winner, played_cnt, int(m['id'])))
                                 
                                 conn_s.commit()
@@ -3744,7 +3922,7 @@ elif page == "Admin Panel":
                                 if 'pending_match_db_id' in st.session_state:
                                     try:
                                         pdbid = st.session_state['pending_match_db_id']
-                                        conn_s.execute("DELETE FROM pending_matches WHERE id=?", (int(pdbid),))
+                                        conn_s.execute("DELETE FROM pending_matches WHERE id=%s", (int(pdbid),))
                                         st.toast("Bot request cleared from database.")
                                         del st.session_state['pending_match_db_id']
                                         del st.session_state['pending_match_request']
@@ -3802,14 +3980,14 @@ elif page == "Admin Panel":
                     
                     can_add = True
                     if rid_clean:
-                        existing_rid = pd.read_sql("SELECT name FROM players WHERE LOWER(riot_id) = ?", conn_add, params=(rid_clean.lower(),))
+                        existing_rid = pd.read_sql("SELECT name FROM players WHERE LOWER(riot_id) = %s", conn_add, params=(rid_clean.lower(),))
                         if not existing_rid.empty:
                             st.error(f"Error: A player ('{existing_rid.iloc[0]['name']}') already has Riot ID '{rid_clean}'.")
                             conn_add.close()
                             can_add = False
                     
                     if can_add:
-                        existing_name = pd.read_sql("SELECT id FROM players WHERE LOWER(name) = ?", conn_add, params=(nm_clean.lower(),))
+                        existing_name = pd.read_sql("SELECT id FROM players WHERE LOWER(name) = %s", conn_add, params=(nm_clean.lower(),))
                         if not existing_name.empty:
                             st.error(f"Error: A player named '{nm_clean}' already exists.")
                             conn_add.close()
@@ -3817,7 +3995,7 @@ elif page == "Admin Panel":
 
                     if can_add:
                         dtid_new = team_map.get(tmn_new) if tmn_new else None
-                        conn_add.execute("INSERT INTO players (name, riot_id, rank, discord_handle, default_team_id) VALUES (?, ?, ?, ?, ?)", (nm_clean, rid_clean, rk_new, dh_new, dtid_new))
+                        conn_add.execute("INSERT INTO players (name, riot_id, rank, discord_handle, default_team_id) VALUES (%s, %s, %s, %s, %s)", (nm_clean, rid_clean, rk_new, dh_new, dtid_new))
                         conn_add.commit()
                         conn_add.close()
                         st.success("Player added")
@@ -3827,7 +4005,7 @@ elif page == "Admin Panel":
                             try:
                                 pdbid = st.session_state['pending_player_db_id']
                                 conn_d = get_conn()
-                                conn_d.execute("DELETE FROM pending_players WHERE id=?", (int(pdbid),))
+                                conn_d.execute("DELETE FROM pending_players WHERE id=%s", (int(pdbid),))
                                 conn_d.commit()
                                 conn_d.close()
                                 st.toast("Bot player request cleared from database.")
@@ -3852,11 +4030,11 @@ elif page == "Admin Panel":
                         keep_id = group.iloc[0]['id']
                         remove_ids = group.iloc[1:]['id'].tolist()
                         for rid_to_rem in remove_ids:
-                            conn_clean.execute("UPDATE match_stats_map SET player_id = ? WHERE player_id = ?", (int(keep_id), int(rid_to_rem)))
-                            conn_clean.execute("UPDATE match_stats_map SET subbed_for_id = ? WHERE subbed_for_id = ?", (int(keep_id), int(rid_to_rem)))
-                            conn_clean.execute("UPDATE match_stats SET player_id = ? WHERE player_id = ?", (int(keep_id), int(rid_to_rem)))
-                            conn_clean.execute("UPDATE match_stats SET subbed_for_id = ? WHERE subbed_for_id = ?", (int(keep_id), int(rid_to_rem)))
-                            conn_clean.execute("DELETE FROM players WHERE id = ?", (int(rid_to_rem),))
+                            conn_clean.execute("UPDATE match_stats_map SET player_id = %s WHERE player_id = %s", (int(keep_id), int(rid_to_rem)))
+                            conn_clean.execute("UPDATE match_stats_map SET subbed_for_id = %s WHERE subbed_for_id = %s", (int(keep_id), int(rid_to_rem)))
+                            conn_clean.execute("UPDATE match_stats SET player_id = %s WHERE player_id = %s", (int(keep_id), int(rid_to_rem)))
+                            conn_clean.execute("UPDATE match_stats SET subbed_for_id = %s WHERE subbed_for_id = %s", (int(keep_id), int(rid_to_rem)))
+                            conn_clean.execute("DELETE FROM players WHERE id = %s", (int(rid_to_rem),))
                             merged_count += 1
                     
                     # 2. Case-insensitive Name duplicates (only if Riot ID matches or one is empty)
@@ -3867,13 +4045,13 @@ elif page == "Admin Panel":
                         remove_ids = group.iloc[1:]['id'].tolist()
                         for rid_to_rem in remove_ids:
                             # Re-verify it still exists (might have been deleted by Riot ID check)
-                            exists = conn_clean.execute("SELECT id FROM players WHERE id=?", (int(rid_to_rem),)).fetchone()
+                            exists = conn_clean.execute("SELECT id FROM players WHERE id=%s", (int(rid_to_rem),)).fetchone()
                             if exists:
-                                conn_clean.execute("UPDATE match_stats_map SET player_id = ? WHERE player_id = ?", (int(keep_id), int(rid_to_rem)))
-                                conn_clean.execute("UPDATE match_stats_map SET subbed_for_id = ? WHERE subbed_for_id = ?", (int(keep_id), int(rid_to_rem)))
-                                conn_clean.execute("UPDATE match_stats SET player_id = ? WHERE player_id = ?", (int(keep_id), int(rid_to_rem)))
-                                conn_clean.execute("UPDATE match_stats SET subbed_for_id = ? WHERE subbed_for_id = ?", (int(keep_id), int(rid_to_rem)))
-                                conn_clean.execute("DELETE FROM players WHERE id = ?", (int(rid_to_rem),))
+                                conn_clean.execute("UPDATE match_stats_map SET player_id = %s WHERE player_id = %s", (int(keep_id), int(rid_to_rem)))
+                                conn_clean.execute("UPDATE match_stats_map SET subbed_for_id = %s WHERE subbed_for_id = %s", (int(keep_id), int(rid_to_rem)))
+                                conn_clean.execute("UPDATE match_stats SET player_id = %s WHERE player_id = %s", (int(keep_id), int(rid_to_rem)))
+                                conn_clean.execute("UPDATE match_stats SET subbed_for_id = %s WHERE subbed_for_id = %s", (int(keep_id), int(rid_to_rem)))
+                                conn_clean.execute("DELETE FROM players WHERE id = %s", (int(rid_to_rem),))
                                 merged_count += 1
                     
                     conn_clean.commit()
@@ -3913,15 +4091,15 @@ elif page == "Admin Panel":
                             try:
                                  # Clean up references in match_stats_map and match_stats
                                  # For player_id, we delete the stats because they belong to the deleted player
-                                 conn_exec.execute("DELETE FROM match_stats_map WHERE player_id = ?", (int(p_to_del_id),))
-                                 conn_exec.execute("DELETE FROM match_stats WHERE player_id = ?", (int(p_to_del_id),))
+                                 conn_exec.execute("DELETE FROM match_stats_map WHERE player_id = %s", (int(p_to_del_id),))
+                                 conn_exec.execute("DELETE FROM match_stats WHERE player_id = %s", (int(p_to_del_id),))
                                  
                                  # For subbed_for_id, we only set it to NULL to keep the stats of the sub
-                                 conn_exec.execute("UPDATE match_stats_map SET subbed_for_id = NULL WHERE subbed_for_id = ?", (int(p_to_del_id),))
-                                 conn_exec.execute("UPDATE match_stats SET subbed_for_id = NULL WHERE subbed_for_id = ?", (int(p_to_del_id),))
+                                 conn_exec.execute("UPDATE match_stats_map SET subbed_for_id = NULL WHERE subbed_for_id = %s", (int(p_to_del_id),))
+                                 conn_exec.execute("UPDATE match_stats SET subbed_for_id = NULL WHERE subbed_for_id = %s", (int(p_to_del_id),))
                                  
                                  # Delete the player
-                                 conn_exec.execute("DELETE FROM players WHERE id = ?", (int(p_to_del_id),))
+                                 conn_exec.execute("DELETE FROM players WHERE id = %s", (int(p_to_del_id),))
                                  conn_exec.commit()
                                  st.cache_data.clear() # CRITICAL: Clear cache to update UI
                                  st.success(f"Player '{p_to_del_name}' deleted.")
@@ -4016,15 +4194,15 @@ elif page == "Admin Panel":
                 if deleted_ids:
                     for pid in deleted_ids:
                          # For player_id, we delete the stats because they belong to the deleted player
-                         conn_up.execute("DELETE FROM match_stats_map WHERE player_id = ?", (pid,))
-                         conn_up.execute("DELETE FROM match_stats WHERE player_id = ?", (pid,))
+                         conn_up.execute("DELETE FROM match_stats_map WHERE player_id = %s", (pid,))
+                         conn_up.execute("DELETE FROM match_stats WHERE player_id = %s", (pid,))
                          
                          # For subbed_for_id, we only set it to NULL to keep the stats of the sub
-                         conn_up.execute("UPDATE match_stats_map SET subbed_for_id = NULL WHERE subbed_for_id = ?", (pid,))
-                         conn_up.execute("UPDATE match_stats SET subbed_for_id = NULL WHERE subbed_for_id = ?", (pid,))
+                         conn_up.execute("UPDATE match_stats_map SET subbed_for_id = NULL WHERE subbed_for_id = %s", (pid,))
+                         conn_up.execute("UPDATE match_stats SET subbed_for_id = NULL WHERE subbed_for_id = %s", (pid,))
                          
                          # Delete the player
-                         conn_up.execute("DELETE FROM players WHERE id = ?", (pid,))
+                         conn_up.execute("DELETE FROM players WHERE id = %s", (pid,))
 
                 for row in edited.itertuples():
                     pid = getattr(row, 'id', None)
@@ -4036,9 +4214,9 @@ elif page == "Admin Panel":
                     
                     if pd.isna(pid):
                         if user_role in ['admin', 'dev']:
-                            conn_up.execute("INSERT INTO players (name, riot_id, rank, discord_handle, default_team_id) VALUES (?, ?, ?, ?, ?)", (nm, rid, rk, getattr(row, 'discord_handle', ""), dtid))
+                            conn_up.execute("INSERT INTO players (name, riot_id, rank, discord_handle, default_team_id) VALUES (%s, %s, %s, %s, %s)", (nm, rid, rk, getattr(row, 'discord_handle', ""), dtid))
                     else:
-                        conn_up.execute("UPDATE players SET name=?, riot_id=?, rank=?, discord_handle=?, default_team_id=? WHERE id=?", (nm, rid, rk, getattr(row, 'discord_handle', ""), dtid, int(pid)))
+                        conn_up.execute("UPDATE players SET name=%s, riot_id=%s, rank=%s, discord_handle=%s, default_team_id=%s WHERE id=%s", (nm, rid, rk, getattr(row, 'discord_handle', ""), dtid, int(pid)))
                 conn_up.commit()
                 st.cache_data.clear() # Clear cache to show player changes immediately
                 st.success("Players saved")
@@ -4060,7 +4238,7 @@ elif page == "Admin Panel":
             conn_ins = get_conn()
             id1 = int(teams_df[teams_df['name'] == t1].iloc[0]['id'])
             id2 = int(teams_df[teams_df['name'] == t2].iloc[0]['id'])
-            conn_ins.execute("INSERT INTO matches (week, group_name, status, format, team1_id, team2_id, score_t1, score_t2, maps_played, match_type) VALUES (?, ?, 'scheduled', ?, ?, ?, 0, 0, 0, 'regular')", (int(w), gsel or None, fmt, id1, id2))
+            conn_ins.execute("INSERT INTO matches (week, group_name, status, format, team1_id, team2_id, score_t1, score_t2, maps_played, match_type) VALUES (%s, %s, 'scheduled', %s, %s, %s, 0, 0, 0, 'regular')", (int(w), gsel or None, fmt, id1, id2))
             conn_ins.commit()
             conn_ins.close()
             st.success("Match added")

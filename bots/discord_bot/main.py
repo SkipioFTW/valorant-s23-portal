@@ -8,6 +8,10 @@ import re
 import sys
 import base64
 import requests
+try:
+    import psycopg2
+except ImportError:
+    psycopg2 = None
 import sqlite3
 from io import BytesIO
 from dotenv import load_dotenv
@@ -26,6 +30,7 @@ GH_TOKEN = os.getenv("GH_TOKEN")
 GH_OWNER = os.getenv("GH_OWNER", "SkipioFTW") # Default owner
 GH_REPO = os.getenv("GH_REPO", "valorant-s23-portal") # Default repo
 GUILD_ID = int(os.getenv("GUILD_ID", "1470636024110776322"))
+SUPABASE_URL = os.getenv("SUPABASE_URL")
 
 # Database path (relative or absolute)
 DB_PATH = os.getenv("DB_PATH", os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data", "valorant_s23.db"))
@@ -90,11 +95,28 @@ def upload_to_github(path, content_str, message):
         return False, f"Error {r.status_code}: {r.text}"
 
 def get_db_conn():
+    if SUPABASE_URL:
+        try:
+            # Check if it's a URL or a dictionary (if parsed)
+            if isinstance(SUPABASE_URL, str):
+                return psycopg2.connect(SUPABASE_URL)
+            else:
+                return psycopg2.connect(**SUPABASE_URL)
+        except Exception as e:
+            print(f"Supabase connection error: {e}")
+            # Fallback to local if absolutely necessary for dev, but production should use Supabase
+            try:
+                if os.path.exists(DB_PATH):
+                    return sqlite3.connect(DB_PATH)
+            except:
+                pass
+            return None
     try:
-        return sqlite3.connect(DB_PATH)
+        if os.path.exists(DB_PATH):
+            return sqlite3.connect(DB_PATH)
     except Exception as e:
         print(f"Database connection error: {e}")
-        return None
+    return None
 
 # Allowed ranks for validation
 ALLOWED_RANKS = ["Unranked", "Iron/Bronze", "Silver", "Gold", "Platinum", "Diamond", "Ascendant", "Immortal 1/2", "Immortal 3/Radiant"]
@@ -120,13 +142,13 @@ async def match(interaction: discord.Interaction, team_a: str, team_b: str, grou
 
     # 1. VALIDATION: Check if Teams exist
     cursor = conn.cursor()
-    cursor.execute("SELECT name FROM teams WHERE LOWER(name) = LOWER(?)", (team_a,))
+    cursor.execute("SELECT name FROM teams WHERE LOWER(name) = LOWER(%s)", (team_a,))
     if not cursor.fetchone():
         await interaction.followup.send(f"❌ Error: **Team A ('{team_a}')** not found in the database. Please check the spelling.")
         conn.close()
         return
         
-    cursor.execute("SELECT name FROM teams WHERE LOWER(name) = LOWER(?)", (team_b,))
+    cursor.execute("SELECT name FROM teams WHERE LOWER(name) = LOWER(%s)", (team_b,))
     if not cursor.fetchone():
         await interaction.followup.send(f"❌ Error: **Team B ('{team_b}')** not found in the database. Please check the spelling.")
         conn.close()
@@ -136,7 +158,7 @@ async def match(interaction: discord.Interaction, team_a: str, team_b: str, grou
     try:
         cursor.execute("""
             INSERT INTO pending_matches (team_a, team_b, group_name, url, submitted_by)
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s)
         """, (team_a, team_b, group, url, str(interaction.user)))
         conn.commit()
         await interaction.followup.send(f"✅ **Match Queued!**\nTeams: `{team_a} vs {team_b}`\nAdmin will verify the data in the dashboard.")
@@ -171,12 +193,119 @@ async def player(interaction: discord.Interaction, discord_handle: str, riot_id:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO pending_players (riot_id, rank, discord_handle, submitted_by)
-            VALUES (?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s)
         """, (riot_id, clean_rank, discord_handle, str(interaction.user)))
         conn.commit()
         await interaction.followup.send(f"✅ **Registration Submitted!**\nPlayer: `{riot_id}`\nRank: `{clean_rank}`\nPending Approval in Admin Panel.")
     except Exception as e:
         await interaction.followup.send(f"❌ Database Error: {str(e)}")
+    finally:
+        conn.close()
+
+@bot.tree.command(name="standings", description="View current group standings")
+@discord.app_commands.describe(group="Group Name (e.g. ALPHA or BETA)")
+async def standings(interaction: discord.Interaction, group: str):
+    await interaction.response.defer()
+    conn = get_db_conn()
+    if not conn:
+        await interaction.followup.send("❌ Error: Could not connect to database.")
+        return
+    
+    try:
+        is_postgres = not isinstance(conn, sqlite3.Connection)
+        placeholder = "%s" if is_postgres else "?"
+        cursor = conn.cursor()
+        
+        # Simple fetching of teams in the group
+        cursor.execute(f"SELECT name FROM teams WHERE UPPER(group_name) = UPPER({placeholder})", (group,))
+        teams = cursor.fetchall()
+        if not teams:
+            await interaction.followup.send(f"❌ No teams found in group `{group}`.")
+            return
+
+        msg = f"🏆 **Group {group.upper()} Teams**\n```\n"
+        for row in teams:
+            msg += f"- {row[0]}\n"
+        msg += "```\n*Full standings with points/PD available in the portal.*"
+        await interaction.followup.send(msg)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {str(e)}")
+    finally:
+        conn.close()
+
+@bot.tree.command(name="matches", description="Show upcoming matches")
+async def matches(interaction: discord.Interaction):
+    await interaction.response.defer()
+    conn = get_db_conn()
+    if not conn:
+        await interaction.followup.send("❌ Error: Could not connect to database.")
+        return
+    
+    try:
+        cursor = conn.cursor()
+        query = """
+            SELECT m.week, t1.name, t2.name, m.status
+            FROM matches m
+            JOIN teams t1 ON m.team1_id = t1.id
+            JOIN teams t2 ON m.team2_id = t2.id
+            WHERE m.status != 'completed'
+            ORDER BY m.week ASC, m.id ASC
+            LIMIT 5
+        """
+        cursor.execute(query)
+        results = cursor.fetchall()
+        
+        if not results:
+            await interaction.followup.send("📅 No upcoming matches scheduled.")
+            return
+            
+        embed = discord.Embed(title="📅 Upcoming Matches", color=discord.Color.blue())
+        for week, t1, t2, status in results:
+            embed.add_field(
+                name=f"Week {week}", 
+                value=f"**{t1}** vs **{t2}**\nStatus: `{status}`", 
+                inline=False
+            )
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {str(e)}")
+    finally:
+        conn.close()
+
+@bot.tree.command(name="player_info", description="Look up a player's profile")
+@discord.app_commands.describe(name="Player name or Riot ID")
+async def player_info(interaction: discord.Interaction, name: str):
+    await interaction.response.defer()
+    conn = get_db_conn()
+    if not conn:
+        await interaction.followup.send("❌ Error: Could not connect to database.")
+        return
+    
+    try:
+        is_postgres = not isinstance(conn, sqlite3.Connection)
+        placeholder = "%s" if is_postgres else "?"
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            SELECT p.name, p.riot_id, p.rank, t.name as team_name
+            FROM players p
+            LEFT JOIN teams t ON p.default_team_id = t.id
+            WHERE LOWER(p.name) = LOWER({placeholder}) OR LOWER(p.riot_id) = LOWER({placeholder})
+        """, (name, name))
+        
+        row = cursor.fetchone()
+        if not row:
+            await interaction.followup.send(f"❌ Player `{name}` not found.")
+            return
+            
+        p_name, riot_id, rank, team = row
+        embed = discord.Embed(title=f"👤 Player: {p_name}", color=discord.Color.green())
+        embed.add_field(name="Riot ID", value=f"`{riot_id or 'N/A'}`", inline=True)
+        embed.add_field(name="Rank", value=f"`{rank or 'Unranked'}`", inline=True)
+        embed.add_field(name="Team", value=f"`{team or 'Free Agent'}`", inline=True)
+        
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {str(e)}")
     finally:
         conn.close()
 
