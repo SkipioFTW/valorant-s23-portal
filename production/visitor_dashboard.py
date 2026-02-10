@@ -1721,13 +1721,16 @@ def _get_standings_cached():
             res_matches = supabase.table("matches")\
                 .select("*, match_maps(team1_rounds, team2_rounds, map_index)")\
                 .eq("status", "completed")\
-                .eq("match_type", "regular")\
                 .execute()
             
             if res_matches.data:
                 m_list = []
                 for item in res_matches.data:
                     # Flatten the match_maps data (get index 0 for BO1 rounds)
+                    # Exclude playoffs if match_type is explicitly playoff
+                    mt = str(item.get("match_type", "")).lower()
+                    if mt == "playoff":
+                        continue
                     maps = item.get("match_maps", [])
                     t1_sum = 0
                     t2_sum = 0
@@ -1764,11 +1767,17 @@ def _get_standings_cached():
         return pd.DataFrame()
     
     # Pre-calculate logo display safety to cache it
-    teams_df['logo_display'] = [
-        p if p and not (".." in p or p.startswith("/") or p.startswith("\\")) and os.path.exists(p) 
-        else None 
-        for p in teams_df['logo_path']
-    ]
+    # Build Supabase Storage URL for team logos based on team name
+    def _safe_team_filename(name):
+        nm = str(name or "").strip()
+        nm = re.sub(r"[^A-Za-z0-9]+", "_", nm)
+        nm = re.sub(r"_+", "_", nm).strip("_")
+        return nm + ".png"
+    base_url = str(get_secret("SUPABASE_URL", "")).strip('"').strip("'")
+    if base_url:
+        teams_df['logo_display'] = teams_df['name'].apply(lambda n: f"{base_url}/storage/v1/object/public/teams/{_safe_team_filename(n)}")
+    else:
+        teams_df['logo_display'] = None
 
     exclude_ids = set(teams_df[teams_df['name'].isin(['FAT1','FAT2'])]['id'].tolist())
     if exclude_ids:
@@ -1909,7 +1918,6 @@ def get_week_matches(week):
         try:
             res = supabase.table("matches")\
                 .select("*, t1:teams!team1_id(name), t2:teams!team2_id(name), match_maps(team1_rounds, team2_rounds)")\
-                .eq("match_type", "regular")\
                 .order("id")\
                 .execute()
             if res.data:
@@ -1930,7 +1938,9 @@ def get_week_matches(week):
                             return int(x) == int(week)
                         except:
                             return str(x) == str(week)
-                    df = temp_df[temp_df['week'].apply(_eq_week)]
+                    def _not_playoff(x):
+                        return str(x).lower() != 'playoff'
+                    df = temp_df[temp_df['week'].apply(_eq_week) & temp_df['match_type'].apply(_not_playoff)]
         except Exception:
             pass
 
@@ -2580,11 +2590,17 @@ if page == "Overview & Standings":
             for idx, row in enumerate(grp_df.itertuples()):
                 with t_cols[idx % 3]:
                     logo_html = ""
-                    b64 = get_base64_image(row.logo_display)
-                    if b64:
-                        logo_html = f"<img src='data:image/png;base64,{b64}' width='40' style='border-radius: 4px;'/>"
+                    # Prefer direct URL if provided
+                    ld = row.logo_display if hasattr(row, 'logo_display') else None
+                    if isinstance(ld, str) and ld.startswith('http'):
+                        logo_html = f"<img src='{html.escape(ld)}' width='40' style='border-radius: 4px;'/>"
                     else:
-                        logo_html = "<div style='width:40px;height:40px;background:rgba(255,255,255,0.05);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--text-dim);'>%s</div>"
+                        b64 = get_base64_image(ld)
+                        if b64:
+                            logo_html = f"<img src='data:image/png;base64,{b64}' width='40' style='border-radius: 4px;'/>"
+                        else:
+                            initials = (str(row.name)[0:2].upper() if hasattr(row, 'name') and str(row.name).strip() else '?')
+                            logo_html = f"<div style='width:40px;height:40px;background:rgba(255,255,255,0.05);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--text-main);font-family: Orbitron;'>{html.escape(initials)}</div>"
                     
                     st.markdown(f"""<div class="custom-card" style="height: 100%;">
 <div style="display: flex; align-items: center; gap: 15px; margin-bottom: 10px;">
