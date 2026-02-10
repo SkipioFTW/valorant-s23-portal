@@ -724,34 +724,6 @@ def scrape_tracker_match(url):
     except Exception as e:
         return None, f"Scraping error: {str(e)}"
 
-def fetch_match_from_github(match_id):
-    """
-    Attempts to fetch a match JSON from the GitHub repository.
-    """
-    owner = get_secret("GH_OWNER")
-    repo = get_secret("GH_REPO")
-    token = get_secret("GH_TOKEN")
-    branch = get_secret("GH_BRANCH", "main")
-    
-    if not owner or not repo:
-        return None, "GitHub configuration missing (GH_OWNER/GH_REPO)"
-        
-    # Use API for both public and private repos if token is available
-    if token:
-        url = f"https://api.github.com/repos/{owner}/{repo}/contents/assets/matches/match_{match_id}.json?ref={branch}"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github.raw"
-        }
-        try:
-            r = requests.get(url, headers=headers, timeout=10)
-            if r.status_code == 200:
-                return r.json(), None
-            else:
-                return None, f"GitHub API error: {r.status_code}"
-        except Exception as e:
-            return None, f"GitHub API fetch error: {str(e)}"
-
 def list_files_from_github(path):
     """Lists files in a GitHub directory."""
     owner = get_secret("GH_OWNER")
@@ -801,6 +773,34 @@ def get_file_content_from_github(path):
         if r.status_code == 200: return r.json()
     except: pass
     return None
+
+def fetch_match_from_github(match_id):
+    """
+    Attempts to fetch a match JSON from the GitHub repository.
+    """
+    owner = get_secret("GH_OWNER")
+    repo = get_secret("GH_REPO")
+    token = get_secret("GH_TOKEN")
+    branch = get_secret("GH_BRANCH", "main")
+    
+    if not owner or not repo:
+        return None, "GitHub configuration missing (GH_OWNER/GH_REPO)"
+        
+    # Use API for both public and private repos if token is available
+    if token:
+        url = f"https://api.github.com/repos/{owner}/{repo}/contents/assets/matches/match_{match_id}.json?ref={branch}"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github.raw"
+        }
+        try:
+            r = requests.get(url, headers=headers, timeout=10)
+            if r.status_code == 200:
+                return r.json(), None
+            else:
+                return None, f"GitHub API error: {r.status_code}"
+        except Exception as e:
+            return None, f"GitHub API fetch error: {str(e)}"
     else:
         # Fallback to public raw URL
         raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/assets/matches/match_{match_id}.json"
@@ -812,6 +812,7 @@ def get_file_content_from_github(path):
                 return None, f"GitHub file not found (Status: {r.status_code})"
         except Exception as e:
             return None, f"GitHub fetch error: {str(e)}"
+
 
 def parse_tracker_json(jsdata, team1_id, team2_id):
     """
