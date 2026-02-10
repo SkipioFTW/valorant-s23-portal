@@ -9,4 +9,8 @@ requests
 numpy
 joblib
 selenium
+<<<<<<< HEAD
 psycopg2
+=======
+psycopg2
+>>>>>>> d7431a1f970c1abcbc644135fe81182e60cf88a3
