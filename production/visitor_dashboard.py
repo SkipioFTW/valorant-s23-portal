@@ -1409,7 +1409,7 @@ def get_substitutions_log():
             if res.data:
                 l = []
                 for r in res.data:
-                    if r.get("matches", {}).get("status") == "completed":
+                    if str(r.get("matches", {}).get("status", "")).lower() == "completed":
                         item = {
                             "match_id": r.get("match_id"),
                             "map_index": r.get("map_index"),
@@ -1493,11 +1493,12 @@ def get_player_profile(player_id):
                                 'r_a': bdf[bdf['rank'] == rank_val]['assists'].mean()
                             })
         except Exception:
-            pass
 
     # Supabase-only: if not found via Supabase, return {}
     if info.empty:
         return {}
+    if bench is None or not isinstance(bench, pd.Series):
+        bench = pd.Series({'lg_acs': 0, 'lg_k': 0, 'lg_d': 0, 'lg_a': 0, 'r_acs': 0, 'r_k': 0, 'r_d': 0, 'r_a': 0})
             
     # Post-processing
     p_name = info.iloc[0]['name']
@@ -1718,7 +1719,7 @@ def _get_standings_cached():
             # Fetch completed regular matches with map rounds (BO1 focus)
             # We use resource embedding to get match_maps related to each match
             res_matches = supabase.table("matches")\
-                .select("*, match_maps(team1_rounds, team2_rounds)")\
+                .select("*, match_maps(team1_rounds, team2_rounds, map_index)")\
                 .eq("status", "completed")\
                 .eq("match_type", "regular")\
                 .execute()
@@ -1728,13 +1729,14 @@ def _get_standings_cached():
                 for item in res_matches.data:
                     # Flatten the match_maps data (get index 0 for BO1 rounds)
                     maps = item.get("match_maps", [])
-                    item['team1_rounds'] = maps[0].get("team1_rounds") if maps else None
-                    item['team2_rounds'] = maps[0].get("team2_rounds") if maps else None
-                    
-                    # Filter for BO1 or null format in Python to simplify SDK query
-                    fmt = str(item.get("format", "")).upper()
-                    if fmt == "BO1" or not fmt or fmt == "NONE":
-                        m_list.append(item)
+                    t1_sum = 0
+                    t2_sum = 0
+                    for mm in maps:
+                        t1_sum += int((mm.get("team1_rounds") or 0))
+                        t2_sum += int((mm.get("team2_rounds") or 0))
+                    item['agg_t1_rounds'] = t1_sum
+                    item['agg_t2_rounds'] = t2_sum
+                    m_list.append(item)
                 
                 matches_df = pd.DataFrame(m_list)
         except Exception as e:
@@ -1784,16 +1786,19 @@ def _get_standings_cached():
     m = matches_df.copy()
     
     # Ensure scores/rounds are numeric to prevent alignment/broadcasting errors
-    cols_to_fix = ['score_t1', 'score_t2', 'team1_rounds', 'team2_rounds']
+    cols_to_fix = ['score_t1', 'score_t2', 'agg_t1_rounds', 'agg_t2_rounds']
     for col in cols_to_fix:
         if col in m.columns:
             m[col] = pd.to_numeric(m[col], errors='coerce').fillna(0)
     
     # For BO1, if we have map rounds, use them instead of map wins for points/RD
-    if 'team1_rounds' in m.columns and 'team2_rounds' in m.columns:
-        # Only use rounds if it's a BO1 or effectively a BO1
-        m['score_t1'] = np.where(m['team1_rounds'] > 0, m['team1_rounds'], m['score_t1'])
-        m['score_t2'] = np.where(m['team2_rounds'] > 0, m['team2_rounds'], m['score_t2'])
+    if 'agg_t1_rounds' in m.columns and 'agg_t2_rounds' in m.columns:
+        if 'score_t1' not in m.columns:
+            m['score_t1'] = 0
+        if 'score_t2' not in m.columns:
+            m['score_t2'] = 0
+        m['score_t1'] = np.where(m['agg_t1_rounds'] > 0, m['agg_t1_rounds'], m['score_t1'])
+        m['score_t2'] = np.where(m['agg_t2_rounds'] > 0, m['agg_t2_rounds'], m['score_t2'])
     
     # Points for Team 1
     m['p1'] = np.where(m['score_t1'] > m['score_t2'], 15, np.minimum(m['score_t1'], 12))
@@ -1890,6 +1895,11 @@ def _get_player_leaderboard_cached():
 
     return df.sort_values('avg_acs', ascending=False)
 
+def get_player_leaderboard():
+    if not should_use_cache():
+        return _get_player_leaderboard_cached.run()
+    return _get_player_leaderboard_cached()
+
 @st.cache_data(ttl=60)
 def get_week_matches(week):
     import pandas as pd
@@ -1899,7 +1909,6 @@ def get_week_matches(week):
         try:
             res = supabase.table("matches")\
                 .select("*, t1:teams!team1_id(name), t2:teams!team2_id(name), match_maps(team1_rounds, team2_rounds)")\
-                .eq("week", week)\
                 .eq("match_type", "regular")\
                 .order("id")\
                 .execute()
@@ -1914,7 +1923,14 @@ def get_week_matches(week):
                     item['team1_rounds'] = maps[0].get('team1_rounds') if maps else None
                     item['team2_rounds'] = maps[0].get('team2_rounds') if maps else None
                     m_list.append(item)
-                df = pd.DataFrame(m_list)
+                temp_df = pd.DataFrame(m_list)
+                if not temp_df.empty:
+                    def _eq_week(x):
+                        try:
+                            return int(x) == int(week)
+                        except:
+                            return str(x) == str(week)
+                    df = temp_df[temp_df['week'].apply(_eq_week)]
         except Exception:
             pass
 
@@ -3792,10 +3808,20 @@ elif page == "Admin Panel":
         
         init_pending_tables() # Ensure tables exist
         init_player_discord_column() # Ensure players have discord_handle
-        conn_preq = get_conn()
-        pm_df = pd.read_sql("SELECT * FROM pending_matches", conn_preq)
-        pp_df = pd.read_sql("SELECT * FROM pending_players", conn_preq)
-        conn_preq.close()
+        pm_df = pd.DataFrame()
+        pp_df = pd.DataFrame()
+        try:
+            r_pm = supabase.table("pending_matches").select("*").execute()
+            if r_pm.data:
+                pm_df = pd.DataFrame(r_pm.data)
+        except Exception:
+            pass
+        try:
+            r_pp = supabase.table("pending_players").select("*").execute()
+            if r_pp.data:
+                pp_df = pd.DataFrame(r_pp.data)
+        except Exception:
+            pass
         
         col_pm, col_pp = st.columns(2)
         
@@ -3813,22 +3839,28 @@ elif page == "Admin Panel":
                     st.session_state['pending_match_db_id'] = sel_pm_id
                     
                     # AUTO-SELECT MATCH ID
-                    conn_find = get_conn()
-                    find_sql = """
-                        SELECT m.id, m.week FROM matches m
-                        JOIN teams t1 ON m.team1_id = t1.id
-                        JOIN teams t2 ON m.team2_id = t2.id
-                        WHERE (LOWER(t1.name) = LOWER(%s) AND LOWER(t2.name) = LOWER(%s))
-                           OR (LOWER(t1.name) = LOWER(%s) AND LOWER(t2.name) = LOWER(%s))
-                        AND m.status = 'scheduled'
-                        LIMIT 1
-                    """
-                    m_row = conn_find.execute(find_sql, (req['team_a'], req['team_b'], req['team_b'], req['team_a'])).fetchone()
-                    conn_find.close()
-                    
-                    if m_row:
-                        st.session_state['auto_selected_match_week'] = m_row[1]
-                        st.session_state['auto_selected_match_id'] = m_row[0]
+                    try:
+                        res_sched = supabase.table("matches")\
+                            .select("id, week, status, t1:teams!team1_id(name), t2:teams!team2_id(name)")\
+                            .eq("status", "scheduled")\
+                            .execute()
+                        if res_sched.data:
+                            mm = pd.DataFrame(res_sched.data)
+                            def _nm(x):
+                                return str(x).strip().lower() if pd.notna(x) else ""
+                            ta = _nm(req.get('team_a'))
+                            tb = _nm(req.get('team_b'))
+                            cand = mm[((mm['t1'].apply(lambda x: _nm(x.get('name'))) == ta) & (mm['t2'].apply(lambda x: _nm(x.get('name'))) == tb)) |
+                                      ((mm['t1'].apply(lambda x: _nm(x.get('name'))) == tb) & (mm['t2'].apply(lambda x: _nm(x.get('name'))) == ta))]
+                            if not cand.empty:
+                                row0 = cand.iloc[0]
+                                st.session_state['auto_selected_match_week'] = row0['week']
+                                st.session_state['auto_selected_match_id'] = row0['id']
+                                st.success(f"Linked to Scheduled Match (Week {row0['week']})!")
+                            else:
+                                st.warning("Could not find a scheduled match for these teams. Please select manually.")
+                    except Exception:
+                        st.warning("Scheduled match lookup failed. Please select manually.")
                         st.success(f"Linked to Scheduled Match (Week {m_row[1]})!")
                     else:
                         st.warning("Could not find a scheduled match for these teams. Please select manually.")
@@ -3954,14 +3986,18 @@ elif page == "Admin Panel":
                     st.info(f"Forfeit Result: {m['t1_name']} {s1} - {s2} {m['t2_name']}")
                     
                     if st.button("Save Forfeit Match"):
-                        conn_u = get_conn()
                         winner_id = t1_id_val if s1 > s2 else t2_id_val
-                        conn_u.execute("UPDATE matches SET score_t1=%s, score_t2=%s, winner_id=%s, status=%s, format=%s, maps_played=%s, is_forfeit=1 WHERE id=%s", (int(s1), int(s2), winner_id, 'completed', fmt, 0, int(m['id'])))
-                        # Clear any existing maps/stats if it's now a forfeit
-                        conn_u.execute("DELETE FROM match_maps WHERE match_id=%s", (int(m['id']),))
-                        conn_u.execute("DELETE FROM match_stats_map WHERE match_id=%s", (int(m['id']),))
-                        conn_u.commit()
-                        conn_u.close()
+                        supabase.table("matches").update({
+                            "score_t1": int(s1),
+                            "score_t2": int(s2),
+                            "winner_id": winner_id,
+                            "status": "completed",
+                            "format": fmt,
+                            "maps_played": 0,
+                            "is_forfeit": 1
+                        }).eq("id", int(m['id'])).execute()
+                        supabase.table("match_maps").delete().eq("match_id", int(m['id'])).execute()
+                        supabase.table("match_stats_map").delete().eq("match_id", int(m['id'])).execute()
                         st.cache_data.clear()
                         st.success("Saved forfeit match")
                         st.rerun()
@@ -4286,44 +4322,7 @@ elif page == "Admin Panel":
                                 except Exception as e:
                                     st.warning(f"Supabase SDK save failed, attempting local fallback: {e}")
 
-                            if not saved_via_sdk:
-                                conn_s = get_conn()
-                                try:
-                                    conn_s.execute("DELETE FROM match_maps WHERE match_id=%s AND map_index=%s", (int(m['id']), map_idx))
-                                    conn_s.execute("""
-                                        INSERT INTO match_maps (match_id, map_index, map_name, team1_rounds, team2_rounds, winner_id, is_forfeit)
-                                        VALUES (%s, %s, %s, %s, %s, %s, %s)
-                                    """, (int(m['id']), map_idx, map_name_input, int(t1r_input), int(t2r_input), wid, int(is_forfeit_input)))
-
-                                    for t_id, t_entries in all_teams_entries:
-                                        conn_s.execute("DELETE FROM match_stats_map WHERE match_id=%s AND map_index=%s AND team_id=%s", (int(m['id']), map_idx, t_id))
-                                        for e in t_entries:
-                                            if e['player_id']:
-                                                conn_s.execute("""
-                                                    INSERT INTO match_stats_map (match_id, map_index, team_id, player_id, is_sub, subbed_for_id, agent, acs, kills, deaths, assists)
-                                                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                                                """, (int(m['id']), map_idx, t_id, e['player_id'], e['is_sub'], e['subbed_for_id'], e['agent'], e['acs'], e['kills'], e['deaths'], e['assists']))
-                                    
-                                    maps_df_final = pd.read_sql("SELECT team1_rounds, team2_rounds, winner_id FROM match_maps WHERE match_id=%s", conn_s, params=(int(m['id']),))
-                                    final_s1 = len(maps_df_final[maps_df_final['winner_id'] == t1_id_val])
-                                    final_s2 = len(maps_df_final[maps_df_final['winner_id'] == t2_id_val])
-                                    final_winner = t1_id_val if final_s1 > final_s2 else (t2_id_val if final_s2 > final_s1 else None)
-                                    played_cnt = len(maps_df_final[(maps_df_final['team1_rounds'] + maps_df_final['team2_rounds']) > 0])
-                                    
-                                    conn_s.execute("UPDATE matches SET score_t1=%s, score_t2=%s, winner_id=%s, status='completed', maps_played=%s WHERE id=%s", 
-                                                 (final_s1, final_s2, final_winner, played_cnt, int(m['id'])))
-                                    
-                                    if 'pending_match_db_id' in st.session_state:
-                                        try:
-                                            conn_s.execute("DELETE FROM pending_matches WHERE id=%s", (int(st.session_state['pending_match_db_id']),))
-                                        except: pass
-                                        
-                                    conn_s.commit()
-                                except Exception as e:
-                                    if 'conn_s' in locals(): conn_s.rollback()
-                                    st.error(f"Error saving locally: {e}")
-                                finally:
-                                    if 'conn_s' in locals(): conn_s.close()
+                            pass
                                     
                             # Cleanup State
                             if 'pending_match_db_id' in st.session_state:
