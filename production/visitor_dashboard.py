@@ -1476,15 +1476,29 @@ def get_player_profile(player_id):
                 item['team'] = item.get('teams', {}).get('tag')
                 info = pd.DataFrame([item])
                 
-                # 2. Stats for this player
-                res_s = supabase.table("match_stats_map").select("*, matches(*)").eq("player_id", player_id).execute()
+                res_s = supabase.table("match_stats_map").select("*").eq("player_id", player_id).execute()
                 if res_s.data:
-                    s_list = []
-                    for s in res_s.data:
-                        if s.get('matches', {}).get('status') == 'completed':
-                            s['week'] = s.get('matches', {}).get('week')
-                            s_list.append(s)
-                    stats = pd.DataFrame(s_list)
+                    stats = pd.DataFrame(res_s.data)
+                    if not stats.empty:
+                        stats['match_id'] = pd.to_numeric(stats['match_id'], errors='coerce')
+                        mids = stats['match_id'].dropna().astype(int).unique().tolist()
+                        mdf = pd.DataFrame()
+                        if mids:
+                            res_m = supabase.table("matches").select("id,status,week").in_("id", mids).execute()
+                            if res_m.data:
+                                mdf = pd.DataFrame(res_m.data)
+                                mdf['status'] = mdf['status'].astype(str).str.lower()
+                                mdf = mdf.set_index('id')
+                        def _map_or_none(x, col):
+                            try:
+                                return mdf.loc[int(x), col] if not mdf.empty and int(x) in mdf.index else None
+                            except Exception:
+                                return None
+                        stats['status'] = stats['match_id'].apply(lambda x: _map_or_none(x, 'status'))
+                        stats['week'] = stats['match_id'].apply(lambda x: _map_or_none(x, 'week'))
+                        stats['is_sub'] = pd.to_numeric(stats.get('is_sub', 0), errors='coerce').fillna(0)
+                        nz = stats[['acs','kills','deaths','assists']].sum(axis=1) > 0 if set(['acs','kills','deaths','assists']).issubset(stats.columns) else False
+                        stats = stats[(stats['status'] == 'completed') | (nz)]
                     
                 # 3. Benchmarks (League Avg & Rank Avg)
                 rank_val = info.iloc[0]['rank']
