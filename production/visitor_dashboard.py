@@ -5189,6 +5189,13 @@ elif page == "Player Profile":
                 pass
             
             st.plotly_chart(apply_plotly_theme(fig_cmp), use_container_width=True)
+            dbg_df = cmp_df.copy()
+            try:
+                dbg_df = dbg_df.round(2)
+            except Exception:
+                pass
+            st.markdown('<h4 style="color: var(--text-dim); font-family: \'Orbitron\';">DEBUG: BENCHMARK VALUES</h4>', unsafe_allow_html=True)
+            st.dataframe(dbg_df, use_container_width=True, hide_index=True)
 
             # ACS Trend
             tr_df = prof.get('trend')
