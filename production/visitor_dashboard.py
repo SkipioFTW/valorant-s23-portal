@@ -4938,6 +4938,23 @@ elif page == "Player Profile":
         if sel:
             pid = int(players_df[players_df['display_label'] == sel].iloc[0]['id'])
             prof = get_player_profile(pid)
+            # Initialize safe defaults to avoid NameError in templating
+            pp_display_name = 'Player'
+            pp_games = 0
+            pp_avg_acs = 0
+            pp_kd_ratio = 0
+            pp_total_assists = 0
+            pp_total_kills = 0
+            pp_total_deaths = 0
+            pp_sr_avg_acs = 0
+            pp_sr_k = 0
+            pp_sr_d = 0
+            pp_sr_a = 0
+            pp_lg_avg_acs = 0
+            pp_lg_k = 0
+            pp_lg_d = 0
+            pp_lg_a = 0
+            _info = {}
             
             if prof:
                 import math
