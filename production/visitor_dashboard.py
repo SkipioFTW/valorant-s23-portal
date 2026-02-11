@@ -1673,14 +1673,10 @@ def get_player_profile(player_id):
                 rank_val = info.iloc[0]['rank']
                 # We fetch all match stats for completed matches to compute averages
                 # Note: For large datasets, this should be an RPC or a pre-computed view
-                try:
-                    res_all = supabase.rpc("get_player_benchmarks", {"p_rank": rank_val}).execute()
-                    if res_all.data:
-                        bench = pd.Series(res_all.data[0])
-                except Exception:
-                    bench = None
-
-                if bench is None:
+                res_all = supabase.rpc("get_player_benchmarks", {"p_rank": rank_val}).execute()
+                if res_all.data:
+                    bench = pd.Series(res_all.data[0])
+                else:
                     # Fallback to fetching and calculating in Pandas if RPC missing
                     res_m = supabase.table("matches").select("id").eq("status", "completed").execute()
                     c_ids = [m['id'] for m in res_m.data] if res_m.data else []
@@ -1721,7 +1717,7 @@ def get_player_profile(player_id):
                             lg_d = float(bdf['deaths'].mean()) if 'deaths' in bdf.columns else 0.0
                             lg_a = float(bdf['assists'].mean()) if 'assists' in bdf.columns else 0.0
                             # Rank averages across rows with same rank
-                            rbdf = bdf[bdf['rank'] == rank_val] if 'rank' in bdf.columns and rank_val else pd.DataFrame()
+                            rbdf = bdf[bdf['rank'] == rank_val] if 'rank' in bdf.columns else pd.DataFrame()
                             if not rbdf.empty:
                                 r_acs = float(rbdf['acs'].mean()) if 'acs' in rbdf.columns else 0.0
                                 r_k = float(rbdf['kills'].mean()) if 'kills' in rbdf.columns else 0.0
