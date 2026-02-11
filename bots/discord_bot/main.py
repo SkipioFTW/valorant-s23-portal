@@ -570,27 +570,60 @@ async def matches(interaction: discord.Interaction):
     finally:
         conn.close()
 
-@bot.tree.command(name="player_info", description="Look up a player's profile")
+@bot.tree.command(name="player_info", description="Look up a player's profile with performance stats")
 @discord.app_commands.describe(name="Player name or Riot ID")
 async def player_info(interaction: discord.Interaction, name: str):
     await interaction.response.defer()
     
     if supabase:
         try:
-            # Search by name or riot_id
             res = supabase.table("players") \
-                .select("name, riot_id, rank, team:teams!default_team_id(name)") \
+                .select("id,name,riot_id,rank, team:teams!default_team_id(name)") \
                 .or_(f"name.ilike.{name},riot_id.ilike.{name}") \
                 .limit(1) \
                 .execute()
-            
             if res.data:
                 p = res.data[0]
-                team_name = p['team']['name'] if p.get('team') else 'Free Agent'
+                pid = p.get('id')
+                team_name = p.get('team', {}).get('name') if p.get('team') else 'Free Agent'
+                games = 0; avg_acs = 0.0; kd = 0.0; top_agent = 'N/A'
+                agents = []
+                if pid:
+                    rs = supabase.table("match_stats_map").select("acs,kills,deaths,assists,agent,match_id").eq("player_id", pid).execute()
+                    if rs.data:
+                        sdf = pd.DataFrame(rs.data)
+                        if not sdf.empty:
+                            games = sdf['match_id'].nunique()
+                            avg_acs = float(sdf['acs'].mean())
+                            total_k = int(sdf['kills'].sum()); total_d = int(sdf['deaths'].sum())
+                            kd = (total_k / (total_d if total_d != 0 else 1)) if total_k or total_d else 0.0
+                            if 'agent' in sdf.columns:
+                                ag = sdf.groupby('agent').agg(maps=('match_id','nunique'), avg_acs=('acs','mean')).reset_index()
+                                ag = ag.sort_values(['maps','avg_acs'], ascending=[False, False])
+                                agents = ag.head(3).values.tolist()
+                                if not ag.empty:
+                                    top_agent = str(ag.iloc[0]['agent'])
                 embed = discord.Embed(title=f"👤 Player: {p['name']}", color=discord.Color.green())
-                embed.add_field(name="Riot ID", value=f"`{p['riot_id'] or 'N/A'}`", inline=True)
-                embed.add_field(name="Rank", value=f"`{p['rank'] or 'Unranked'}`", inline=True)
+                embed.add_field(name="Riot ID", value=f"`{p.get('riot_id') or 'N/A'}`", inline=True)
+                embed.add_field(name="Rank", value=f"`{p.get('rank') or 'Unranked'}`", inline=True)
                 embed.add_field(name="Team", value=f"`{team_name}`", inline=True)
+                embed.add_field(name="Games", value=f"`{games}`", inline=True)
+                embed.add_field(name="Avg ACS", value=f"`{round(avg_acs,1)}`", inline=True)
+                embed.add_field(name="KD Ratio", value=f"`{round(kd,2)}`", inline=True)
+                if top_agent and top_agent != 'N/A':
+                    try:
+                        ta_row = [r for r in agents if r[0] == top_agent]
+                        maps_played = int(ta_row[0][1]) if ta_row else 0
+                        ta_acs = float(ta_row[0][2]) if ta_row else 0.0
+                    except Exception:
+                        maps_played = 0; ta_acs = 0.0
+                    embed.add_field(name="Top Agent", value=f"`{top_agent}` — maps: `{maps_played}`, avg ACS: `{round(ta_acs,1)}`", inline=False)
+                if agents:
+                    lines = []
+                    for row in agents:
+                        # row: [agent, maps, avg_acs]
+                        lines.append(f"{row[0]} — maps: {int(row[1])}, ACS: {round(float(row[2]),1)}")
+                    embed.add_field(name="Agent Summary", value="\n".join(lines), inline=False)
                 await interaction.followup.send(embed=embed)
                 return
         except Exception as e:
@@ -604,23 +637,60 @@ async def player_info(interaction: discord.Interaction, name: str):
     try:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT p.name, p.riot_id, p.rank, t.name as team_name
+            SELECT p.id, p.name, p.riot_id, p.rank, t.name as team_name
             FROM players p
             LEFT JOIN teams t ON p.default_team_id = t.id
             WHERE LOWER(p.name) = LOWER(%s) OR LOWER(p.riot_id) = LOWER(%s)
             LIMIT 1
         """, (name, name))
-        
         row = cursor.fetchone()
         if not row:
             await interaction.followup.send(f"❌ Player `{name}` not found.")
             return
-            
-        p_name, r_id, p_rank, t_name = row
+        pid, p_name, r_id, p_rank, t_name = row
+        # Gather stats
+        games = 0; avg_acs = 0.0; kd = 0.0; top_agent = 'N/A'; agents = []
+        try:
+            cursor.execute("""
+                SELECT acs, kills, deaths, assists, agent, match_id
+                FROM match_stats_map
+                WHERE player_id = %s
+            """, (pid,))
+            rows = cursor.fetchall()
+            if rows:
+                sdf = pd.DataFrame(rows, columns=['acs','kills','deaths','assists','agent','match_id'])
+                games = sdf['match_id'].nunique()
+                avg_acs = float(sdf['acs'].mean())
+                total_k = int(sdf['kills'].sum()); total_d = int(sdf['deaths'].sum())
+                kd = (total_k / (total_d if total_d != 0 else 1)) if total_k or total_d else 0.0
+                if 'agent' in sdf.columns:
+                    ag = sdf.groupby('agent').agg(maps=('match_id','nunique'), avg_acs=('acs','mean')).reset_index()
+                    ag = ag.sort_values(['maps','avg_acs'], ascending=[False, False])
+                    agents = ag.head(3).values.tolist()
+                    if not ag.empty:
+                        top_agent = str(ag.iloc[0]['agent'])
+        except Exception:
+            pass
         embed = discord.Embed(title=f"👤 Player: {p_name}", color=discord.Color.green())
         embed.add_field(name="Riot ID", value=f"`{r_id or 'N/A'}`", inline=True)
         embed.add_field(name="Rank", value=f"`{p_rank or 'Unranked'}`", inline=True)
         embed.add_field(name="Team", value=f"`{t_name or 'Free Agent'}`", inline=True)
+        embed.add_field(name="Games", value=f"`{games}`", inline=True)
+        embed.add_field(name="Avg ACS", value=f"`{round(avg_acs,1)}`", inline=True)
+        embed.add_field(name="KD Ratio", value=f"`{round(kd,2)}`", inline=True)
+        if top_agent and top_agent != 'N/A':
+            try:
+                ta_row = [r for r in agents if r[0] == top_agent]
+                maps_played = int(ta_row[0][1]) if ta_row else 0
+                ta_acs = float(ta_row[0][2]) if ta_row else 0.0
+            except Exception:
+                maps_played = 0; ta_acs = 0.0
+            embed.add_field(name="Top Agent", value=f"`{top_agent}` — maps: `{maps_played}`, avg ACS: `{round(ta_acs,1)}`", inline=False)
+        if agents:
+            lines = []
+            for row in agents:
+                lines.append(f"{row[0]} — maps: {int(row[1])}, ACS: {round(float(row[2]),1)}")
+            embed.add_field(name="Agent Summary", value="\n".join(lines), inline=False)
         await interaction.followup.send(embed=embed)
     except Exception as e:
         await interaction.followup.send(f"❌ Error: {str(e)}")

@@ -1566,6 +1566,28 @@ def get_player_profile(player_id):
             'starter_kda': float((s_sta['kills'].sum() / max(s_sta['deaths'].sum(), 1))) if not s_sta.empty else 0.0,
         }
 
+    # Agent breakdowns and map summaries
+    top_agent = None
+    agents_df = pd.DataFrame()
+    maps_df_summary = pd.DataFrame()
+    if not stats.empty and 'agent' in stats.columns:
+        ag = stats.groupby('agent').agg(
+            maps=('match_id','nunique'),
+            avg_acs=('acs','mean'),
+            kills=('kills','sum'),
+            deaths=('deaths','sum'),
+            assists=('assists','sum')
+        ).reset_index()
+        ag['kda'] = ag['kills'] / ag['deaths'].replace(0, 1)
+        ag = ag.sort_values(['maps','avg_acs'], ascending=[False, False])
+        agents_df = ag
+        if not ag.empty:
+            top_agent = str(ag.iloc[0]['agent'])
+    if not stats.empty and 'map_index' in stats.columns:
+        ms = stats.groupby('map_index').agg(avg_acs=('acs','mean'), maps=('match_id','nunique')).reset_index()
+        ms = ms.sort_values(['avg_acs','maps'], ascending=[False, False])
+        maps_df_summary = ms
+
     return {
         'info': info.iloc[0].to_dict(),
         'display_name': display_name,
@@ -1575,6 +1597,9 @@ def get_player_profile(player_id):
         'total_deaths': total_d,
         'total_assists': total_a,
         'kd_ratio': round(kd, 2),
+        'top_agent': top_agent,
+        'agents': agents_df,
+        'maps_summary': maps_df_summary,
         'sr_avg_acs': round(float(bench['r_acs'] or 0), 1),
         'sr_k': round(float(bench['r_k'] or 0), 1),
         'sr_d': round(float(bench['r_d'] or 0), 1),
@@ -5076,6 +5101,30 @@ elif page == "Player Profile":
             fig_cmp.update_yaxes(title_text="K/D/A Per Match", secondary_y=True)
             
             st.plotly_chart(apply_plotly_theme(fig_cmp), use_container_width=True)
+            
+            # Agent Insights
+            ag_df = prof.get('agents')
+            if isinstance(ag_df, pd.DataFrame) and not ag_df.empty:
+                st.markdown('<h3 style="color: var(--primary-blue); font-family: \'Orbitron\';">AGENT INSIGHTS</h3>', unsafe_allow_html=True)
+                import plotly.express as px
+                # Usage Pie
+                pie_fig = px.pie(ag_df, names='agent', values='maps', title='Usage by Agent', hole=0.35, color_discrete_sequence=['#3FD1FF','#FF4655','#ECE8E1','#0B192E'])
+                st.plotly_chart(apply_plotly_theme(pie_fig), use_container_width=True)
+                # Performance Bar
+                bar_fig = px.bar(ag_df.sort_values('avg_acs', ascending=False), x='agent', y='avg_acs', title='Average ACS by Agent', color='avg_acs', color_continuous_scale='Blues')
+                bar_fig.update_layout(height=360)
+                st.plotly_chart(apply_plotly_theme(bar_fig), use_container_width=True)
+                # Top Agent callout
+                top_agent = prof.get('top_agent') or 'N/A'
+                st.info(f"Top Agent: {top_agent} — Maps: {int(ag_df[ag_df['agent']==top_agent]['maps'].iloc[0]) if top_agent!='N/A' and not ag_df.empty else 0}, Avg ACS: {round(float(ag_df[ag_df['agent']==top_agent]['avg_acs'].iloc[0]) if top_agent!='N/A' and not ag_df.empty else 0,1)}")
+
+            # Map Insights
+            ms_df = prof.get('maps_summary')
+            if isinstance(ms_df, pd.DataFrame) and not ms_df.empty:
+                st.markdown('<h3 style="color: var(--primary-blue); font-family: \'Orbitron\';">MAP PERFORMANCE</h3>', unsafe_allow_html=True)
+                import plotly.express as px
+                map_bar = px.bar(ms_df.sort_values('avg_acs', ascending=False), x='map_index', y='avg_acs', title='Average ACS by Map', color='avg_acs', color_continuous_scale='Teal')
+                st.plotly_chart(apply_plotly_theme(map_bar), use_container_width=True)
             
             maps_df = prof.get('maps')
             if isinstance(maps_df, pd.DataFrame) and not maps_df.empty:
