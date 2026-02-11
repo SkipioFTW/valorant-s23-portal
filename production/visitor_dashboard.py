@@ -4230,6 +4230,15 @@ elif page == "Admin Panel":
                     
                     st.rerun()
 
+                st.markdown("---")
+                if st.button("📋 Copy All Pending Tracker Links"):
+                    links = [f"{r.get('url','')}" for r in pm_df.to_dict('records') if r.get('url')]
+                    if links:
+                        st.code("\n".join(links), language="text")
+                        st.success(f"Copied {len(links)} links to clipboard view!")
+                    else:
+                        st.warning("No links found.")
+
         with col_pp:
             st.markdown("#### Pending Players")
             if pp_df.empty:
@@ -4717,19 +4726,26 @@ elif page == "Admin Panel":
             def_name = ""
             def_rid = ""
             def_rk = rvals[0]
-            def_dh = ""
+            def_tl = ""
             if 'pending_player_request' in st.session_state:
                 preq = st.session_state['pending_player_request']
                 def_rid = preq.get('riot_id', "")
                 def_rk = preq.get('rank', rvals[0])
-                def_dh = preq.get('discord_handle', "")
+                def_tl = preq.get('tracker_link', "")
+                
+                # Format Name as @discord_handle if available
+                discord_h = preq.get('discord_handle', "")
+                if discord_h:
+                    def_name = f"@{discord_h}"
+                
                 if def_rk not in rvals: def_rk = rvals[0]
                 st.info(f"Filling from Bot Request: {def_rid}")
 
             with st.form("add_player_admin"):
-                nm_new = st.text_input("Name", value=def_name)
+                nm_new = st.text_input("Name (Discord Handle)", value=def_name, help="Format: @ExampleUser")
                 rid_new = st.text_input("Riot ID", value=def_rid)
                 rk_new = st.selectbox("Rank", rvals, index=rvals.index(def_rk))
+                tl_new = st.text_input("Tracker Link", value=def_tl)
                 tmn_new = st.selectbox("Team", [""] + team_names, index=0)
                 add_ok = st.form_submit_button("Create Player")
                 if add_ok and nm_new:
@@ -4760,7 +4776,7 @@ elif page == "Admin Panel":
                                     "name": nm_clean, 
                                     "riot_id": rid_clean, 
                                     "rank": rk_new, 
-                                    "discord_handle": nm_clean, 
+                                    "tracker_link": tl_new, 
                                     "default_team_id": dtid_new
                                 }).execute()
                                 if res_in.data:
@@ -4789,7 +4805,7 @@ elif page == "Admin Panel":
                                     can_add = False
                                     
                             if can_add:
-                                conn_add.execute("INSERT INTO players (name, riot_id, rank, default_team_id) VALUES (%s, %s, %s, %s)", (nm_clean, rid_clean, rk_new, dtid_new))
+                                conn_add.execute("INSERT INTO players (name, riot_id, rank, tracker_link, default_team_id) VALUES (%s, %s, %s, %s, %s)", (nm_clean, rid_clean, rk_new, tl_new, dtid_new))
                                 
                                 if 'pending_player_db_id' in st.session_state:
                                     try:

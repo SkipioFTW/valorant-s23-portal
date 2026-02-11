@@ -10,6 +10,7 @@ import sys
 import base64
 import requests
 import time
+import functools
 import psycopg2
 from psycopg2 import pool
 from dotenv import load_dotenv
@@ -22,9 +23,9 @@ load_dotenv()
 # --- CONFIGURATION ---
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GH_TOKEN = os.getenv("GH_TOKEN")
-GH_OWNER = os.getenv("GH_OWNER") # Default owner
-GH_REPO = os.getenv("GH_REPO") # Default repo
-# GUILD_ID can be None for global commands, but useful for dev
+GH_OWNER = os.getenv("GH_OWNER") 
+GH_REPO = os.getenv("GH_REPO") 
+# GUILD_ID can be None for global commands
 GUILD_ID = os.getenv("GUILD_ID", None) 
 if GUILD_ID:
     GUILD_ID = int(GUILD_ID)
@@ -36,7 +37,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL") or os.getenv("DB_CONNECTION_STRING")
 
-# Initialize Supabase Client (for Storage/Auth if needed, though we use direct Postgres mostly)
+# Initialize Supabase Client
 supabase: Client = None
 if SUPABASE_URL and SUPABASE_KEY:
     try:
@@ -45,7 +46,7 @@ if SUPABASE_URL and SUPABASE_KEY:
     except Exception as e:
         print(f"Error initializing Supabase client: {e}")
 
-# --- DATABASE CONNECTION POOLING (Matches Production) ---
+# --- DATABASE CONNECTION POOLING ---
 
 class UnifiedCursorWrapper:
     def __init__(self, cur):
@@ -142,7 +143,7 @@ def get_conn():
         except Exception as e:
             print(f"Error getting connection from pool: {e}")
     
-    # Fallback to direct connection if pool fails
+    # Fallback to direct connection
     print("Fallback to direct connection")
     db_url = SUPABASE_DB_URL
     if db_url:
@@ -154,134 +155,16 @@ def get_conn():
             
     return None
 
-# --- BOT SETUP ---
+# --- ASYNC HELPERS ---
 
-intents = discord.Intents.default()
-intents.message_content = True
+async def run_in_executor(func, *args):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, functools.partial(func, *args))
 
-class MyBot(commands.Bot):
-    def __init__(self):
-        super().__init__(command_prefix="!", intents=intents)
-
-    async def setup_hook(self):
-        # Sync commands to the specific guild for instant updates during dev
-        if GUILD_ID:
-            guild = discord.Object(id=GUILD_ID)
-            self.tree.copy_global_to(guild=guild)
-            await self.tree.sync(guild=guild)
-            print(f"Synced commands to guild {GUILD_ID}")
-        else:
-            await self.tree.sync()
-            print("Synced global commands")
-
-bot = MyBot()
-
-# --- HELPER FUNCTIONS ---
-
-def is_admin_or_captain(interaction: discord.Interaction):
-    # Check for specific roles or permissions
-    # Modify these role names to match your server
-    allowed_roles = ["Admin", "Captain", "Moderator", "Owner"] 
-    if isinstance(interaction.user, discord.Member):
-        if any(role.name in allowed_roles for role in interaction.user.roles):
-            return True
-        # Also allow server administrators
-        if interaction.user.guild_permissions.administrator:
-            return True
-    return False
-
-# --- SLASH COMMANDS ---
-
-@bot.tree.command(name="match", description="Submit a match for Admin verification")
-@discord.app_commands.describe(
-    team_a="Name of Team A", 
-    team_b="Name of Team B", 
-    group="Group Name (e.g. ALPHA)", 
-    url="Tracker.gg Match URL"
-)
-async def match(interaction: discord.Interaction, team_a: str, team_b: str, group: str, url: str):
-    await interaction.response.defer()
-    
-    # Role Check
-    if not is_admin_or_captain(interaction):
-        await interaction.followup.send("❌ You do not have permission to submit matches.")
-        return
-
+def fetch_standings_df(group):
     conn = get_conn()
-    if not conn:
-        await interaction.followup.send("❌ Error: Database connection failed.")
-        return
-
+    if not conn: return None
     try:
-        cursor = conn.cursor()
-        # Verify teams exist (Case insensitive)
-        cursor.execute("SELECT name FROM teams WHERE name ILIKE %s", (team_a,))
-        if not cursor.fetchone():
-            await interaction.followup.send(f"❌ Error: **Team A ('{team_a}')** not found.")
-            return
-            
-        cursor.execute("SELECT name FROM teams WHERE name ILIKE %s", (team_b,))
-        if not cursor.fetchone():
-            await interaction.followup.send(f"❌ Error: **Team B ('{team_b}')** not found.")
-            return
-
-        # Insert into pending_matches with 'new' status
-        cursor.execute("""
-            INSERT INTO pending_matches (team_a, team_b, group_name, url, submitted_by, status)
-            VALUES (%s, %s, %s, %s, %s, 'new')
-        """, (team_a, team_b, group, url, str(interaction.user)))
-        conn.commit()
-        
-        await interaction.followup.send(f"✅ **Match Submitted!**\nGroup: {group}\n{team_a} vs {team_b}\n\n`{url}`\n\nAwaiting Admin Approval.")
-    except Exception as e:
-        await interaction.followup.send(f"❌ Database Error: {str(e)}")
-    finally:
-        conn.close()
-
-@bot.tree.command(name="player", description="Register a new player for approval")
-@discord.app_commands.describe(
-    riot_id="Riot ID (Name#TAG)", 
-    rank="Current Rank"
-)
-async def player(interaction: discord.Interaction, riot_id: str, rank: str):
-    await interaction.response.defer()
-    
-    conn = get_conn()
-    if not conn:
-        await interaction.followup.send("❌ Error: Database connection failed.")
-        return
-
-    try:
-        clean_rank = rank.strip()
-        cursor = conn.cursor()
-        
-        # Insert into pending_players
-        cursor.execute("""
-            INSERT INTO pending_players (riot_id, rank, submitted_by, status, discord_handle)
-            VALUES (%s, %s, %s, 'new', %s)
-        """, (riot_id, clean_rank, str(interaction.user), str(interaction.user.name)))
-        conn.commit()
-        
-        await interaction.followup.send(f"✅ **Player Registration Submitted!**\nPlayer: `{riot_id}`\nRank: `{clean_rank}`\n\nPending Approval.")
-    except Exception as e:
-        await interaction.followup.send(f"❌ Database Error: {str(e)}")
-    finally:
-        conn.close()
-
-@bot.tree.command(name="standings", description="View current group standings")
-@discord.app_commands.describe(group="Group Name (e.g. ALPHA or BETA)")
-async def standings(interaction: discord.Interaction, group: str):
-    await interaction.response.defer()
-    
-    conn = get_conn()
-    if not conn:
-        await interaction.followup.send("❌ Error: Database connection failed.")
-        return
-
-    try:
-        # Optimized SQL Query (from staging/data_access.py)
-        # We need to filter by group here, unlike the app which might show all or filter in pandas
-        # Adding WHERE t.group_name ILIKE %s
         query = """
         WITH team_matches AS (
             SELECT 
@@ -331,25 +214,159 @@ async def standings(interaction: discord.Interaction, group: str):
         GROUP BY t.id
         ORDER BY Points DESC, PD DESC
         """
-        
-        df = pd.read_sql_query(query, conn.conn, params=(group,)) # pandas needs raw connection
-        
-        if df.empty:
-            await interaction.followup.send(f"❌ No standings found for group `{group}` or group does not exist.")
-            return
-
-        msg = f"🏆 **Group {group.upper()} Standings**\n"
-        msg += "```\nRank  Team                         P  W  L  Pts  PD\n"
-        for i, row in enumerate(df.itertuples(), start=1):
-            name = row.name
-            msg += f"{i:>2}    {name[:26]:<26}  {row.Played:>2} {row.Wins:>2} {row.Losses:>2} {row.Points:>3} {row.PD:>3}\n"
-        msg += "```"
-        await interaction.followup.send(msg)
-        
+        # Use pandas with direct psycopg2 connection object (conn.conn)
+        return pd.read_sql_query(query, conn.conn, params=(group,))
     except Exception as e:
-        await interaction.followup.send(f"❌ Error: {str(e)}")
+        print(f"Standings error: {e}")
+        return None
     finally:
         conn.close()
+
+# --- BOT SETUP ---
+
+intents = discord.Intents.default()
+intents.message_content = True
+
+class MyBot(commands.Bot):
+    def __init__(self):
+        super().__init__(command_prefix="!", intents=intents)
+
+    async def setup_hook(self):
+        if GUILD_ID:
+            guild = discord.Object(id=GUILD_ID)
+            self.tree.copy_global_to(guild=guild)
+            await self.tree.sync(guild=guild)
+            print(f"Synced commands to guild {GUILD_ID}")
+        else:
+            await self.tree.sync()
+            print("Synced global commands")
+
+bot = MyBot()
+
+# --- HELPER FUNCTIONS ---
+
+def is_admin_or_captain(interaction: discord.Interaction):
+    # Check for specific roles or permissions
+    allowed_roles = ["Admin", "Captain", "Moderator", "Owner"] 
+    if isinstance(interaction.user, discord.Member):
+        if any(role.name in allowed_roles for role in interaction.user.roles):
+            return True
+        if interaction.user.guild_permissions.administrator:
+            return True
+    return False
+
+# --- SLASH COMMANDS ---
+
+@bot.tree.command(name="match", description="Submit a match result")
+@discord.app_commands.describe(
+    team_a="Name of Team A", 
+    team_b="Name of Team B", 
+    group="Group Name (e.g. ALPHA)", 
+    tracker_link="Tracker.gg Match URL"
+)
+async def match(interaction: discord.Interaction, team_a: str, team_b: str, group: str, tracker_link: str):
+    await interaction.response.defer()
+    
+    if not is_admin_or_captain(interaction):
+        await interaction.followup.send("❌ You do not have permission to submit matches.")
+        return
+
+    conn = get_conn()
+    if not conn:
+        await interaction.followup.send("❌ Error: Database connection failed.")
+        return
+
+    try:
+        cursor = conn.cursor()
+        # Insert into pending_matches
+        # Using tracker_link as 'url'
+        cursor.execute("""
+            INSERT INTO pending_matches (team_a, team_b, group_name, url, submitted_by, status)
+            VALUES (%s, %s, %s, %s, %s, 'new')
+        """, (team_a, team_b, group, tracker_link, str(interaction.user)))
+        conn.commit()
+        
+        # Formatted Reply
+        embed = discord.Embed(title="✅ Match Submitted", color=discord.Color.green())
+        embed.add_field(name="Matchup", value=f"{team_a} vs {team_b}", inline=False)
+        embed.add_field(name="Group", value=group, inline=True)
+        embed.add_field(name="Tracker Link", value=f"[Link]({tracker_link})", inline=True)
+        embed.set_footer(text="Awaiting Admin Approval")
+        
+        await interaction.followup.send(embed=embed)
+        
+    except Exception as e:
+        await interaction.followup.send(f"❌ Database Error: {str(e)}")
+    finally:
+        conn.close()
+
+@bot.tree.command(name="player", description="Register a new player")
+@discord.app_commands.describe(
+    riot_id="Riot ID (Name#TAG)", 
+    rank="Current Rank",
+    tracker_link="Tracker.gg Profile URL"
+)
+async def player(interaction: discord.Interaction, riot_id: str, rank: str, tracker_link: str):
+    await interaction.response.defer()
+    
+    conn = get_conn()
+    if not conn:
+        await interaction.followup.send("❌ Error: Database connection failed.")
+        return
+
+    try:
+        clean_rank = rank.strip()
+        cursor = conn.cursor()
+        
+        # Insert into pending_players
+        # We store submitted_by as usual, and also discord_handle (submitter's name)
+        # tracker_link is stored in the new column
+        discord_name = str(interaction.user.name) # Just the username
+        
+        cursor.execute("""
+            INSERT INTO pending_players (riot_id, rank, tracker_link, submitted_by, status, discord_handle)
+            VALUES (%s, %s, %s, %s, 'new', %s)
+        """, (riot_id, clean_rank, tracker_link, str(interaction.user), discord_name))
+        conn.commit()
+        
+        # Formatted Reply
+        embed = discord.Embed(title="✅ Player Registration Submitted", color=discord.Color.blue())
+        embed.add_field(name="Player", value=f"`{riot_id}`", inline=True)
+        embed.add_field(name="Rank", value=f"`{clean_rank}`", inline=True)
+        embed.add_field(name="Tracker", value=f"[Link]({tracker_link})", inline=False)
+        embed.add_field(name="Discord Handle", value=f"@{discord_name}", inline=True)
+        embed.set_footer(text="Pending Approval")
+        
+        await interaction.followup.send(embed=embed)
+        
+    except Exception as e:
+        await interaction.followup.send(f"❌ Database Error: {str(e)}")
+    finally:
+        conn.close()
+
+@bot.tree.command(name="standings", description="View current group standings")
+@discord.app_commands.describe(group="Group Name (e.g. ALPHA or BETA)")
+async def standings(interaction: discord.Interaction, group: str):
+    await interaction.response.defer()
+    
+    # Run blocking DB/Pandas call in executor
+    df = await run_in_executor(fetch_standings_df, group)
+    
+    if df is None:
+        await interaction.followup.send("❌ Error fetching standings.")
+        return
+        
+    if df.empty:
+        await interaction.followup.send(f"❌ No standings found for group `{group}`.")
+        return
+
+    msg = f"🏆 **Group {group.upper()} Standings**\n"
+    msg += "```\nRank  Team                         P  W  L  Pts  PD\n"
+    for i, row in enumerate(df.itertuples(), start=1):
+        name = row.name
+        msg += f"{i:>2}    {name[:26]:<26}  {row.Played:>2} {row.Wins:>2} {row.Losses:>2} {row.Points:>3} {row.PD:>3}\n"
+    msg += "```"
+    await interaction.followup.send(msg)
 
 @bot.tree.command(name="leaderboard", description="Show top players by ACS")
 @discord.app_commands.describe(min_games="Minimum games to include (default 0)")
@@ -360,7 +377,6 @@ async def leaderboard(interaction: discord.Interaction, min_games: int = 0):
         await interaction.followup.send("❌ DB connection failed.")
         return
     try:
-        # Optimized Leaderboard Query
         query = """
             SELECT p.name,
                    p.riot_id,
@@ -379,7 +395,6 @@ async def leaderboard(interaction: discord.Interaction, min_games: int = 0):
             ORDER BY avg_acs DESC
             LIMIT 10
         """
-        
         cursor = conn.cursor()
         cursor.execute(query, (min_games,))
         rows = cursor.fetchall()
@@ -410,7 +425,7 @@ async def matches(interaction: discord.Interaction):
     
     conn = get_conn()
     if not conn:
-        await interaction.followup.send("❌ Error: Database connection failed.")
+        await interaction.followup.send("❌ DB Error.")
         return
     
     try:
@@ -447,7 +462,7 @@ async def player_info(interaction: discord.Interaction, name: str):
     
     conn = get_conn()
     if not conn:
-        await interaction.followup.send("❌ Error: Database connection failed.")
+        await interaction.followup.send("❌ DB Error.")
         return
     
     try:
@@ -486,21 +501,18 @@ async def player_info(interaction: discord.Interaction, name: str):
             k_sum = df['kills'].sum()
             d_sum = df['deaths'].sum()
             kd = k_sum / (d_sum if d_sum > 0 else 1)
-            
-            # Top Agent
             if 'agent' in df.columns:
                 agent_counts = df['agent'].value_counts()
-                if not agent_counts.empty:
-                    top_agent = agent_counts.index[0]
+                top_agent = agent_counts.index[0] if not agent_counts.empty else "N/A"
 
         embed = discord.Embed(title=f"👤 Player: {p_name}", color=discord.Color.green())
         embed.add_field(name="Riot ID", value=f"`{r_id or 'N/A'}`", inline=True)
         embed.add_field(name="Rank", value=f"`{p_rank or 'Unranked'}`", inline=True)
         embed.add_field(name="Team", value=f"`{t_name or 'Free Agent'}`", inline=True)
-        embed.add_field(name="Games Played", value=f"`{games}`", inline=True)
-        embed.add_field(name="Avg ACS", value=f"`{round(avg_acs,1)}`", inline=True)
-        embed.add_field(name="KD Ratio", value=f"`{round(kd,2)}`", inline=True)
-        embed.add_field(name="Main Agent", value=f"`{top_agent}`", inline=True)
+        embed.add_field(name="Games", value=f"`{games}`", inline=True)
+        embed.add_field(name="ACS", value=f"`{round(avg_acs,1)}`", inline=True)
+        embed.add_field(name="KD", value=f"`{round(kd,2)}`", inline=True)
+        embed.add_field(name="Agent", value=f"`{top_agent}`", inline=True)
         
         await interaction.followup.send(embed=embed)
         
@@ -511,7 +523,7 @@ async def player_info(interaction: discord.Interaction, name: str):
 
 # --- CUSTOM REPLIES & REPORTING ---
 
-@bot.tree.command(name="setreply", description="Set a custom reply for a user (Admin Only)")
+@bot.tree.command(name="setreply", description="Set a custom reply (Admin Only)")
 @discord.app_commands.describe(user_id="Discord User ID", message="Reply Message")
 async def setreply(interaction: discord.Interaction, user_id: str, message: str):
     if not is_admin_or_captain(interaction):
@@ -521,11 +533,8 @@ async def setreply(interaction: discord.Interaction, user_id: str, message: str)
     conn = get_conn()
     if conn:
         try:
-            # Create table if not exists
             conn.execute("CREATE TABLE IF NOT EXISTS bot_replies (id SERIAL PRIMARY KEY, user_id TEXT UNIQUE, reply TEXT)")
             conn.commit()
-            
-            # Upsert
             curr = conn.cursor()
             curr.execute("""
                 INSERT INTO bot_replies (user_id, reply) VALUES (%s, %s)
@@ -559,47 +568,39 @@ async def delreply(interaction: discord.Interaction, user_id: str):
     else:
         await interaction.response.send_message("❌ DB Connection failed.", ephemeral=True)
 
-# Define on_message to handle custom replies and reports
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
-    # Check if bot is mentioned
+    # Check for mentions
     if bot.user in message.mentions or (message.reference and message.reference.resolved and message.reference.resolved.author == bot.user):
         conn = get_conn()
-        reply_sent = False
         if conn:
             try:
                 cur = conn.cursor()
-                # Check for custom reply
                 cur.execute("SELECT reply FROM bot_replies WHERE user_id=%s", (str(message.author.id),))
                 row = cur.fetchone()
                 
                 if row and row[0]:
-                    await message.channel.send(row[0])
-                    reply_sent = True
+                    await message.reply(row[0]) # Reply to message
                     
-                    # Report to Owner
                     if OWNER_ID:
                         try:
                             owner = await bot.fetch_user(OWNER_ID)
                             if owner:
-                                await owner.send(f"🔔 **Custom Reply Triggered!**\nUser: {message.author.name} (`{message.author.id}`)\nChannel: {message.channel.name} (`{message.channel.id}`)\nMessage: {message.content}\nBot Reply: {row[0]}")
+                                await owner.send(f"🔔 **Reply Triggered!**\nUser: {message.author.name}\nMsg: {message.content}\nReply: {row[0]}")
                         except Exception as e:
-                            print(f"Failed to report to owner: {e}")
-
+                            print(f"Failed to report: {e}")
             except Exception as e:
-                print(f"Error in custom reply logic: {e}")
+                print(f"Reply error: {e}")
             finally:
                 conn.close()
 
-    # Process commands (if any exist as prefix commands, though we use slash mostly)
     await bot.process_commands(message)
 
-# Run Bot
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
-        print("Error: DISCORD_TOKEN not set in .env")
+        print("Error: DISCORD_TOKEN not set")
     else:
         bot.run(DISCORD_TOKEN)
