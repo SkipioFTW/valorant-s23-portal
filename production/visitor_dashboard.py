@@ -1481,21 +1481,32 @@ def get_player_profile(player_id):
                     stats = pd.DataFrame(res_s.data)
                     if not stats.empty:
                         stats['match_id'] = pd.to_numeric(stats['match_id'], errors='coerce')
+                        stats['map_index'] = pd.to_numeric(stats.get('map_index', 0), errors='coerce').fillna(0).astype(int)
                         mids = stats['match_id'].dropna().astype(int).unique().tolist()
-                        mdf = pd.DataFrame()
+                        mdf = pd.DataFrame(); mmdf = pd.DataFrame()
                         if mids:
-                            res_m = supabase.table("matches").select("id,status,week").in_("id", mids).execute()
+                            res_m = supabase.table("matches").select("id,status,week,format").in_("id", mids).execute()
                             if res_m.data:
                                 mdf = pd.DataFrame(res_m.data)
                                 mdf['status'] = mdf['status'].astype(str).str.lower()
                                 mdf = mdf.set_index('id')
-                        def _map_or_none(x, col):
+                            # Join map names for each (match_id, map_index)
+                            res_mm = supabase.table("match_maps").select("match_id,map_index,map_name,team1_rounds,team2_rounds").in_("match_id", mids).execute()
+                            if res_mm.data:
+                                mmdf = pd.DataFrame(res_mm.data)
+                                mmdf['map_index'] = pd.to_numeric(mmdf.get('map_index', 0), errors='coerce').fillna(0).astype(int)
+                                mmdf = mmdf[['match_id','map_index','map_name','team1_rounds','team2_rounds']]
+                        def _match_val(x, col):
                             try:
                                 return mdf.loc[int(x), col] if not mdf.empty and int(x) in mdf.index else None
                             except Exception:
                                 return None
-                        stats['status'] = stats['match_id'].apply(lambda x: _map_or_none(x, 'status'))
-                        stats['week'] = stats['match_id'].apply(lambda x: _map_or_none(x, 'week'))
+                        stats['status'] = stats['match_id'].apply(lambda x: _match_val(x, 'status'))
+                        stats['week'] = stats['match_id'].apply(lambda x: _match_val(x, 'week'))
+                        stats['format'] = stats['match_id'].apply(lambda x: _match_val(x, 'format'))
+                        # Merge map_name and map rounds
+                        if not mmdf.empty:
+                            stats = stats.merge(mmdf, on=['match_id','map_index'], how='left')
                         stats['is_sub'] = pd.to_numeric(stats.get('is_sub', 0), errors='coerce').fillna(0)
                         nz = stats[['acs','kills','deaths','assists']].sum(axis=1) > 0 if set(['acs','kills','deaths','assists']).issubset(stats.columns) else False
                         stats = stats[(stats['status'] == 'completed') | (nz)]
@@ -1583,9 +1594,11 @@ def get_player_profile(player_id):
         agents_df = ag
         if not ag.empty:
             top_agent = str(ag.iloc[0]['agent'])
-    if not stats.empty and 'map_index' in stats.columns:
-        ms = stats.groupby('map_index').agg(avg_acs=('acs','mean'), maps=('match_id','nunique')).reset_index()
+    if not stats.empty and ('map_name' in stats.columns or 'map_index' in stats.columns):
+        key_col = 'map_name' if 'map_name' in stats.columns and stats['map_name'].notna().any() else 'map_index'
+        ms = stats.groupby(key_col).agg(avg_acs=('acs','mean'), maps=('match_id','nunique')).reset_index()
         ms = ms.sort_values(['avg_acs','maps'], ascending=[False, False])
+        ms['map_label'] = ms[key_col].apply(lambda x: str(x) if key_col=='map_name' else f"Map {int(x)+1}")
         maps_df_summary = ms
 
     return {
@@ -5123,7 +5136,8 @@ elif page == "Player Profile":
             if isinstance(ms_df, pd.DataFrame) and not ms_df.empty:
                 st.markdown('<h3 style="color: var(--primary-blue); font-family: \'Orbitron\';">MAP PERFORMANCE</h3>', unsafe_allow_html=True)
                 import plotly.express as px
-                map_bar = px.bar(ms_df.sort_values('avg_acs', ascending=False), x='map_index', y='avg_acs', title='Average ACS by Map', color='avg_acs', color_continuous_scale='Teal')
+                x_col = 'map_label' if 'map_label' in ms_df.columns else ('map_name' if 'map_name' in ms_df.columns else 'map_index')
+                map_bar = px.bar(ms_df.sort_values('avg_acs', ascending=False), x=x_col, y='avg_acs', title='Average ACS by Map', color='avg_acs', color_continuous_scale='Teal')
                 st.plotly_chart(apply_plotly_theme(map_bar), use_container_width=True)
             
             maps_df = prof.get('maps')
