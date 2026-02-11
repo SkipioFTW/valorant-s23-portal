@@ -1541,38 +1541,36 @@ def get_player_profile(player_id):
                                     ranks_df['id'] = pd.to_numeric(ranks_df['id'], errors='coerce')
                             if not ranks_df.empty:
                                 bdf = bdf.merge(ranks_df.rename(columns={'id':'player_id'}), on='player_id', how='left')
-                            # Exclude the selected player's own rows to avoid mirroring values
-                            bdf_other = bdf[bdf['player_id'] != int(player_id)] if 'player_id' in bdf.columns else bdf.copy()
-                            # Compute league averages per match (others only)
-                            if 'match_id' in bdf_other.columns and not bdf_other.empty:
-                                pm = bdf_other.groupby('match_id').agg(
-                                    acs=('acs','mean'),
-                                    kills=('kills','sum'),
-                                    deaths=('deaths','sum'),
-                                    assists=('assists','sum')
-                                ).reset_index()
-                            else:
-                                pm = pd.DataFrame()
+                            # Compute league averages per match (include all rows)
+                            pm = bdf.groupby('match_id').agg(
+                                acs=('acs','mean'),
+                                kills=('kills','sum'),
+                                deaths=('deaths','sum'),
+                                assists=('assists','sum')
+                            ).reset_index()
                             lg_acs = float(pm['acs'].mean()) if 'acs' in pm.columns else 0.0
                             lg_k = float(pm['kills'].mean()) if 'kills' in pm.columns else 0.0
                             lg_d = float(pm['deaths'].mean()) if 'deaths' in pm.columns else 0.0
                             lg_a = float(pm['assists'].mean()) if 'assists' in pm.columns else 0.0
-                            rbdf_other = bdf_other[bdf_other['rank'] == rank_val] if 'rank' in bdf_other.columns else pd.DataFrame()
-                            if not rbdf_other.empty:
-                                rpm = rbdf_other.groupby('match_id').agg(
+                            # Rank averages per match
+                            rbdf = bdf[bdf['rank'] == rank_val] if 'rank' in bdf.columns else pd.DataFrame()
+                            if not rbdf.empty:
+                                rpm = rbdf.groupby('match_id').agg(
                                     acs=('acs','mean'),
                                     kills=('kills','sum'),
                                     deaths=('deaths','sum'),
                                     assists=('assists','sum')
                                 ).reset_index()
+                                r_acs = float(rpm['acs'].mean()) if 'acs' in rpm.columns else 0.0
+                                r_k = float(rpm['kills'].mean()) if 'kills' in rpm.columns else 0.0
+                                r_d = float(rpm['deaths'].mean()) if 'deaths' in rpm.columns else 0.0
+                                r_a = float(rpm['assists'].mean()) if 'assists' in rpm.columns else 0.0
                             else:
-                                rpm = pd.DataFrame()
+                                # Fallback: use league averages if no rank-specific data yet
+                                r_acs, r_k, r_d, r_a = lg_acs, lg_k, lg_d, lg_a
                             bench = pd.Series({
                                 'lg_acs': lg_acs, 'lg_k': lg_k, 'lg_d': lg_d, 'lg_a': lg_a,
-                                'r_acs': float(rpm['acs'].mean()) if not rpm.empty else 0.0,
-                                'r_k': float(rpm['kills'].mean()) if not rpm.empty else 0.0,
-                                'r_d': float(rpm['deaths'].mean()) if not rpm.empty else 0.0,
-                                'r_a': float(rpm['assists'].mean()) if not rpm.empty else 0.0
+                                'r_acs': r_acs, 'r_k': r_k, 'r_d': r_d, 'r_a': r_a
                             })
                         else:
                             # If no join, compute league-only averages as a fallback
@@ -1658,7 +1656,7 @@ def get_player_profile(player_id):
             return x
         except Exception:
             return 0.0
-    # Sanitize NaN -> 0 for benchmark values (do not mirror player's values)
+    # Sanitize NaN -> 0 for benchmark values
     pm_k = (total_k / max(games,1))
     pm_d = (total_d / max(games,1))
     pm_a = (total_a / max(games,1))
@@ -1683,13 +1681,13 @@ def get_player_profile(player_id):
         'agents': agents_df,
         'maps_summary': maps_df_summary,
         'sr_avg_acs': round(_safe(bench.get('r_acs')), 1),
-        'sr_k': round(_safe(bench.get('r_k')), 1),
-        'sr_d': round(_safe(bench.get('r_d')), 1),
-        'sr_a': round(_safe(bench.get('r_a')), 1),
+        'sr_k': round(_safe(bench.get('r_k')), 2),
+        'sr_d': round(_safe(bench.get('r_d')), 2),
+        'sr_a': round(_safe(bench.get('r_a')), 2),
         'lg_avg_acs': round(_safe(bench.get('lg_acs')), 1),
-        'lg_k': round(_safe(bench.get('lg_k')), 1),
-        'lg_d': round(_safe(bench.get('lg_d')), 1),
-        'lg_a': round(_safe(bench.get('lg_a')), 1),
+        'lg_k': round(_safe(bench.get('lg_k')), 2),
+        'lg_d': round(_safe(bench.get('lg_d')), 2),
+        'lg_a': round(_safe(bench.get('lg_a')), 2),
         'maps': stats,
         'trend': trend,
         'sub_impact': sub_impact,
