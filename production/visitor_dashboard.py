@@ -4941,11 +4941,23 @@ elif page == "Player Profile":
             
             if prof:
                 import math
-                # Safe access helpers
-                def _p(key, default=None):
-                    v = prof.get(key, default)
-                    return v if v is not None else default
                 _info = prof.get('info', {}) if isinstance(prof.get('info'), dict) else {}
+                # Precomputed safe values to avoid NameError and missing keys
+                pp_display_name = prof.get('display_name') or 'Player'
+                pp_games = prof.get('games', 0) if prof.get('games') is not None else 0
+                pp_avg_acs = prof.get('avg_acs', 0) if prof.get('avg_acs') is not None else 0
+                pp_kd_ratio = prof.get('kd_ratio', 0) if prof.get('kd_ratio') is not None else 0
+                pp_total_assists = prof.get('total_assists', 0) if prof.get('total_assists') is not None else 0
+                pp_total_kills = prof.get('total_kills', 0) if prof.get('total_kills') is not None else 0
+                pp_total_deaths = prof.get('total_deaths', 0) if prof.get('total_deaths') is not None else 0
+                pp_sr_avg_acs = prof.get('sr_avg_acs', 0) if prof.get('sr_avg_acs') is not None else 0
+                pp_sr_k = prof.get('sr_k', 0) if prof.get('sr_k') is not None else 0
+                pp_sr_d = prof.get('sr_d', 0) if prof.get('sr_d') is not None else 0
+                pp_sr_a = prof.get('sr_a', 0) if prof.get('sr_a') is not None else 0
+                pp_lg_avg_acs = prof.get('lg_avg_acs', 0) if prof.get('lg_avg_acs') is not None else 0
+                pp_lg_k = prof.get('lg_k', 0) if prof.get('lg_k') is not None else 0
+                pp_lg_d = prof.get('lg_d', 0) if prof.get('lg_d') is not None else 0
+                pp_lg_a = prof.get('lg_a', 0) if prof.get('lg_a') is not None else 0
                 # Header Card
                 st.markdown(f"""<div class="custom-card" style="margin-bottom: 2rem;">
 <div style="display: flex; align-items: center; gap: 20px;">
@@ -4953,7 +4965,7 @@ elif page == "Player Profile":
 {html.escape(str((_info.get('name') or 'P')[0].upper()))}
 </div>
 <div>
-<h2 style="margin: 0; color: var(--primary-blue); font-family: 'Orbitron';">{html.escape(str(_p('display_name', 'Player')))}</h2>
+<h2 style="margin: 0; color: var(--primary-blue); font-family: 'Orbitron';">{html.escape(str(pp_display_name))}</h2>
 <div style="color: var(--text-dim); font-size: 1.1rem;">{html.escape(str(_info.get('team') or 'Free Agent'))}</div>
 </div>
 </div>
@@ -4964,22 +4976,22 @@ elif page == "Player Profile":
             with m1:
                 st.markdown(f"""<div class="custom-card" style="text-align: center;">
 <div style="color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">Games</div>
-<div style="font-size: 2rem; font-family: 'Orbitron'; color: var(--text-main); margin: 10px 0;">{_p('games', 0)}</div>
+<div style="font-size: 2rem; font-family: 'Orbitron'; color: var(--text-main); margin: 10px 0;">{pp_games}</div>
 </div>""", unsafe_allow_html=True)
             with m2:
                 st.markdown(f"""<div class="custom-card" style="text-align: center;">
 <div style="color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">Avg ACS</div>
-<div style="font-size: 2rem; font-family: 'Orbitron'; color: var(--primary-blue); margin: 10px 0;">{_p('avg_acs', 0)}</div>
+<div style="font-size: 2rem; font-family: 'Orbitron'; color: var(--primary-blue); margin: 10px 0;">{pp_avg_acs}</div>
 </div>""", unsafe_allow_html=True)
             with m3:
                 st.markdown(f"""<div class="custom-card" style="text-align: center;">
 <div style="color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">KD Ratio</div>
-<div style="font-size: 2rem; font-family: 'Orbitron'; color: var(--primary-red); margin: 10px 0;">{_p('kd_ratio', 0)}</div>
+<div style="font-size: 2rem; font-family: 'Orbitron'; color: var(--primary-red); margin: 10px 0;">{pp_kd_ratio}</div>
 </div>""", unsafe_allow_html=True)
             with m4:
                 st.markdown(f"""<div class="custom-card" style="text-align: center;">
 <div style="color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">Assists</div>
-<div style="font-size: 2rem; font-family: 'Orbitron'; color: var(--text-main); margin: 10px 0;">{_p('total_assists', 0)}</div>
+<div style="font-size: 2rem; font-family: 'Orbitron'; color: var(--text-main); margin: 10px 0;">{pp_total_assists}</div>
 </div>""", unsafe_allow_html=True)
             
             st.markdown("<br>", unsafe_allow_html=True)
@@ -4987,13 +4999,13 @@ elif page == "Player Profile":
             # Comparison Radar or Bar Chart
             st.markdown('<h3 style="color: var(--primary-blue); font-family: \'Orbitron\';">PERFORMANCE BENCHMARKS</h3>', unsafe_allow_html=True)
             
-            _games = _p('games', 0) or 0
+            _games = pp_games or 0
             _games = _games if isinstance(_games, (int, float)) and not math.isnan(_games) else 0
             cmp_df = pd.DataFrame({
                 'Metric': ['ACS','Kills/Match','Deaths/Match','Assists/Match'],
-                'Player': [_p('avg_acs', 0), _p('total_kills', 0)/max(_games,1), _p('total_deaths', 0)/max(_games,1), _p('total_assists', 0)/max(_games,1)],
-                'Rank Avg': [_p('sr_avg_acs', 0), _p('sr_k', 0), _p('sr_d', 0), _p('sr_a', 0)],
-                'League Avg': [_p('lg_avg_acs', 0), _p('lg_k', 0), _p('lg_d', 0), _p('lg_a', 0)],
+                'Player': [pp_avg_acs, pp_total_kills/max(_games,1), pp_total_deaths/max(_games,1), pp_total_assists/max(_games,1)],
+                'Rank Avg': [pp_sr_avg_acs, pp_sr_k, pp_sr_d, pp_sr_a],
+                'League Avg': [pp_lg_avg_acs, pp_lg_k, pp_lg_d, pp_lg_a],
             })
             
             # Plotly Bar Chart for comparison with dual axis
@@ -5002,15 +5014,15 @@ elif page == "Player Profile":
             fig_cmp = make_subplots(specs=[[{"secondary_y": True}]])
             
             # ACS (Primary Y-Axis)
-            fig_cmp.add_trace(go.Bar(name='Player ACS', x=['ACS'], y=[_p('avg_acs', 0)], marker_color='#3FD1FF'), secondary_y=False)
-            fig_cmp.add_trace(go.Bar(name='Rank Avg ACS', x=['ACS'], y=[_p('sr_avg_acs', 0)], marker_color='#FF4655', opacity=0.7), secondary_y=False)
-            fig_cmp.add_trace(go.Bar(name='League Avg ACS', x=['ACS'], y=[_p('lg_avg_acs', 0)], marker_color='#ECE8E1', opacity=0.5), secondary_y=False)
+            fig_cmp.add_trace(go.Bar(name='Player ACS', x=['ACS'], y=[pp_avg_acs], marker_color='#3FD1FF'), secondary_y=False)
+            fig_cmp.add_trace(go.Bar(name='Rank Avg ACS', x=['ACS'], y=[pp_sr_avg_acs], marker_color='#FF4655', opacity=0.7), secondary_y=False)
+            fig_cmp.add_trace(go.Bar(name='League Avg ACS', x=['ACS'], y=[pp_lg_avg_acs], marker_color='#ECE8E1', opacity=0.5), secondary_y=False)
             
             # Per-Match Stats (Secondary Y-Axis)
             other_metrics = ['Kills/Match', 'Deaths/Match', 'Assists/Match']
-            player_others = [_p('total_kills', 0)/max(_games,1), _p('total_deaths', 0)/max(_games,1), _p('total_assists', 0)/max(_games,1)]
-            rank_others = [_p('sr_k', 0), _p('sr_d', 0), _p('sr_a', 0)]
-            league_others = [_p('lg_k', 0), _p('lg_d', 0), _p('lg_a', 0)]
+            player_others = [pp_total_kills/max(_games,1), pp_total_deaths/max(_games,1), pp_total_assists/max(_games,1)]
+            rank_others = [pp_sr_k, pp_sr_d, pp_sr_a]
+            league_others = [pp_lg_k, pp_lg_d, pp_lg_a]
             
             fig_cmp.add_trace(go.Bar(name='Player Stats', x=other_metrics, y=player_others, marker_color='#3FD1FF', showlegend=False), secondary_y=True)
             fig_cmp.add_trace(go.Bar(name='Rank Avg Stats', x=other_metrics, y=rank_others, marker_color='#FF4655', opacity=0.7, showlegend=False), secondary_y=True)
