@@ -5090,9 +5090,9 @@ elif page == "Player Profile":
             fig_cmp = make_subplots(specs=[[{"secondary_y": True}]])
             
             # ACS (Primary Y-Axis)
-            fig_cmp.add_trace(go.Bar(name='Player ACS', x=['ACS'], y=[pp_avg_acs], marker_color='#3FD1FF'), secondary_y=False)
-            fig_cmp.add_trace(go.Bar(name='Rank Avg ACS', x=['ACS'], y=[pp_sr_avg_acs], marker_color='#FF4655', opacity=0.7), secondary_y=False)
-            fig_cmp.add_trace(go.Bar(name='League Avg ACS', x=['ACS'], y=[pp_lg_avg_acs], marker_color='#ECE8E1', opacity=0.5), secondary_y=False)
+            fig_cmp.add_trace(go.Bar(name='Player ACS', x=['ACS'], y=[pp_avg_acs], marker_color='#3FD1FF', showlegend=True), secondary_y=False)
+            fig_cmp.add_trace(go.Bar(name='Rank Avg ACS', x=['ACS'], y=[pp_sr_avg_acs], marker_color='#FF4655', opacity=0.7, showlegend=True), secondary_y=False)
+            fig_cmp.add_trace(go.Bar(name='League Avg ACS', x=['ACS'], y=[pp_lg_avg_acs], marker_color='#ECE8E1', opacity=0.7, showlegend=True), secondary_y=False)
             
             # Per-Match Stats (Secondary Y-Axis)
             other_metrics = ['Kills/Match', 'Deaths/Match', 'Assists/Match']
@@ -5100,9 +5100,9 @@ elif page == "Player Profile":
             rank_others = [pp_sr_k, pp_sr_d, pp_sr_a]
             league_others = [pp_lg_k, pp_lg_d, pp_lg_a]
             
-            fig_cmp.add_trace(go.Bar(name='Player Stats', x=other_metrics, y=player_others, marker_color='#3FD1FF', showlegend=False), secondary_y=True)
-            fig_cmp.add_trace(go.Bar(name='Rank Avg Stats', x=other_metrics, y=rank_others, marker_color='#FF4655', opacity=0.7, showlegend=False), secondary_y=True)
-            fig_cmp.add_trace(go.Bar(name='League Avg Stats', x=other_metrics, y=league_others, marker_color='#ECE8E1', opacity=0.5, showlegend=False), secondary_y=True)
+            fig_cmp.add_trace(go.Bar(name='Player Stats', x=other_metrics, y=player_others, marker_color='#3FD1FF', showlegend=True), secondary_y=True)
+            fig_cmp.add_trace(go.Bar(name='Rank Avg Stats', x=other_metrics, y=rank_others, marker_color='#FF4655', opacity=0.7, showlegend=True), secondary_y=True)
+            fig_cmp.add_trace(go.Bar(name='League Avg Stats', x=other_metrics, y=league_others, marker_color='#ECE8E1', opacity=0.7, showlegend=True), secondary_y=True)
             
             fig_cmp.update_layout(
                 barmode='group', 
@@ -5114,6 +5114,21 @@ elif page == "Player Profile":
             fig_cmp.update_yaxes(title_text="K/D/A Per Match", secondary_y=True)
             
             st.plotly_chart(apply_plotly_theme(fig_cmp), use_container_width=True)
+
+            # ACS Trend
+            tr_df = prof.get('trend')
+            if isinstance(tr_df, pd.DataFrame) and not tr_df.empty:
+                st.markdown('<h3 style="color: var(--primary-blue); font-family: \'Orbitron\';">ACS TREND</h3>', unsafe_allow_html=True)
+                acs_fig = go.Figure()
+                acs_fig.add_trace(go.Scatter(x=tr_df['label'], y=tr_df['avg_acs'], mode='lines+markers', name='ACS', line=dict(color='#3FD1FF')))
+                acs_fig.update_layout(height=320)
+                st.plotly_chart(apply_plotly_theme(acs_fig), use_container_width=True)
+
+                st.markdown('<h3 style="color: var(--primary-blue); font-family: \'Orbitron\';">KDA TREND</h3>', unsafe_allow_html=True)
+                kda_fig = go.Figure()
+                kda_fig.add_trace(go.Scatter(x=tr_df['label'], y=tr_df['kda'], mode='lines+markers', name='KDA', line=dict(color='#FF4655')))
+                kda_fig.update_layout(height=320)
+                st.plotly_chart(apply_plotly_theme(kda_fig), use_container_width=True)
             
             # Agent Insights
             ag_df = prof.get('agents')
@@ -5139,6 +5154,20 @@ elif page == "Player Profile":
                 x_col = 'map_label' if 'map_label' in ms_df.columns else ('map_name' if 'map_name' in ms_df.columns else 'map_index')
                 map_bar = px.bar(ms_df.sort_values('avg_acs', ascending=False), x=x_col, y='avg_acs', title='Average ACS by Map', color='avg_acs', color_continuous_scale='Teal')
                 st.plotly_chart(apply_plotly_theme(map_bar), use_container_width=True)
+
+            # Sub Impact Comparison
+            si = prof.get('sub_impact')
+            if isinstance(si, dict) and si:
+                st.markdown('<h3 style="color: var(--primary-blue); font-family: \'Orbitron\';">SUB IMPACT</h3>', unsafe_allow_html=True)
+                sub_fig = make_subplots(specs=[[{"secondary_y": True}]])
+                sub_fig.add_trace(go.Bar(name='Starter ACS', x=['ACS'], y=[si.get('starter_acs', 0.0)], marker_color='#3FD1FF'), secondary_y=False)
+                sub_fig.add_trace(go.Bar(name='Sub ACS', x=['ACS'], y=[si.get('sub_acs', 0.0)], marker_color='#ECE8E1', opacity=0.7), secondary_y=False)
+                sub_fig.add_trace(go.Bar(name='Starter KDA', x=['KDA'], y=[si.get('starter_kda', 0.0)], marker_color='#FF4655'), secondary_y=True)
+                sub_fig.add_trace(go.Bar(name='Sub KDA', x=['KDA'], y=[si.get('sub_kda', 0.0)], marker_color='#FFA5AE', opacity=0.7), secondary_y=True)
+                sub_fig.update_layout(barmode='group', height=320)
+                sub_fig.update_yaxes(title_text='ACS', secondary_y=False)
+                sub_fig.update_yaxes(title_text='KDA', secondary_y=True)
+                st.plotly_chart(apply_plotly_theme(sub_fig), use_container_width=True)
             
             maps_df = prof.get('maps')
             if isinstance(maps_df, pd.DataFrame) and not maps_df.empty:
