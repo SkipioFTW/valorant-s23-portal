@@ -328,19 +328,89 @@ async def standings(interaction: discord.Interaction, group: str):
     
     if supabase:
         try:
-            res = supabase.table("teams").select("name").ilike("group_name", group).execute()
-            if not res.data:
+            # 1) Get teams for this group
+            res_teams = supabase.table("teams").select("id, name, group_name").ilike("group_name", group).execute()
+            teams = res_teams.data or []
+            if not teams:
                 await interaction.followup.send(f"❌ No teams found in group `{group}`.")
                 return
+            team_df = pd.DataFrame(teams)
+            ids = team_df['id'].tolist()
 
-            msg = f"🏆 **Group {group.upper()} Teams**\n```\n"
-            for row in res.data:
-                msg += f"- {row['name']}\n"
-            msg += "```\n*Standings with points available in portal.*"
+            # 2) Get completed matches in this group (exclude playoffs)
+            res_matches = supabase.table("matches")\
+                .select("id, team1_id, team2_id, group_name, status, match_type, format")\
+                .eq("status", "completed")\
+                .ilike("group_name", group)\
+                .execute()
+            matches = res_matches.data or []
+            if not matches:
+                # Show teams list if no matches yet
+                msg = f"🏆 **Group {group.upper()} Teams**\n```\n"
+                for row in teams:
+                    msg += f"- {row['name']}\n"
+                msg += "```\n_No completed matches yet_"
+                await interaction.followup.send(msg)
+                return
+            mdf = pd.DataFrame(matches)
+            mdf = mdf[(mdf['match_type'].fillna('').str.lower() != 'playoff')]
+
+            # 3) Join map rounds for these matches
+            res_maps = supabase.table("match_maps").select("match_id, map_index, team1_rounds, team2_rounds, winner_id").in_("match_id", mdf['id'].tolist()).execute()
+            maps = res_maps.data or []
+            maps_df = pd.DataFrame(maps)
+            if not maps_df.empty:
+                agg = maps_df.groupby('match_id').agg({'team1_rounds':'sum','team2_rounds':'sum'}).reset_index()
+                agg.columns = ['id','agg_t1_rounds','agg_t2_rounds']
+                mdf = mdf.merge(agg, on='id', how='left')
+
+                # Map win counts
+                cnt = maps_df.groupby(['match_id','winner_id']).size().reset_index(name='win_count')
+                m_t1 = mdf.merge(cnt, left_on=['id','team1_id'], right_on=['match_id','winner_id'], how='left')
+                mdf['wins_t1'] = m_t1['win_count'].fillna(0).astype(int)
+                m_t2 = mdf.merge(cnt, left_on=['id','team2_id'], right_on=['match_id','winner_id'], how='left')
+                mdf['wins_t2'] = m_t2['win_count'].fillna(0).astype(int)
+
+            # 4) Derive match scores
+            for col in ['agg_t1_rounds','agg_t2_rounds','wins_t1','wins_t2']:
+                if col in mdf.columns:
+                    mdf[col] = pd.to_numeric(mdf[col], errors='coerce').fillna(0)
+            mdf['score_t1'] = mdf['agg_t1_rounds'] if 'agg_t1_rounds' in mdf.columns else 0
+            mdf['score_t2'] = mdf['agg_t2_rounds'] if 'agg_t2_rounds' in mdf.columns else 0
+            # fallback to map wins if rounds missing
+            if 'wins_t1' in mdf.columns:
+                mdf['score_t1'] = mdf.apply(lambda r: (r['wins_t1'] if r['score_t1'] == 0 else r['score_t1']), axis=1)
+            if 'wins_t2' in mdf.columns:
+                mdf['score_t2'] = mdf.apply(lambda r: (r['wins_t2'] if r['score_t2'] == 0 else r['score_t2']), axis=1)
+
+            # 5) Points model (same as portal): win => 15, else min(rounds,12)
+            mdf['p1'] = mdf.apply(lambda r: (15 if r['score_t1'] > r['score_t2'] else min(int(r['score_t1']), 12)), axis=1)
+            mdf['p2'] = mdf.apply(lambda r: (15 if r['score_t2'] > r['score_t1'] else min(int(r['score_t2']), 12)), axis=1)
+            mdf['t1_win'] = (mdf['score_t1'] > mdf['score_t2']).astype(int)
+            mdf['t2_win'] = (mdf['score_t2'] > mdf['score_t1']).astype(int)
+
+            # 6) Aggregate to team standings
+            t1_stats = mdf.groupby('team1_id').agg({'t1_win':'sum','t2_win':'sum','p1':'sum','p2':'sum','id':'count'}).rename(columns={'t1_win':'Wins','t2_win':'Losses','p1':'Points','p2':'Points Against','id':'Played'})
+            t2_stats = mdf.groupby('team2_id').agg({'t2_win':'sum','t1_win':'sum','p2':'sum','p1':'sum','id':'count'}).rename(columns={'t2_win':'Wins','t1_win':'Losses','p2':'Points','p1':'Points Against','id':'Played'})
+            combined = pd.concat([t1_stats, t2_stats]).groupby(level=0).sum()
+            combined['PD'] = combined['Points'] - combined['Points Against']
+            combined = combined.reset_index().rename(columns={'index':'team_id'})
+            final = team_df.merge(combined, left_on='id', right_on='team_id', how='left').fillna(0)
+            final[['Wins','Losses','Points','Points Against','Played','PD']] = final[['Wins','Losses','Points','Points Against','Played','PD']].astype(int)
+            final = final.sort_values(['Points','PD'], ascending=[False, False])
+
+            # 7) Format message
+            msg = f"🏆 **Group {group.upper()} Standings**\n"
+            msg += "```\nRank  Team                         P  W  L  Pts  PD\n"
+            for i, row in enumerate(final.itertuples(), start=1):
+                name = row.name
+                msg += f"{i:>2}    {name[:26]:<26}  {row.Played:>2} {row.Wins:>2} {row.Losses:>2} {row.Points:>3} {row.PD:>3}\n"
+            msg += "```"
             await interaction.followup.send(msg)
             return
         except Exception as e:
-            print(f"Supabase SDK Error: {e}")
+            await interaction.followup.send(f"❌ Error: {str(e)}")
+            return
 
     conn = get_db_conn()
     if not conn:
@@ -349,15 +419,63 @@ async def standings(interaction: discord.Interaction, group: str):
     
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT name FROM teams WHERE UPPER(group_name) = UPPER(%s)", (group,))
-        teams = cursor.fetchall()
-        if not teams:
+        # Get team ids and names in group
+        cursor.execute("SELECT id, name FROM teams WHERE UPPER(group_name) = UPPER(%s)", (group,))
+        trows = cursor.fetchall()
+        if not trows:
             await interaction.followup.send(f"❌ No teams in group `{group}`.")
             return
+        ids = [r[0] for r in trows]
+        team_map = {r[0]: r[1] for r in trows}
 
-        msg = f"🏆 **Group {group.upper()} Teams** (Fallback)\n```\n"
-        for row in teams:
-            msg += f"- {row[0]}\n"
+        # Completed matches in this group
+        cursor.execute("SELECT id, team1_id, team2_id FROM matches WHERE status='completed' AND UPPER(group_name) = UPPER(%s)", (group,))
+        mrows = cursor.fetchall()
+        if not mrows:
+            msg = f"🏆 **Group {group.upper()} Teams** (Fallback)\n" + "\n".join([f"- {team_map[i]}" for i in ids])
+            await interaction.followup.send(msg)
+            return
+
+        # Map rounds for these matches
+        mids = tuple([r[0] for r in mrows])
+        cursor.execute("SELECT match_id, map_index, team1_rounds, team2_rounds, winner_id FROM match_maps WHERE match_id IN (%s)" % ",".join(["%s"]*len(mids)), mids)
+        maps = cursor.fetchall()
+        import pandas as pd
+        mdf = pd.DataFrame(mrows, columns=['id','team1_id','team2_id'])
+        if maps:
+            mdf2 = pd.DataFrame(maps, columns=['match_id','map_index','team1_rounds','team2_rounds','winner_id'])
+            agg = mdf2.groupby('match_id')[['team1_rounds','team2_rounds']].sum().reset_index().rename(columns={'match_id':'id','team1_rounds':'agg_t1_rounds','team2_rounds':'agg_t2_rounds'})
+            mdf = mdf.merge(agg, on='id', how='left')
+        mdf = mdf.fillna(0)
+
+        # scores and points
+        mdf['score_t1'] = mdf['agg_t1_rounds']
+        mdf['score_t2'] = mdf['agg_t2_rounds']
+        mdf['p1'] = mdf.apply(lambda r: (15 if r['score_t1'] > r['score_t2'] else min(int(r['score_t1']), 12)), axis=1)
+        mdf['p2'] = mdf.apply(lambda r: (15 if r['score_t2'] > r['score_t1'] else min(int(r['score_t2']), 12)), axis=1)
+        mdf['t1_win'] = (mdf['score_t1'] > mdf['score_t2']).astype(int)
+        mdf['t2_win'] = (mdf['score_t2'] > mdf['score_t1']).astype(int)
+
+        import numpy as np
+        t1_stats = mdf.groupby('team1_id').agg({'t1_win':'sum','t2_win':'sum','p1':'sum','p2':'sum','id':'count'}).rename(columns={'t1_win':'Wins','t2_win':'Losses','p1':'Points','p2':'Points Against','id':'Played'})
+        t2_stats = mdf.groupby('team2_id').agg({'t2_win':'sum','t1_win':'sum','p2':'sum','p1':'sum','id':'count'}).rename(columns={'t2_win':'Wins','t1_win':'Losses','p2':'Points','p1':'Points Against','id':'Played'})
+        combined = pd.concat([t1_stats, t2_stats]).groupby(level=0).sum()
+        combined['PD'] = combined['Points'] - combined['Points Against']
+        combined = combined.reset_index().rename(columns={'index':'team_id'})
+        final_rows = []
+        for tid, name in team_map.items():
+            row = combined[combined['team_id'] == tid]
+            if row.empty:
+                final_rows.append({'name': name, 'Played': 0, 'Wins': 0, 'Losses': 0, 'Points': 0, 'PD': 0})
+            else:
+                r = row.iloc[0]
+                final_rows.append({'name': name, 'Played': int(r['Played']), 'Wins': int(r['Wins']), 'Losses': int(r['Losses']), 'Points': int(r['Points']), 'PD': int(r['PD'])})
+        final = pd.DataFrame(final_rows).sort_values(['Points','PD'], ascending=[False, False])
+
+        msg = f"🏆 **Group {group.upper()} Standings** (Fallback)\n"
+        msg += "```\nRank  Team                         P  W  L  Pts  PD\n"
+        for i, row in enumerate(final.itertuples(), start=1):
+            msg += f"{i:>2}    {row.name[:26]:<26}  {row.Played:>2} {row.Wins:>2} {row.Losses:>2} {row.Points:>3} {row.PD:>3}\n"
         msg += "```"
         await interaction.followup.send(msg)
     except Exception as e:
