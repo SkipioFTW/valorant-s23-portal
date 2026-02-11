@@ -188,8 +188,8 @@ class UnifiedDBWrapper:
         self.conn.close()
 
 def get_conn():
-    # Priority: SUPABASE_DB_URL if available for direct Postgres access
-    db_url = get_secret("SUPABASE_DB_URL")
+    # Priority: direct Postgres connection string
+    db_url = get_secret("SUPABASE_DB_URL") or get_secret("DB_CONNECTION_STRING") or get_secret("DATABASE_URL")
     
     import psycopg2
     conn = None
@@ -597,6 +597,50 @@ def ensure_column(table, column_name, column_def_sql, conn=None):
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column_def_sql}")
         except Exception:
             pass
+    # Try direct SQL if available to populate missing pieces (PostgreSQL)
+    try:
+        conn = get_conn()
+        is_postgres = not getattr(conn, 'is_sqlite', isinstance(conn, sqlite3.Connection))
+        if is_postgres:
+            if info.empty:
+                info = pd.read_sql_query(
+                    "SELECT p.id, p.name, p.riot_id, p.rank, t.tag AS team FROM players p LEFT JOIN teams t ON p.default_team_id=t.id WHERE p.id=%s",
+                    conn,
+                    params=(int(player_id),),
+                )
+            if stats.empty and not info.empty:
+                stats = pd.read_sql_query(
+                    """
+                    SELECT msm.match_id, msm.map_index, msm.agent, msm.acs, msm.kills, msm.deaths, msm.assists, msm.is_sub,
+                           m.week, mm.map_name
+                    FROM match_stats_map msm
+                    JOIN matches m ON msm.match_id = m.id
+                    LEFT JOIN match_maps mm ON msm.match_id = mm.match_id AND msm.map_index = mm.map_index
+                    WHERE msm.player_id=%s AND m.status='completed'
+                    """,
+                    conn,
+                    params=(int(player_id),),
+                )
+            if bench is None and not info.empty:
+                rank_val = info.iloc[0]['rank']
+                bench = pd.read_sql_query(
+                    """
+                    SELECT 
+                        AVG(msm.acs) as lg_acs, AVG(msm.kills) as lg_k, AVG(msm.deaths) as lg_d, AVG(msm.assists) as lg_a,
+                        AVG(CASE WHEN p.rank = %s THEN msm.acs ELSE NULL END) as r_acs,
+                        AVG(CASE WHEN p.rank = %s THEN msm.kills ELSE NULL END) as r_k,
+                        AVG(CASE WHEN p.rank = %s THEN msm.deaths ELSE NULL END) as r_d,
+                        AVG(CASE WHEN p.rank = %s THEN msm.assists ELSE NULL END) as r_a
+                    FROM match_stats_map msm
+                    JOIN matches m ON msm.match_id = m.id
+                    JOIN players p ON msm.player_id = p.id
+                    WHERE m.status = 'completed'
+                    """,
+                    conn,
+                    params=(rank_val, rank_val, rank_val, rank_val),
+                ).iloc[0]
+    except Exception:
+        pass
     
     if should_close:
         conn.commit()
