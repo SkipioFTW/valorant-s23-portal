@@ -165,7 +165,7 @@ class UnifiedDBWrapper:
         self.conn.close()
 
 def get_db_conn():
-    db_url_env = os.getenv("DB_CONNECTION_STRING") or SUPABASE_DB_URL or os.getenv("SUPABASE_URL")
+    db_url_env = os.getenv("DB_CONNECTION_STRING") or DB_CONNECTION_STRING or SUPABASE_DB_URL or os.getenv("SUPABASE_URL")
     if db_url_env and "postgresql" in str(db_url_env):
         import psycopg2
         try:
