@@ -4616,6 +4616,7 @@ elif page == "Admin Panel":
             def_name = ""
             def_rid = ""
             def_rk = rvals[0]
+            def_dh = ""
             if 'pending_player_request' in st.session_state:
                 preq = st.session_state['pending_player_request']
                 def_rid = preq.get('riot_id', "")
