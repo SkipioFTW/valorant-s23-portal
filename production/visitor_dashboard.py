@@ -747,14 +747,17 @@ if 'last_login_attempt' not in st.session_state:
 if 'page' not in st.session_state:
     st.session_state['page'] = "Overview & Standings"
 
-# Initialize session activity table
-init_session_activity_table()
-# Ensure database schema is up to date
-ensure_base_schema()
-ensure_upgrade_schema()
-init_admin_table()
-init_match_stats_map_table()
-# Track current user activity
+def bootstrap_schema_once():
+    if st.session_state.get('schema_initialized'):
+        return
+    init_session_activity_table()
+    ensure_base_schema()
+    ensure_upgrade_schema()
+    init_admin_table()
+    init_match_stats_map_table()
+    st.session_state['schema_initialized'] = True
+
+bootstrap_schema_once()
 track_user_activity()
 
 # Hide standard sidebar navigation and other streamlit elements
