@@ -353,6 +353,7 @@ async def standings(interaction: discord.Interaction, group: str):
                 await interaction.followup.send(msg)
                 return
             mdf = pd.DataFrame(matches)
+            mdf['status'] = mdf['status'].astype(str).str.lower()
             mdf = mdf[(mdf['match_type'].fillna('').str.lower() != 'playoff')]
             # Keep only matches where both teams are within the group's team ids
             team_ids = set(ids)
@@ -392,6 +393,16 @@ async def standings(interaction: discord.Interaction, group: str):
                 mdf['score_t1'] = mdf.apply(lambda r: (r['wins_t1'] if r['score_t1'] == 0 else r['score_t1']), axis=1)
             if 'wins_t2' in mdf.columns:
                 mdf['score_t2'] = mdf.apply(lambda r: (r['wins_t2'] if r['score_t2'] == 0 else r['score_t2']), axis=1)
+
+            # Only count matches that are effectively played: completed OR have rounds/scores
+            played_mask = (
+                mdf['status'] == 'completed'
+            ) | (
+                ((mdf['agg_t1_rounds'] + mdf['agg_t2_rounds']) > 0) if ('agg_t1_rounds' in mdf.columns and 'agg_t2_rounds' in mdf.columns) else False
+            ) | (
+                ((mdf['score_t1'] + mdf['score_t2']) > 0)
+            )
+            mdf = mdf[played_mask]
 
             # 5) Points model (same as portal): win => 15, else min(rounds,12)
             mdf['p1'] = mdf.apply(lambda r: (15 if r['score_t1'] > r['score_t2'] else min(int(r['score_t1']), 12)), axis=1)

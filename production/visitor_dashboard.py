@@ -1810,7 +1810,25 @@ def _get_standings_cached():
         return teams_df
 
     # Calculate match-level stats
+    # Only count matches that are effectively played: completed OR have rounds/scores/forfeit/maps_played
     m = matches_df.copy()
+    if 'status' in m.columns:
+        m['status'] = m['status'].astype(str).str.lower()
+    played_mask = (
+        (m['status'] == 'completed') if 'status' in m.columns else False
+    ) | (
+        (m[['agg_t1_rounds','agg_t2_rounds']].sum(axis=1) > 0) if ('agg_t1_rounds' in m.columns and 'agg_t2_rounds' in m.columns) else False
+    ) | (
+        (m[['score_t1','score_t2']].sum(axis=1) > 0) if ('score_t1' in m.columns and 'score_t2' in m.columns) else False
+    ) | (
+        (m['maps_played'] > 0) if 'maps_played' in m.columns else False
+    ) | (
+        (m['is_forfeit'] == 1) if 'is_forfeit' in m.columns else False
+    )
+    try:
+        m = m[played_mask]
+    except Exception:
+        pass
     
     # Ensure scores/rounds are numeric to prevent alignment/broadcasting errors
     cols_to_fix = ['score_t1', 'score_t2', 'agg_t1_rounds', 'agg_t2_rounds']
