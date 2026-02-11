@@ -1544,34 +1544,18 @@ def get_player_profile(player_id):
                                     ranks_df['id'] = pd.to_numeric(ranks_df['id'], errors='coerce')
                             if not ranks_df.empty:
                                 bdf = bdf.merge(ranks_df.rename(columns={'id':'player_id'}), on='player_id', how='left')
-                            # Compute league averages per match (include all rows)
-                            pm = bdf.groupby('match_id').agg(
-                                acs=('acs','mean'),
-                                kills=('kills','sum'),
-                                deaths=('deaths','sum'),
-                                assists=('assists','sum')
-                            ).reset_index()
-                            lg_acs = float(pm['acs'].mean()) if 'acs' in pm.columns else 0.0
-                            lg_k = float(pm['kills'].mean()) if 'kills' in pm.columns else 0.0
-                            lg_d = float(pm['deaths'].mean()) if 'deaths' in pm.columns else 0.0
-                            lg_a = float(pm['assists'].mean()) if 'assists' in pm.columns else 0.0
-                            # Rank averages per match
+                            # Compute league averages across all rows (staging parity)
+                            lg_acs = float(bdf['acs'].mean()) if 'acs' in bdf.columns else 0.0
+                            lg_k = float(bdf['kills'].mean()) if 'kills' in bdf.columns else 0.0
+                            lg_d = float(bdf['deaths'].mean()) if 'deaths' in bdf.columns else 0.0
+                            lg_a = float(bdf['assists'].mean()) if 'assists' in bdf.columns else 0.0
+                            # Rank averages across rows with same rank
                             rbdf = bdf[bdf['rank'] == rank_val] if 'rank' in bdf.columns else pd.DataFrame()
                             if not rbdf.empty:
-                                for col in ['acs','kills','deaths','assists']:
-                                    if col in rbdf.columns:
-                                        rbdf[col] = pd.to_numeric(rbdf[col], errors='coerce')
-                            if not rbdf.empty:
-                                rpm = rbdf.groupby('match_id').agg(
-                                    acs=('acs','mean'),
-                                    kills=('kills','sum'),
-                                    deaths=('deaths','sum'),
-                                    assists=('assists','sum')
-                                ).reset_index()
-                                r_acs = float(rpm['acs'].mean()) if 'acs' in rpm.columns else 0.0
-                                r_k = float(rpm['kills'].mean()) if 'kills' in rpm.columns else 0.0
-                                r_d = float(rpm['deaths'].mean()) if 'deaths' in rpm.columns else 0.0
-                                r_a = float(rpm['assists'].mean()) if 'assists' in rpm.columns else 0.0
+                                r_acs = float(rbdf['acs'].mean()) if 'acs' in rbdf.columns else 0.0
+                                r_k = float(rbdf['kills'].mean()) if 'kills' in rbdf.columns else 0.0
+                                r_d = float(rbdf['deaths'].mean()) if 'deaths' in rbdf.columns else 0.0
+                                r_a = float(rbdf['assists'].mean()) if 'assists' in rbdf.columns else 0.0
                             else:
                                 # Fallback: use league averages if no rank-specific data yet
                                 r_acs, r_k, r_d, r_a = lg_acs, lg_k, lg_d, lg_a
