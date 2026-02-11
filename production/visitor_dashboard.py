@@ -1814,6 +1814,11 @@ def _get_standings_cached():
     m = matches_df.copy()
     if 'status' in m.columns:
         m['status'] = m['status'].astype(str).str.lower()
+    # Coerce types used in comparisons
+    if 'maps_played' in m.columns:
+        m['maps_played'] = pd.to_numeric(m['maps_played'], errors='coerce').fillna(0)
+    if 'is_forfeit' in m.columns:
+        m['is_forfeit'] = pd.to_numeric(m['is_forfeit'], errors='coerce').fillna(0)
     played_mask = (
         (m['status'] == 'completed') if 'status' in m.columns else False
     ) | (
