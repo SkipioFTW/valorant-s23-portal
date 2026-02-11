@@ -1408,47 +1408,55 @@ def backup_db_to_github():
 def get_substitutions_log():
     import pandas as pd
     df = pd.DataFrame()
-    
-    # Try Supabase SDK First
-    if supabase:
-        try:
-            # Complex join via SDK
-            res = supabase.table("match_stats_map")\
-                .select("*, matches(*), teams(name), p:players!player_id(name, riot_id), sp:players!subbed_for_id(name, riot_id)")\
-                .eq("is_sub", 1)\
-                .execute()
-                
-            if res.data:
-                l = []
-                for r in res.data:
-                    if str(r.get("matches", {}).get("status", "")).lower() == "completed":
-                        item = {
-                            "match_id": r.get("match_id"),
-                            "map_index": r.get("map_index"),
-                            "week": r.get("matches", {}).get("week"),
-                            "group_name": r.get("matches", {}).get("group_name"),
-                            "team": r.get("teams", {}).get("name"),
-                            "player": r.get("p", {}).get("name"),
-                            "player_riot": r.get("p", {}).get("riot_id"),
-                            "subbed_for": r.get("sp", {}).get("name"),
-                            "sub_riot": r.get("sp", {}).get("riot_id"),
-                            "agent": r.get("agent"),
-                            "acs": r.get("acs"),
-                            "kills": r.get("kills"),
-                            "deaths": r.get("deaths"),
-                            "assists": r.get("assists")
-                        }
-                        l.append(item)
-                df = pd.DataFrame(l)
-                if not df.empty:
-                    df['player'] = df.apply(lambda r: f"{r['player']} ({r['player_riot']})" if r['player_riot'] and str(r['player_riot']).strip() else r['player'], axis=1)
-                    df['subbed_for'] = df.apply(lambda r: f"{r['subbed_for']} ({r['sub_riot']})" if r['sub_riot'] and str(r['sub_riot']).strip() else r['subbed_for'], axis=1)
-                    df = df.drop(columns=['player_riot', 'sub_riot'])
-        except Exception:
-            pass
+    if not supabase:
+        return df
+    try:
+        base_res = supabase.table("match_stats_map")\
+            .select("match_id, map_index, team_id, player_id, is_sub, subbed_for_id, agent, acs, kills, deaths, assists")\
+            .eq("is_sub", 1)\
+            .execute()
+        if not base_res.data:
+            return df
+        base = pd.DataFrame(base_res.data)
+        if base.empty:
+            return df
+        m_ids = sorted(list(set(base['match_id'].tolist())))
+        t_ids = sorted(list(set(base['team_id'].dropna().astype(int).tolist()))) if 'team_id' in base else []
+        p_ids = sorted(list(set(pd.concat([base['player_id'].dropna(), base['subbed_for_id'].dropna()], ignore_index=True).astype(int).tolist()))) if 'player_id' in base else []
 
-    # Supabase-only: return df (may be empty) without SQLite fallback
-    return df
+        m_res = supabase.table("matches").select("id, week, group_name, status").in_("id", m_ids).execute()
+        mdf = pd.DataFrame(m_res.data) if m_res.data else pd.DataFrame(columns=['id','week','group_name','status'])
+        if mdf.empty:
+            return df
+        mdf['status'] = mdf['status'].astype(str).str.lower()
+        mdf = mdf[mdf['status'] == 'completed']
+        if mdf.empty:
+            return pd.DataFrame()
+
+        tdf = pd.DataFrame()
+        if t_ids:
+            t_res = supabase.table("teams").select("id, name").in_("id", t_ids).execute()
+            tdf = pd.DataFrame(t_res.data) if t_res.data else pd.DataFrame(columns=['id','name'])
+
+        pdf = pd.DataFrame()
+        if p_ids:
+            p_res = supabase.table("players").select("id, name, riot_id").in_("id", p_ids).execute()
+            pdf = pd.DataFrame(p_res.data) if p_res.data else pd.DataFrame(columns=['id','name','riot_id'])
+
+        out = base.merge(mdf.rename(columns={'id':'match_id'}), on='match_id', how='inner')
+        if not tdf.empty:
+            out = out.merge(tdf.rename(columns={'id':'team_id','name':'team'}), on='team_id', how='left')
+        if not pdf.empty:
+            out = out.merge(pdf.rename(columns={'id':'player_id','name':'player','riot_id':'player_riot'}), on='player_id', how='left')
+            out = out.merge(pdf.rename(columns={'id':'subbed_for_id','name':'subbed_for','riot_id':'sub_riot'}), on='subbed_for_id', how='left')
+
+        out['player'] = out.apply(lambda r: f"{r['player']} ({r['player_riot']})" if r.get('player_riot') and str(r.get('player_riot')).strip() else r.get('player'), axis=1)
+        out['subbed_for'] = out.apply(lambda r: f"{r['subbed_for']} ({r['sub_riot']})" if r.get('sub_riot') and str(r.get('sub_riot')).strip() else r.get('subbed_for'), axis=1)
+        out = out.drop(columns=['player_riot','sub_riot'], errors='ignore')
+        out = out[['match_id','map_index','week','group_name','team','player','subbed_for','agent','acs','kills','deaths','assists']]
+        return out
+    except Exception:
+        return df
 
 @st.cache_data(ttl=300)
 def get_player_profile(player_id):
@@ -2584,6 +2592,9 @@ page = st.session_state['page']
 if page == "Overview & Standings":
     import pandas as pd
     st.markdown('<h1 class="main-header">OVERVIEW & STANDINGS</h1>', unsafe_allow_html=True)
+    if st.button("🔄 Refresh Data", key="refresh_overview", use_container_width=False):
+        st.cache_data.clear()
+        st.rerun()
     
     df = get_standings()
     if not df.empty:
