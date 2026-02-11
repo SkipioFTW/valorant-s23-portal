@@ -1523,7 +1523,7 @@ def get_player_profile(player_id):
                     res_m = supabase.table("matches").select("id").eq("status", "completed").execute()
                     c_ids = [m['id'] for m in res_m.data] if res_m.data else []
                     if c_ids:
-                    res_bench = supabase.table("match_stats_map")\
+                        res_bench = supabase.table("match_stats_map")\
                             .select("acs,kills,deaths,assists, players:players!player_id(rank)")\
                             .in_("match_id", c_ids)\
                             .execute()
