@@ -1523,20 +1523,36 @@ def get_player_profile(player_id):
                     res_m = supabase.table("matches").select("id").eq("status", "completed").execute()
                     c_ids = [m['id'] for m in res_m.data] if res_m.data else []
                     if c_ids:
+                        # Fetch stats and then ranks via separate query to avoid join edge cases
                         res_bench = supabase.table("match_stats_map")\
-                            .select("acs,kills,deaths,assists, players:players!player_id(rank)")\
+                            .select("acs,kills,deaths,assists,player_id")\
                             .in_("match_id", c_ids)\
                             .execute()
                         if res_bench.data:
                             bdf = pd.DataFrame(res_bench.data)
-                            bdf['rank'] = bdf['players'].apply(lambda x: x.get('rank') if isinstance(x, dict) else None)
+                            bdf['player_id'] = pd.to_numeric(bdf.get('player_id'), errors='coerce')
+                            # Get ranks for involved players
+                            pids = bdf['player_id'].dropna().unique().tolist()
+                            ranks_df = pd.DataFrame()
+                            if pids:
+                                res_pr = supabase.table("players").select("id,rank").in_("id", pids).execute()
+                                if res_pr.data:
+                                    ranks_df = pd.DataFrame(res_pr.data)
+                                    ranks_df['id'] = pd.to_numeric(ranks_df['id'], errors='coerce')
+                            if not ranks_df.empty:
+                                bdf = bdf.merge(ranks_df.rename(columns={'id':'player_id'}), on='player_id', how='left')
+                            # Compute league averages (all) and rank-specific averages
+                            lg_acs = float(bdf['acs'].mean()) if 'acs' in bdf.columns else 0.0
+                            lg_k = float(bdf['kills'].mean()) if 'kills' in bdf.columns else 0.0
+                            lg_d = float(bdf['deaths'].mean()) if 'deaths' in bdf.columns else 0.0
+                            lg_a = float(bdf['assists'].mean()) if 'assists' in bdf.columns else 0.0
+                            rbdf = bdf[bdf['rank'] == rank_val] if 'rank' in bdf.columns else pd.DataFrame()
                             bench = pd.Series({
-                                'lg_acs': bdf['acs'].mean(), 'lg_k': bdf['kills'].mean(), 
-                                'lg_d': bdf['deaths'].mean(), 'lg_a': bdf['assists'].mean(),
-                                'r_acs': bdf[bdf['rank'] == rank_val]['acs'].mean(),
-                                'r_k': bdf[bdf['rank'] == rank_val]['kills'].mean(),
-                                'r_d': bdf[bdf['rank'] == rank_val]['deaths'].mean(),
-                                'r_a': bdf[bdf['rank'] == rank_val]['assists'].mean()
+                                'lg_acs': lg_acs, 'lg_k': lg_k, 'lg_d': lg_d, 'lg_a': lg_a,
+                                'r_acs': float(rbdf['acs'].mean()) if not rbdf.empty else 0.0,
+                                'r_k': float(rbdf['kills'].mean()) if not rbdf.empty else 0.0,
+                                'r_d': float(rbdf['deaths'].mean()) if not rbdf.empty else 0.0,
+                                'r_a': float(rbdf['assists'].mean()) if not rbdf.empty else 0.0
                             })
                         else:
                             # If no join, compute league-only averages as a fallback
@@ -5111,9 +5127,9 @@ elif page == "Player Profile":
             fig_cmp = make_subplots(specs=[[{"secondary_y": True}]])
             
             # ACS (Primary Y-Axis)
-            fig_cmp.add_trace(go.Bar(name='Player ACS', x=['ACS'], y=[pp_avg_acs], marker_color='#3FD1FF', showlegend=True), secondary_y=False)
-            fig_cmp.add_trace(go.Bar(name='Rank Avg ACS', x=['ACS'], y=[pp_sr_avg_acs], marker_color='#FF4655', opacity=0.7, showlegend=True), secondary_y=False)
-            fig_cmp.add_trace(go.Bar(name='League Avg ACS', x=['ACS'], y=[pp_lg_avg_acs], marker_color='#ECE8E1', opacity=0.7, showlegend=True), secondary_y=False)
+            fig_cmp.add_trace(go.Bar(name='Player', x=['ACS'], y=[pp_avg_acs], marker_color='#3FD1FF', showlegend=True, legendgroup='bench'), secondary_y=False)
+            fig_cmp.add_trace(go.Bar(name='Rank Avg', x=['ACS'], y=[pp_sr_avg_acs], marker_color='#FF4655', opacity=0.8, showlegend=True, legendgroup='bench'), secondary_y=False)
+            fig_cmp.add_trace(go.Bar(name='League Avg', x=['ACS'], y=[pp_lg_avg_acs], marker_color='#ECE8E1', opacity=0.8, showlegend=True, legendgroup='bench'), secondary_y=False)
             
             # Per-Match Stats (Secondary Y-Axis)
             other_metrics = ['Kills/Match', 'Deaths/Match', 'Assists/Match']
@@ -5121,9 +5137,10 @@ elif page == "Player Profile":
             rank_others = [pp_sr_k, pp_sr_d, pp_sr_a]
             league_others = [pp_lg_k, pp_lg_d, pp_lg_a]
             
-            fig_cmp.add_trace(go.Bar(name='Player Stats', x=other_metrics, y=player_others, marker_color='#3FD1FF', showlegend=True), secondary_y=True)
-            fig_cmp.add_trace(go.Bar(name='Rank Avg Stats', x=other_metrics, y=rank_others, marker_color='#FF4655', opacity=0.7, showlegend=True), secondary_y=True)
-            fig_cmp.add_trace(go.Bar(name='League Avg Stats', x=other_metrics, y=league_others, marker_color='#ECE8E1', opacity=0.7, showlegend=True), secondary_y=True)
+            # Do not duplicate legend entries; keep only three keys
+            fig_cmp.add_trace(go.Bar(name='Player', x=other_metrics, y=player_others, marker_color='#3FD1FF', showlegend=False, legendgroup='bench'), secondary_y=True)
+            fig_cmp.add_trace(go.Bar(name='Rank Avg', x=other_metrics, y=rank_others, marker_color='#FF4655', opacity=0.8, showlegend=False, legendgroup='bench'), secondary_y=True)
+            fig_cmp.add_trace(go.Bar(name='League Avg', x=other_metrics, y=league_others, marker_color='#ECE8E1', opacity=0.8, showlegend=False, legendgroup='bench'), secondary_y=True)
             
             fig_cmp.update_layout(
                 barmode='group', 
@@ -5133,6 +5150,13 @@ elif page == "Player Profile":
             )
             fig_cmp.update_yaxes(title_text="Average Combat Score (ACS)", secondary_y=False)
             fig_cmp.update_yaxes(title_text="K/D/A Per Match", secondary_y=True)
+            try:
+                max_acs = max(pp_avg_acs, pp_sr_avg_acs, pp_lg_avg_acs)
+                fig_cmp.update_yaxes(range=[0, max_acs * 1.2], secondary_y=False)
+                max_stats = max(player_others + rank_others + league_others)
+                fig_cmp.update_yaxes(range=[0, max_stats * 1.2], secondary_y=True)
+            except Exception:
+                pass
             
             st.plotly_chart(apply_plotly_theme(fig_cmp), use_container_width=True)
 
