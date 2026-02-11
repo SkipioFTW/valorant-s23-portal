@@ -1530,7 +1530,10 @@ def get_player_profile(player_id):
                             .execute()
                         if res_bench.data:
                             bdf = pd.DataFrame(res_bench.data)
-                            bdf['player_id'] = pd.to_numeric(bdf.get('player_id'), errors='coerce')
+                            # Ensure numeric for aggregation
+                            for col in ['acs','kills','deaths','assists','player_id']:
+                                if col in bdf.columns:
+                                    bdf[col] = pd.to_numeric(bdf[col], errors='coerce')
                             # Get ranks for involved players
                             pids = bdf['player_id'].dropna().unique().tolist()
                             ranks_df = pd.DataFrame()
@@ -1554,6 +1557,10 @@ def get_player_profile(player_id):
                             lg_a = float(pm['assists'].mean()) if 'assists' in pm.columns else 0.0
                             # Rank averages per match
                             rbdf = bdf[bdf['rank'] == rank_val] if 'rank' in bdf.columns else pd.DataFrame()
+                            if not rbdf.empty:
+                                for col in ['acs','kills','deaths','assists']:
+                                    if col in rbdf.columns:
+                                        rbdf[col] = pd.to_numeric(rbdf[col], errors='coerce')
                             if not rbdf.empty:
                                 rpm = rbdf.groupby('match_id').agg(
                                     acs=('acs','mean'),
