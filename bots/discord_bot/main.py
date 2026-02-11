@@ -16,6 +16,7 @@ import sqlite3
 from io import BytesIO
 from dotenv import load_dotenv
 from supabase import create_client, Client
+import pandas as pd
 
 # Load environment variables from .env file
 load_dotenv()
