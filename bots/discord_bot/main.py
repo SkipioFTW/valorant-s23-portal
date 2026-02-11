@@ -173,11 +173,11 @@ def fetch_standings_df(group):
                 CASE WHEN COALESCE(mm.team1_rounds, m.score_t1) < COALESCE(mm.team2_rounds, m.score_t2) THEN 1 ELSE 0 END as loss,
                 CASE 
                     WHEN COALESCE(mm.team1_rounds, m.score_t1) > COALESCE(mm.team2_rounds, m.score_t2) THEN 15 
-                    ELSE MIN(COALESCE(mm.team1_rounds, m.score_t1), 12) 
+                    ELSE LEAST(COALESCE(mm.team1_rounds, m.score_t1), 12) 
                 END as points,
                 CASE 
                     WHEN COALESCE(mm.team2_rounds, m.score_t2) > COALESCE(mm.team1_rounds, m.score_t1) THEN 15 
-                    ELSE MIN(COALESCE(mm.team2_rounds, m.score_t2), 12) 
+                    ELSE LEAST(COALESCE(mm.team2_rounds, m.score_t2), 12) 
                 END as points_against
             FROM matches m
             LEFT JOIN match_maps mm ON m.id = mm.match_id AND mm.map_index = 0
@@ -191,11 +191,11 @@ def fetch_standings_df(group):
                 CASE WHEN COALESCE(mm.team2_rounds, m.score_t2) < COALESCE(mm.team1_rounds, m.score_t1) THEN 1 ELSE 0 END as loss,
                 CASE 
                     WHEN COALESCE(mm.team2_rounds, m.score_t2) > COALESCE(mm.team1_rounds, m.score_t1) THEN 15 
-                    ELSE MIN(COALESCE(mm.team2_rounds, m.score_t2), 12) 
+                    ELSE LEAST(COALESCE(mm.team2_rounds, m.score_t2), 12) 
                 END as points,
                 CASE 
                     WHEN COALESCE(mm.team1_rounds, m.score_t1) > COALESCE(mm.team2_rounds, m.score_t2) THEN 15 
-                    ELSE MIN(COALESCE(mm.team1_rounds, m.score_t1), 12) 
+                    ELSE LEAST(COALESCE(mm.team1_rounds, m.score_t1), 12) 
                 END as points_against
             FROM matches m
             LEFT JOIN match_maps mm ON m.id = mm.match_id AND mm.map_index = 0
@@ -217,7 +217,9 @@ def fetch_standings_df(group):
         # Use pandas with direct psycopg2 connection object (conn.conn)
         return pd.read_sql_query(query, conn.conn, params=(group,))
     except Exception as e:
-        print(f"Standings error: {e}")
+        print(f"Standings error details: {e}")
+        import traceback
+        traceback.print_exc()
         return None
     finally:
         conn.close()

@@ -50,7 +50,8 @@ def init_pending_tables(conn=None):
             group_name TEXT,
             url TEXT,
             submitted_by TEXT,
-            timestamp {timestamp_def}
+            timestamp {timestamp_def},
+            status TEXT DEFAULT 'new'
         )
     """)
     
@@ -59,8 +60,11 @@ def init_pending_tables(conn=None):
             id {pk_def},
             riot_id TEXT,
             rank TEXT,
+            tracker_link TEXT,
             submitted_by TEXT,
-            timestamp {timestamp_def}
+            timestamp {timestamp_def},
+            status TEXT DEFAULT 'new',
+            discord_handle TEXT
         )
     """)
     
