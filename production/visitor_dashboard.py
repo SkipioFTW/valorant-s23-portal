@@ -1736,32 +1736,30 @@ def _get_standings_cached():
             if res_teams.data:
                 teams_df = pd.DataFrame(res_teams.data)
                 
-            # Fetch completed regular matches with map rounds (BO1 focus)
-            # We use resource embedding to get match_maps related to each match
-            res_matches = supabase.table("matches")\
-                .select("*, match_maps(team1_rounds, team2_rounds, map_index)")\
-                .eq("status", "completed")\
-                .execute()
-            
+            # Fetch all matches from Supabase and join maps separately
+            res_matches = supabase.table("matches").select("*").execute()
             if res_matches.data:
-                m_list = []
-                for item in res_matches.data:
-                    # Flatten the match_maps data (get index 0 for BO1 rounds)
-                    # Exclude playoffs if match_type is explicitly playoff
-                    mt = str(item.get("match_type", "")).lower()
-                    if mt == "playoff":
-                        continue
-                    maps = item.get("match_maps", [])
-                    t1_sum = 0
-                    t2_sum = 0
-                    for mm in maps:
-                        t1_sum += int((mm.get("team1_rounds") or 0))
-                        t2_sum += int((mm.get("team2_rounds") or 0))
-                    item['agg_t1_rounds'] = t1_sum
-                    item['agg_t2_rounds'] = t2_sum
-                    m_list.append(item)
-                
-                matches_df = pd.DataFrame(m_list)
+                matches_df = pd.DataFrame(res_matches.data)
+                if not matches_df.empty:
+                    # Exclude playoffs
+                    matches_df = matches_df[matches_df['match_type'].fillna('').str.lower() != 'playoff']
+                    ids = matches_df['id'].tolist()
+                    res_maps = supabase.table("match_maps").select("match_id, map_index, team1_rounds, team2_rounds, winner_id").in_("match_id", ids).execute()
+                    if res_maps.data:
+                        maps_df = pd.DataFrame(res_maps.data)
+                        if not maps_df.empty:
+                            # Aggregate rounds per match
+                            agg = maps_df.groupby('match_id').agg({'team1_rounds':'sum','team2_rounds':'sum'}).reset_index()
+                            agg.columns = ['id','agg_t1_rounds','agg_t2_rounds']
+                            matches_df = matches_df.merge(agg, on='id', how='left')
+                            # Count map wins per match per team via winner_id
+                            cnt = maps_df.groupby(['match_id','winner_id']).size().reset_index(name='win_count')
+                            # Merge counts for team1
+                            m_t1 = matches_df.merge(cnt, left_on=['id','team1_id'], right_on=['match_id','winner_id'], how='left')
+                            matches_df['wins_t1'] = m_t1['win_count'].fillna(0).astype(int)
+                            # Merge counts for team2
+                            m_t2 = matches_df.merge(cnt, left_on=['id','team2_id'], right_on=['match_id','winner_id'], how='left')
+                            matches_df['wins_t2'] = m_t2['win_count'].fillna(0).astype(int)
         except Exception as e:
             # fall through to SQL if SDK fails
             pass
@@ -1819,6 +1817,12 @@ def _get_standings_cached():
     for col in cols_to_fix:
         if col in m.columns:
             m[col] = pd.to_numeric(m[col], errors='coerce').fillna(0)
+    # Ensure IDs are numeric and valid
+    for id_col in ['id','team1_id','team2_id']:
+        if id_col in m.columns:
+            m[id_col] = pd.to_numeric(m[id_col], errors='coerce')
+    if 'team1_id' in m.columns and 'team2_id' in m.columns:
+        m = m[(m['team1_id'].notna()) & (m['team2_id'].notna())]
     
     # For BO1, if we have map rounds, use them instead of map wins for points/RD
     if 'agg_t1_rounds' in m.columns and 'agg_t2_rounds' in m.columns:
@@ -1828,6 +1832,13 @@ def _get_standings_cached():
             m['score_t2'] = 0
         m['score_t1'] = np.where(m['agg_t1_rounds'] > 0, m['agg_t1_rounds'], m['score_t1'])
         m['score_t2'] = np.where(m['agg_t2_rounds'] > 0, m['agg_t2_rounds'], m['score_t2'])
+    # If we have map win counts, use them when scores are zero
+    if 'wins_t1' in m.columns:
+        m['wins_t1'] = pd.to_numeric(m['wins_t1'], errors='coerce').fillna(0).astype(int)
+        m['score_t1'] = np.where((m['score_t1'] == 0) & (m['wins_t1'] > 0), m['wins_t1'], m['score_t1'])
+    if 'wins_t2' in m.columns:
+        m['wins_t2'] = pd.to_numeric(m['wins_t2'], errors='coerce').fillna(0).astype(int)
+        m['score_t2'] = np.where((m['score_t2'] == 0) & (m['wins_t2'] > 0), m['wins_t2'], m['score_t2'])
     
     # Points for Team 1
     m['p1'] = np.where(m['score_t1'] > m['score_t2'], 15, np.minimum(m['score_t1'], 12))
