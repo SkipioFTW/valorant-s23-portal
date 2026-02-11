@@ -338,11 +338,10 @@ async def standings(interaction: discord.Interaction, group: str):
             team_df = pd.DataFrame(teams)
             ids = team_df['id'].tolist()
 
-            # 2) Get completed matches and filter by both teams belonging to this group
+            # 2) Get matches and filter by both teams belonging to this group
             #    (handles cases where match.group_name is missing or inconsistent)
             res_matches = supabase.table("matches")\
-                .select("id, team1_id, team2_id, group_name, status, match_type, format")\
-                .eq("status", "completed")\
+                .select("id, team1_id, team2_id, group_name, status, match_type, format, score_t1, score_t2")\
                 .execute()
             matches = res_matches.data or []
             if not matches:
@@ -376,11 +375,18 @@ async def standings(interaction: discord.Interaction, group: str):
                 mdf['wins_t2'] = m_t2['win_count'].fillna(0).astype(int)
 
             # 4) Derive match scores
-            for col in ['agg_t1_rounds','agg_t2_rounds','wins_t1','wins_t2']:
+            for col in ['agg_t1_rounds','agg_t2_rounds','wins_t1','wins_t2','score_t1','score_t2']:
                 if col in mdf.columns:
                     mdf[col] = pd.to_numeric(mdf[col], errors='coerce').fillna(0)
-            mdf['score_t1'] = mdf['agg_t1_rounds'] if 'agg_t1_rounds' in mdf.columns else 0
-            mdf['score_t2'] = mdf['agg_t2_rounds'] if 'agg_t2_rounds' in mdf.columns else 0
+            if 'score_t1' not in mdf.columns:
+                mdf['score_t1'] = 0
+            if 'score_t2' not in mdf.columns:
+                mdf['score_t2'] = 0
+            # Override with aggregated rounds when available
+            if 'agg_t1_rounds' in mdf.columns:
+                mdf['score_t1'] = mdf.apply(lambda r: (r['agg_t1_rounds'] if r['agg_t1_rounds'] > 0 else r['score_t1']), axis=1)
+            if 'agg_t2_rounds' in mdf.columns:
+                mdf['score_t2'] = mdf.apply(lambda r: (r['agg_t2_rounds'] if r['agg_t2_rounds'] > 0 else r['score_t2']), axis=1)
             # fallback to map wins if rounds missing
             if 'wins_t1' in mdf.columns:
                 mdf['score_t1'] = mdf.apply(lambda r: (r['wins_t1'] if r['score_t1'] == 0 else r['score_t1']), axis=1)
