@@ -22,14 +22,14 @@ load_dotenv()
 # --- CONFIGURATION ---
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GH_TOKEN = os.getenv("GH_TOKEN")
-GH_OWNER = os.getenv("GH_OWNER", "SkipioFTW") # Default owner
-GH_REPO = os.getenv("GH_REPO", "valorant-s23-portal") # Default repo
+GH_OWNER = os.getenv("GH_OWNER") # Default owner
+GH_REPO = os.getenv("GH_REPO") # Default repo
 # GUILD_ID can be None for global commands, but useful for dev
 GUILD_ID = os.getenv("GUILD_ID", None) 
 if GUILD_ID:
     GUILD_ID = int(GUILD_ID)
 
-OWNER_ID = 1470636024110776322  # User ID to report to
+OWNER_ID = 781562217773662281  # User ID to report to
 
 # Supabase / DB Init
 SUPABASE_URL = os.getenv("SUPABASE_URL")
