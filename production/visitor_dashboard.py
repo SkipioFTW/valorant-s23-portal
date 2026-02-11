@@ -54,7 +54,7 @@ def init_pending_tables(conn=None):
         )
     """)
     
-        conn.execute(f"""
+    conn.execute(f"""
         CREATE TABLE IF NOT EXISTS pending_players (
             id {pk_def},
             riot_id TEXT,
