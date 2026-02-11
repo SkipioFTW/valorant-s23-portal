@@ -1523,13 +1523,22 @@ def get_player_profile(player_id):
                     res_m = supabase.table("matches").select("id").eq("status", "completed").execute()
                     c_ids = [m['id'] for m in res_m.data] if res_m.data else []
                     if c_ids:
-                        # Fetch stats and then ranks via separate query to avoid join edge cases
-                        res_bench = supabase.table("match_stats_map")\
-                            .select("match_id,acs,kills,deaths,assists,player_id")\
-                            .in_("match_id", c_ids)\
-                            .execute()
-                        if res_bench.data:
-                            bdf = pd.DataFrame(res_bench.data)
+                        # Fetch stats in chunks to avoid URL length limits
+                        b_list = []
+                        chunk_size = 100
+                        for i in range(0, len(c_ids), chunk_size):
+                            cid_chunk = c_ids[i:i+chunk_size]
+                            try:
+                                rs = supabase.table("match_stats_map")\
+                                    .select("match_id,acs,kills,deaths,assists,player_id")\
+                                    .in_("match_id", cid_chunk)\
+                                    .execute()
+                                if rs.data:
+                                    b_list.extend(rs.data)
+                            except Exception:
+                                pass
+                        if b_list:
+                            bdf = pd.DataFrame(b_list)
                             # Ensure numeric for aggregation
                             for col in ['acs','kills','deaths','assists','player_id']:
                                 if col in bdf.columns:
@@ -1679,6 +1688,11 @@ def get_player_profile(player_id):
         'lg_k': round(_safe(bench.get('lg_k')), 2),
         'lg_d': round(_safe(bench.get('lg_d')), 2),
         'lg_a': round(_safe(bench.get('lg_a')), 2),
+        'bench_meta': {
+            'has_bench': bool(isinstance(bench, pd.Series)),
+            'sr_nonzero': bool((_safe(bench.get('r_acs')) + _safe(bench.get('r_k')) + _safe(bench.get('r_d')) + _safe(bench.get('r_a'))) > 0),
+            'lg_nonzero': bool((_safe(bench.get('lg_acs')) + _safe(bench.get('lg_k')) + _safe(bench.get('lg_d')) + _safe(bench.get('lg_a'))) > 0)
+        },
         'maps': stats,
         'trend': trend,
         'sub_impact': sub_impact,
@@ -5187,6 +5201,8 @@ elif page == "Player Profile":
                 pass
             st.markdown('<h4 style="color: var(--text-dim); font-family: \'Orbitron\';">DEBUG: BENCHMARK VALUES</h4>', unsafe_allow_html=True)
             st.dataframe(dbg_df, use_container_width=True, hide_index=True)
+            bm = prof.get('bench_meta', {}) if isinstance(prof, dict) else {}
+            st.caption(f"Bench computed: {'yes' if bm.get('has_bench') else 'no'} • Rank non-zero: {'yes' if bm.get('sr_nonzero') else 'no'} • League non-zero: {'yes' if bm.get('lg_nonzero') else 'no'}")
 
             # ACS Trend
             tr_df = prof.get('trend')
