@@ -2603,9 +2603,9 @@ page = st.session_state['page']
 if page == "Overview & Standings":
     import pandas as pd
     st.markdown('<h1 class="main-header">OVERVIEW & STANDINGS</h1>', unsafe_allow_html=True)
-    if st.button("🔄 Refresh Data", key="refresh_overview", use_container_width=False):
+    '''if st.button("🔄 Refresh Data", key="refresh_overview", use_container_width=False):
         st.cache_data.clear()
-        st.rerun()
+        st.rerun()'''
     
     df = get_standings()
     if not df.empty:
