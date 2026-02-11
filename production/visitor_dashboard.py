@@ -214,8 +214,58 @@ class UnifiedDBWrapper:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.conn.close()
 
-def get_conn():
+@st.cache_resource(ttl=3600)
+def get_db_connection_pool():
     # Priority: direct Postgres connection string
+    db_url = get_secret("SUPABASE_DB_URL") or get_secret("DB_CONNECTION_STRING") or get_secret("DATABASE_URL")
+    
+    import psycopg2
+    from psycopg2 import pool
+    
+    if db_url:
+        db_url_str = str(db_url).strip().strip('"').strip("'")
+        if db_url_str.startswith("postgresql"):
+            try:
+                # Add sslmode if not present
+                params = db_url_str
+                if "sslmode" not in db_url_str:
+                    params += "?sslmode=require" if "?" not in db_url_str else "&sslmode=require"
+                
+                # Create a simple connection pool (minconn=1, maxconn=10)
+                # Since streamlit is multi-threaded, a pool is safer than a single shared connection
+                return psycopg2.pool.ThreadedConnectionPool(1, 10, params)
+            except Exception:
+                pass
+    return None
+
+def get_conn():
+    # Try to get a connection from the pool first
+    pool = get_db_connection_pool()
+    if pool:
+        try:
+            conn = pool.getconn()
+            # Wrap it in our UnifiedDBWrapper but add a custom close to return to pool
+            wrapper = UnifiedDBWrapper(conn)
+            # Monkey patch close to return to pool instead of closing
+            original_close = wrapper.close
+            def return_to_pool():
+                try:
+                    pool.putconn(conn)
+                except Exception:
+                    # If pool is closed or error, try closing connection directly
+                    try:
+                        conn.close()
+                    except:
+                        pass
+            wrapper.close = return_to_pool
+            # Also patch __exit__ to use our new close
+            wrapper.__exit__ = lambda exc_type, exc_val, exc_tb: return_to_pool()
+            return wrapper
+        except Exception:
+            pass
+
+    # Fallback to local SQLite or direct connection if pool acts up
+    # Priority: direct Postgres connection string (if pool failed)
     db_url = get_secret("SUPABASE_DB_URL") or get_secret("DB_CONNECTION_STRING") or get_secret("DATABASE_URL")
     
     import psycopg2
@@ -479,6 +529,18 @@ def track_user_activity():
             role = 'visitor' # Attempting to login
             
         ip_address = get_visitor_ip()
+        
+        # Throttling Logic: Only update DB if > 60s since last update OR if identity data changed
+        now = time.time()
+        last_track = st.session_state.get('last_track_time', 0)
+        last_track_data = st.session_state.get('last_track_data', {})
+        
+        current_data = {'username': username, 'role': role, 'ip': ip_address}
+        
+        if (now - last_track < 60) and (current_data == last_track_data):
+            # Skip DB write, just return
+            return
+
         conn = get_conn()
         
         # Always update current session
@@ -494,17 +556,26 @@ def track_user_activity():
                     last_activity = EXCLUDED.last_activity, 
                     ip_address = EXCLUDED.ip_address
                 """,
-                (session_id, username, role, time.time(), ip_address)
+                (session_id, username, role, now, ip_address)
             )
         else:
             conn.execute(
                 "INSERT OR REPLACE INTO session_activity (session_id, username, role, last_activity, ip_address) VALUES (%s, %s, %s, %s, %s)",
-                (session_id, username, role, time.time(), ip_address)
+                (session_id, username, role, now, ip_address)
             )
-        # Cleanup old sessions (older than 30 minutes)
-        conn.execute("DELETE FROM session_activity WHERE last_activity < %s", (time.time() - 1800,))
+        
+        # Cleanup old sessions (older than 30 minutes) - perform this less frequently too
+        # checking modulo of current time to do it roughly every 5 mins
+        if int(now) % 300 < 5: 
+            conn.execute("DELETE FROM session_activity WHERE last_activity < %s", (now - 1800,))
+            
         conn.commit()
         conn.close()
+        
+        # Update session state
+        st.session_state['last_track_time'] = now
+        st.session_state['last_track_data'] = current_data
+        
     except Exception:
         pass
 
@@ -1576,19 +1647,26 @@ def get_player_profile(player_id):
                                 mmdf = pd.DataFrame(res_mm.data)
                                 mmdf['map_index'] = pd.to_numeric(mmdf.get('map_index', 0), errors='coerce').fillna(0).astype(int)
                                 mmdf = mmdf[['match_id','map_index','map_name','team1_rounds','team2_rounds']]
-                        def _match_val(x, col):
-                            try:
-                                return mdf.loc[int(x), col] if not mdf.empty and int(x) in mdf.index else None
-                            except Exception:
-                                return None
-                        stats['status'] = stats['match_id'].apply(lambda x: _match_val(x, 'status'))
-                        stats['week'] = stats['match_id'].apply(lambda x: _match_val(x, 'week'))
-                        stats['format'] = stats['match_id'].apply(lambda x: _match_val(x, 'format'))
-                        # Merge map_name and map rounds
+                        # Merge match metadata (vectorized)
+                        if not mdf.empty:
+                            # mdf is already indexed by id from line 1643
+                            # We can map or join. Join is cleaner if we match on index.
+                            # stats['match_id'] is the foreign key.
+                            stats = stats.join(mdf[['status', 'week', 'format']], on='match_id', how='left')
+                        
+                        # Merge map names and rounds
                         if not mmdf.empty:
                             stats = stats.merge(mmdf, on=['match_id','map_index'], how='left')
+                            
                         stats['is_sub'] = pd.to_numeric(stats.get('is_sub', 0), errors='coerce').fillna(0)
-                        nz = stats[['acs','kills','deaths','assists']].sum(axis=1) > 0 if set(['acs','kills','deaths','assists']).issubset(stats.columns) else False
+                        
+                        # Vectorized check for non-zero stats
+                        cols_check = [c for c in ['acs','kills','deaths','assists'] if c in stats.columns]
+                        if cols_check:
+                            nz = stats[cols_check].sum(axis=1) > 0
+                        else:
+                            nz = False
+                            
                         stats = stats[(stats['status'] == 'completed') | (nz)]
                     
                 # 3. Benchmarks (League Avg & Rank Avg)
@@ -2100,8 +2178,8 @@ def _get_standings_cached():
     return df.sort_values(by=['Points', 'Points Against'], ascending=[False, True])
 
 def get_standings():
-    if not should_use_cache():
-        return _get_standings_cached.run()
+    # Performance fix: Always use cache. Bypassing cache via .run() causes global lag.
+    # Cache invalidation should typically happen via actions (mutations), not read checks.
     return _get_standings_cached()
 @st.cache_data(ttl=900)
 def _get_player_leaderboard_cached():
@@ -2164,8 +2242,6 @@ def _get_player_leaderboard_cached():
     return df.sort_values('avg_acs', ascending=False)
 
 def get_player_leaderboard():
-    if not should_use_cache():
-        return _get_player_leaderboard_cached.run()
     return _get_player_leaderboard_cached()
 
 @st.cache_data(ttl=60)
@@ -2343,8 +2419,6 @@ def _get_all_players_directory_cached(format_names=True):
     return df
 
 def get_all_players_directory(format_names=True):
-    if not should_use_cache():
-        return _get_all_players_directory_cached.run(format_names)
     return _get_all_players_directory_cached(format_names)
 
 @st.cache_data(ttl=300)
