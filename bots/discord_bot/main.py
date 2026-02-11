@@ -338,11 +338,11 @@ async def standings(interaction: discord.Interaction, group: str):
             team_df = pd.DataFrame(teams)
             ids = team_df['id'].tolist()
 
-            # 2) Get completed matches in this group (exclude playoffs)
+            # 2) Get completed matches and filter by both teams belonging to this group
+            #    (handles cases where match.group_name is missing or inconsistent)
             res_matches = supabase.table("matches")\
                 .select("id, team1_id, team2_id, group_name, status, match_type, format")\
                 .eq("status", "completed")\
-                .ilike("group_name", group)\
                 .execute()
             matches = res_matches.data or []
             if not matches:
@@ -355,6 +355,9 @@ async def standings(interaction: discord.Interaction, group: str):
                 return
             mdf = pd.DataFrame(matches)
             mdf = mdf[(mdf['match_type'].fillna('').str.lower() != 'playoff')]
+            # Keep only matches where both teams are within the group's team ids
+            team_ids = set(ids)
+            mdf = mdf[mdf['team1_id'].isin(team_ids) & mdf['team2_id'].isin(team_ids)]
 
             # 3) Join map rounds for these matches
             res_maps = supabase.table("match_maps").select("match_id, map_index, team1_rounds, team2_rounds, winner_id").in_("match_id", mdf['id'].tolist()).execute()
