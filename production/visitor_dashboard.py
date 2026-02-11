@@ -1523,13 +1523,13 @@ def get_player_profile(player_id):
                     res_m = supabase.table("matches").select("id").eq("status", "completed").execute()
                     c_ids = [m['id'] for m in res_m.data] if res_m.data else []
                     if c_ids:
-                        res_bench = supabase.table("match_stats_map")\
-                            .select("acs, kills, deaths, assists, players(rank)")\
+                    res_bench = supabase.table("match_stats_map")\
+                            .select("acs,kills,deaths,assists, players:players!player_id(rank)")\
                             .in_("match_id", c_ids)\
                             .execute()
                         if res_bench.data:
                             bdf = pd.DataFrame(res_bench.data)
-                            bdf['rank'] = bdf['players'].apply(lambda x: x.get('rank') if x else None)
+                            bdf['rank'] = bdf['players'].apply(lambda x: x.get('rank') if isinstance(x, dict) else None)
                             bench = pd.Series({
                                 'lg_acs': bdf['acs'].mean(), 'lg_k': bdf['kills'].mean(), 
                                 'lg_d': bdf['deaths'].mean(), 'lg_a': bdf['assists'].mean(),
@@ -1538,6 +1538,19 @@ def get_player_profile(player_id):
                                 'r_d': bdf[bdf['rank'] == rank_val]['deaths'].mean(),
                                 'r_a': bdf[bdf['rank'] == rank_val]['assists'].mean()
                             })
+                        else:
+                            # If no join, compute league-only averages as a fallback
+                            res_bench = supabase.table("match_stats_map")\
+                                .select("acs,kills,deaths,assists")\
+                                .in_("match_id", c_ids)\
+                                .execute()
+                            if res_bench.data:
+                                bdf = pd.DataFrame(res_bench.data)
+                                bench = pd.Series({
+                                    'lg_acs': bdf['acs'].mean(), 'lg_k': bdf['kills'].mean(), 
+                                    'lg_d': bdf['deaths'].mean(), 'lg_a': bdf['assists'].mean(),
+                                    'r_acs': None,'r_k': None,'r_d': None,'r_a': None
+                                })
         except Exception:
             pass
     # Supabase-only: if not found via Supabase, return {}
@@ -1601,6 +1614,14 @@ def get_player_profile(player_id):
         ms['map_label'] = ms[key_col].apply(lambda x: str(x) if key_col=='map_name' else f"Map {int(x)+1}")
         maps_df_summary = ms
 
+    def _safe(v):
+        try:
+            x = float(v)
+            if math.isnan(x):
+                return 0.0
+            return x
+        except Exception:
+            return 0.0
     return {
         'info': info.iloc[0].to_dict(),
         'display_name': display_name,
@@ -1613,14 +1634,14 @@ def get_player_profile(player_id):
         'top_agent': top_agent,
         'agents': agents_df,
         'maps_summary': maps_df_summary,
-        'sr_avg_acs': round(float(bench['r_acs'] or 0), 1),
-        'sr_k': round(float(bench['r_k'] or 0), 1),
-        'sr_d': round(float(bench['r_d'] or 0), 1),
-        'sr_a': round(float(bench['r_a'] or 0), 1),
-        'lg_avg_acs': round(float(bench['lg_acs'] or 0), 1),
-        'lg_k': round(float(bench['lg_k'] or 0), 1),
-        'lg_d': round(float(bench['lg_d'] or 0), 1),
-        'lg_a': round(float(bench['lg_a'] or 0), 1),
+        'sr_avg_acs': round(_safe(bench.get('r_acs')), 1),
+        'sr_k': round(_safe(bench.get('r_k')), 1),
+        'sr_d': round(_safe(bench.get('r_d')), 1),
+        'sr_a': round(_safe(bench.get('r_a')), 1),
+        'lg_avg_acs': round(_safe(bench.get('lg_acs')), 1),
+        'lg_k': round(_safe(bench.get('lg_k')), 1),
+        'lg_d': round(_safe(bench.get('lg_d')), 1),
+        'lg_a': round(_safe(bench.get('lg_a')), 1),
         'maps': stats,
         'trend': trend,
         'sub_impact': sub_impact,
