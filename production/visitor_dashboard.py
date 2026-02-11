@@ -91,6 +91,34 @@ def init_player_discord_column(conn=None):
         conn.commit()
         conn.close()
 
+# Cache management helpers
+def clear_caches_safe(min_interval_sec: int = 30):
+    ts_key = 'last_cache_clear_ts'
+    now = time.time()
+    last = st.session_state.get(ts_key, 0)
+    if now - last >= min_interval_sec:
+        try:
+            st.cache_data.clear()
+        except Exception:
+            pass
+        st.session_state[ts_key] = now
+
+def warm_caches():
+    if st.session_state.get('cache_warmed'):
+        return
+    try:
+        # Lightweight prefetch to speed up first navigation
+        _ = get_all_players_directory(format_names=False)
+        _ = get_standings()
+        # Prefetch week 1 regular matches if available
+        try:
+            _ = get_week_matches(week=1)
+        except Exception:
+            pass
+    except Exception:
+        pass
+    st.session_state['cache_warmed'] = True
+
 # Use data folder for database
 DEFAULT_DB_PATH = os.path.join(ROOT_DIR, "data", "valorant_s23.db")
 SECRET_DB_PATH = get_secret("DB_PATH")
@@ -758,6 +786,7 @@ def bootstrap_schema_once():
 
 bootstrap_schema_once()
 track_user_activity()
+warm_caches()
 
 # Hide standard sidebar navigation and other streamlit elements
 st.markdown("""<link href='https://fonts.googleapis.com/css2%sfamily=Orbitron:wght@400;700&family=Rajdhani:wght@400;600&family=Inter:wght@400;700&display=swap' rel='stylesheet'>""", unsafe_allow_html=True)
@@ -3873,7 +3902,7 @@ elif page == "Playoffs":
                             conn_s.execute("UPDATE matches SET score_t1=%s, score_t2=%s, winner_id=%s, status='completed', maps_played=%s WHERE id=%s", 
                                          (final_s1, final_s2, final_winner, played_cnt, int(m['id'])))
                             conn_s.commit()
-                            st.cache_data.clear()
+                            clear_caches_safe()
                             st.success(f"Saved Playoff Map {map_idx+1}!")
                             st.rerun()
                         except Exception as ex:
@@ -4258,7 +4287,7 @@ elif page == "Admin Panel":
                         }).eq("id", int(m['id'])).execute()
                         supabase.table("match_maps").delete().eq("match_id", int(m['id'])).execute()
                         supabase.table("match_stats_map").delete().eq("match_id", int(m['id'])).execute()
-                        st.cache_data.clear()
+                        clear_caches_safe()
                         st.success("Saved forfeit match")
                         st.rerun()
                 else:
@@ -4591,7 +4620,7 @@ elif page == "Admin Panel":
                                 if 'auto_selected_match_id' in st.session_state: del st.session_state['auto_selected_match_id']
                                 if 'auto_selected_match_week' in st.session_state: del st.session_state['auto_selected_match_week']
 
-                            st.cache_data.clear()
+                            clear_caches_safe()
                             st.success(f"Successfully saved and updated totals!")
                             time.sleep(1)
                             st.rerun()
@@ -4797,7 +4826,7 @@ elif page == "Admin Panel":
                         conn_clean.close()
                 
                 if merged_count > 0:
-                    st.cache_data.clear()
+                    clear_caches_safe()
                     st.success(f"Successfully merged {merged_count} duplicate records.")
                     st.rerun()
                 elif saved_via_sdk:
