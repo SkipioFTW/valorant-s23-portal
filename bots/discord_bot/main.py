@@ -441,7 +441,6 @@ async def standings(interaction: discord.Interaction, group: str):
         mids = tuple([r[0] for r in mrows])
         cursor.execute("SELECT match_id, map_index, team1_rounds, team2_rounds, winner_id FROM match_maps WHERE match_id IN (%s)" % ",".join(["%s"]*len(mids)), mids)
         maps = cursor.fetchall()
-        import pandas as pd
         mdf = pd.DataFrame(mrows, columns=['id','team1_id','team2_id'])
         if maps:
             mdf2 = pd.DataFrame(maps, columns=['match_id','map_index','team1_rounds','team2_rounds','winner_id'])
