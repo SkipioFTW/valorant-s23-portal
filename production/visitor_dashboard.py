@@ -353,27 +353,30 @@ def init_pending_tables(conn=None):
     if conn is None:
         conn = get_conn()
         should_close = True
+    is_postgres = not getattr(conn, 'is_sqlite', isinstance(conn, sqlite3.Connection))
+    pk_def = "SERIAL PRIMARY KEY" if is_postgres else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    timestamp_def = "TIMESTAMP DEFAULT CURRENT_TIMESTAMP" if is_postgres else "DATETIME DEFAULT CURRENT_TIMESTAMP"
     
-    conn.execute("""
+    conn.execute(f"""
         CREATE TABLE IF NOT EXISTS pending_matches (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {pk_def},
             team_a TEXT,
             team_b TEXT,
             group_name TEXT,
             url TEXT,
             submitted_by TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            timestamp {timestamp_def}
         )
     """)
     
-    conn.execute("""
+    conn.execute(f"""
         CREATE TABLE IF NOT EXISTS pending_players (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {pk_def},
             riot_id TEXT,
             rank TEXT,
             discord_handle TEXT,
             submitted_by TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            timestamp {timestamp_def}
         )
     """)
     
@@ -706,10 +709,12 @@ def init_match_stats_map_table(conn=None):
     if conn is None:
         conn = get_conn()
         should_close = True
+    is_postgres = not getattr(conn, 'is_sqlite', isinstance(conn, sqlite3.Connection))
+    pk_def = "SERIAL PRIMARY KEY" if is_postgres else "INTEGER PRIMARY KEY AUTOINCREMENT"
     conn.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS match_stats_map (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {pk_def},
             match_id INTEGER NOT NULL,
             map_index INTEGER NOT NULL,
             team_id INTEGER NOT NULL,
