@@ -7,6 +7,7 @@ import json
 import re
 import pandas as pd
 import hmac
+import math
 import time
 try:
     import psycopg2
@@ -5017,7 +5018,13 @@ elif page == "Player Profile":
             st.markdown('<h3 style="color: var(--primary-blue); font-family: \'Orbitron\';">PERFORMANCE BENCHMARKS</h3>', unsafe_allow_html=True)
             
             _games = pp_games or 0
-            _games = _games if isinstance(_games, (int, float)) and not math.isnan(_games) else 0
+            try:
+                _games = float(_games)
+            except Exception:
+                _games = 0.0
+            if isinstance(_games, float) and math.isnan(_games):
+                _games = 0.0
+            _games = int(_games)
             cmp_df = pd.DataFrame({
                 'Metric': ['ACS','Kills/Match','Deaths/Match','Assists/Match'],
                 'Player': [pp_avg_acs, pp_total_kills/max(_games,1), pp_total_deaths/max(_games,1), pp_total_assists/max(_games,1)],
