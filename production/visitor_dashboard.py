@@ -4623,12 +4623,11 @@ elif page == "Admin Panel":
                 def_rk = preq.get('rank', rvals[0])
                 def_dh = preq.get('discord_handle', "")
                 if def_rk not in rvals: def_rk = rvals[0]
-                st.info(f"Filling from Bot Request: {def_rid} ({def_dh})")
+                st.info(f"Filling from Bot Request: {def_rid}")
 
             with st.form("add_player_admin"):
                 nm_new = st.text_input("Name", value=def_name)
                 rid_new = st.text_input("Riot ID", value=def_rid)
-                dh_new = st.text_input("Discord Handle", value=def_dh)
                 rk_new = st.selectbox("Rank", rvals, index=rvals.index(def_rk))
                 tmn_new = st.selectbox("Team", [""] + team_names, index=0)
                 add_ok = st.form_submit_button("Create Player")
@@ -4660,7 +4659,7 @@ elif page == "Admin Panel":
                                     "name": nm_clean, 
                                     "riot_id": rid_clean, 
                                     "rank": rk_new, 
-                                    "discord_handle": dh_new, 
+                                    "discord_handle": nm_clean, 
                                     "default_team_id": dtid_new
                                 }).execute()
                                 if res_in.data:
