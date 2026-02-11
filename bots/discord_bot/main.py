@@ -1,5 +1,6 @@
 import discord
 from discord.ext import commands
+from discord import app_commands
 import os
 import json
 import asyncio
@@ -8,12 +9,9 @@ import re
 import sys
 import base64
 import requests
-try:
-    import psycopg2
-except ImportError:
-    psycopg2 = None
-import sqlite3
-from io import BytesIO
+import time
+import psycopg2
+from psycopg2 import pool
 from dotenv import load_dotenv
 from supabase import create_client, Client
 import pandas as pd
@@ -21,22 +19,24 @@ import pandas as pd
 # Load environment variables from .env file
 load_dotenv()
 
-# Add project root to path to import scripts if needed
-# But for a standalone bot, we might duplicate the scraper logic or import it
-# if we mount the volume. For now, we will duplicate the critical scraper logic
-# to ensure it runs standalone in the container without complex mounting.
-
 # --- CONFIGURATION ---
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GH_TOKEN = os.getenv("GH_TOKEN")
 GH_OWNER = os.getenv("GH_OWNER", "SkipioFTW") # Default owner
 GH_REPO = os.getenv("GH_REPO", "valorant-s23-portal") # Default repo
-GUILD_ID = int(os.getenv("GUILD_ID", "1470636024110776322"))
+# GUILD_ID can be None for global commands, but useful for dev
+GUILD_ID = os.getenv("GUILD_ID", None) 
+if GUILD_ID:
+    GUILD_ID = int(GUILD_ID)
+
+OWNER_ID = 1470636024110776322  # User ID to report to
+
+# Supabase / DB Init
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL")
+SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL") or os.getenv("DB_CONNECTION_STRING")
 
-# Initialize Supabase Client
+# Initialize Supabase Client (for Storage/Auth if needed, though we use direct Postgres mostly)
 supabase: Client = None
 if SUPABASE_URL and SUPABASE_KEY:
     try:
@@ -45,11 +45,117 @@ if SUPABASE_URL and SUPABASE_KEY:
     except Exception as e:
         print(f"Error initializing Supabase client: {e}")
 
-# Database path (relative or absolute) for SQLite fallback
-DB_PATH = os.getenv("DB_PATH", os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data", "valorant_s23.db"))
-DB_CONNECTION_STRING = os.getenv("DB_CONNECTION_STRING", "postgresql://postgres.tekwoxehaktajyizaacj:Pisllz5MXg34sZE9@aws-1-eu-north-1.pooler.supabase.com:6543/postgres")
+# --- DATABASE CONNECTION POOLING (Matches Production) ---
 
-# Intents
+class UnifiedCursorWrapper:
+    def __init__(self, cur):
+        self.cur = cur
+    
+    def execute(self, sql, params=None):
+        return self.cur.execute(sql, params)
+        
+    def __getattr__(self, name):
+        return getattr(self.cur, name)
+    
+    def __iter__(self):
+        return iter(self.cur)
+
+    def __enter__(self):
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if hasattr(self.cur, "close"):
+            self.cur.close()
+
+class UnifiedDBWrapper:
+    def __init__(self, conn):
+        self.conn = conn
+        
+    def execute(self, sql, params=None):
+        cur = self.cursor()
+        cur.execute(sql, params)
+        return cur
+        
+    def cursor(self):
+        return UnifiedCursorWrapper(self.conn.cursor())
+        
+    def commit(self):
+        self.conn.commit()
+    def close(self):
+        self.conn.close()
+    def rollback(self):
+        self.conn.rollback()
+    def __getattr__(self, name):
+        return getattr(self.conn, name)
+    
+    def __enter__(self):
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.conn.close()
+
+# Global Connection Pool
+pg_pool = None
+
+def get_db_connection_pool():
+    global pg_pool
+    if pg_pool:
+        return pg_pool
+        
+    db_url = SUPABASE_DB_URL
+    if db_url:
+        db_url_str = str(db_url).strip().strip('"').strip("'")
+        if db_url_str.startswith("postgresql"):
+            try:
+                params = db_url_str
+                if "sslmode" not in db_url_str:
+                    params += "?sslmode=require" if "?" not in db_url_str else "&sslmode=require"
+                
+                # Min 1, Max 10 connections
+                pg_pool = psycopg2.pool.ThreadedConnectionPool(1, 10, params)
+                print("Database connection pool created.")
+                return pg_pool
+            except Exception as e:
+                print(f"Failed to create connection pool: {e}")
+    return None
+
+def get_conn():
+    pool = get_db_connection_pool()
+    if pool:
+        try:
+            conn = pool.getconn()
+            wrapper = UnifiedDBWrapper(conn)
+            
+            # Monkey patch close to return to pool instead of closing
+            original_close = wrapper.close
+            def return_to_pool():
+                try:
+                    pool.putconn(conn)
+                except Exception:
+                    try:
+                        conn.close()
+                    except:
+                        pass
+            wrapper.close = return_to_pool
+            wrapper.__exit__ = lambda exc_type, exc_val, exc_tb: return_to_pool()
+            return wrapper
+        except Exception as e:
+            print(f"Error getting connection from pool: {e}")
+    
+    # Fallback to direct connection if pool fails
+    print("Fallback to direct connection")
+    db_url = SUPABASE_DB_URL
+    if db_url:
+        try:
+            conn = psycopg2.connect(db_url, sslmode='require', connect_timeout=10)
+            return UnifiedDBWrapper(conn)
+        except Exception as e:
+            print(f"Direct connection failed: {e}")
+            
+    return None
+
+# --- BOT SETUP ---
+
 intents = discord.Intents.default()
 intents.message_content = True
 
@@ -63,126 +169,26 @@ class MyBot(commands.Bot):
             guild = discord.Object(id=GUILD_ID)
             self.tree.copy_global_to(guild=guild)
             await self.tree.sync(guild=guild)
+            print(f"Synced commands to guild {GUILD_ID}")
         else:
             await self.tree.sync()
-        print(f"Synced commands to guild {GUILD_ID}")
+            print("Synced global commands")
 
 bot = MyBot()
 
 # --- HELPER FUNCTIONS ---
 
-def get_headers():
-    return {
-        'Accept': 'application/json, text/plain, */*',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Authorization': f"Bearer {GH_TOKEN}"
-    }
-
-def upload_to_github(path, content_str, message):
-    if not GH_TOKEN:
-        return False, "GH_TOKEN not set"
-    
-    url = f"https://api.github.com/repos/{GH_OWNER}/{GH_REPO}/contents/{path}"
-    headers = {
-        "Authorization": f"Bearer {GH_TOKEN}",
-        "Accept": "application/vnd.github+json" 
-    }
-    
-    # Check if exists
-    sha = None
-    r = requests.get(url, headers=headers)
-    if r.status_code == 200:
-        sha = r.json().get("sha")
-        
-    payload = {
-        "message": message,
-        "content": base64.b64encode(content_str.encode('utf-8')).decode('ascii'),
-        "branch": "main"
-    }
-    if sha:
-        payload["sha"] = sha
-        
-    r = requests.put(url, headers=headers, json=payload)
-    if r.status_code in [200, 201]:
-        return True, f"https://github.com/{GH_OWNER}/{GH_REPO}/blob/main/{path}"
-    else:
-        return False, f"Error {r.status_code}: {r.text}"
-
-class UnifiedCursorWrapper:
-    def __init__(self, cur, is_sqlite):
-        self.cur = cur
-        self.is_sqlite = is_sqlite
-    
-    def execute(self, sql, params=None):
-        final_sql = sql
-        if self.is_sqlite and "%s" in sql:
-            final_sql = sql.replace("%s", "?")
-        if params:
-            return self.cur.execute(final_sql, params)
-        return self.cur.execute(final_sql)
-        
-    def __getattr__(self, name):
-        return getattr(self.cur, name)
-    
-    def __iter__(self):
-        return iter(self.cur)
-
-    # Add Context Manager support
-    def __enter__(self):
-        return self
-        
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if hasattr(self.cur, "close"):
-            self.cur.close()
-
-class UnifiedDBWrapper:
-    def __init__(self, conn):
-        self.conn = conn
-        self.is_sqlite = isinstance(conn, sqlite3.Connection)
-        
-    def execute(self, sql, params=None):
-        cur = self.cursor()
-        cur.execute(sql, params)
-        return cur
-        
-    def cursor(self):
-        return UnifiedCursorWrapper(self.conn.cursor(), self.is_sqlite)
-        
-    def commit(self):
-        self.conn.commit()
-    def close(self):
-        self.conn.close()
-    def rollback(self):
-        self.conn.rollback()
-    def __getattr__(self, name):
-        return getattr(self.conn, name)
-    
-    # Add Context Manager support
-    def __enter__(self):
-        return self
-        
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.conn.close()
-
-def get_db_conn():
-    db_url_env = os.getenv("DB_CONNECTION_STRING") or DB_CONNECTION_STRING or SUPABASE_DB_URL or os.getenv("SUPABASE_URL")
-    if db_url_env and "postgresql" in str(db_url_env):
-        import psycopg2
-        try:
-            params = str(db_url_env).strip()
-            if "sslmode" not in params:
-                params += ("?sslmode=require" if "?" not in params else "&sslmode=require")
-            return UnifiedDBWrapper(psycopg2.connect(params))
-        except Exception:
-            pass
-    if os.path.exists(DB_PATH):
-        return UnifiedDBWrapper(sqlite3.connect(DB_PATH))
-    return None
-
-# Allowed ranks for validation
-ALLOWED_RANKS = ["Unranked", "Iron/Bronze", "Silver", "Gold", "Platinum", "Diamond", "Ascendant", "Immortal 1/2", "Immortal 3/Radiant"]
-
-
+def is_admin_or_captain(interaction: discord.Interaction):
+    # Check for specific roles or permissions
+    # Modify these role names to match your server
+    allowed_roles = ["Admin", "Captain", "Moderator", "Owner"] 
+    if isinstance(interaction.user, discord.Member):
+        if any(role.name in allowed_roles for role in interaction.user.roles):
+            return True
+        # Also allow server administrators
+        if interaction.user.guild_permissions.administrator:
+            return True
+    return False
 
 # --- SLASH COMMANDS ---
 
@@ -194,31 +200,39 @@ ALLOWED_RANKS = ["Unranked", "Iron/Bronze", "Silver", "Gold", "Platinum", "Diamo
     url="Tracker.gg Match URL"
 )
 async def match(interaction: discord.Interaction, team_a: str, team_b: str, group: str, url: str):
-    await interaction.response.defer(thinking=True)
+    await interaction.response.defer()
     
-    conn = get_db_conn()
+    # Role Check
+    if not is_admin_or_captain(interaction):
+        await interaction.followup.send("❌ You do not have permission to submit matches.")
+        return
+
+    conn = get_conn()
     if not conn:
         await interaction.followup.send("❌ Error: Database connection failed.")
         return
 
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT name FROM teams WHERE LOWER(name) = LOWER(%s)", (team_a,))
+        # Verify teams exist (Case insensitive)
+        cursor.execute("SELECT name FROM teams WHERE name ILIKE %s", (team_a,))
         if not cursor.fetchone():
             await interaction.followup.send(f"❌ Error: **Team A ('{team_a}')** not found.")
             return
             
-        cursor.execute("SELECT name FROM teams WHERE LOWER(name) = LOWER(%s)", (team_b,))
+        cursor.execute("SELECT name FROM teams WHERE name ILIKE %s", (team_b,))
         if not cursor.fetchone():
             await interaction.followup.send(f"❌ Error: **Team B ('{team_b}')** not found.")
             return
 
+        # Insert into pending_matches with 'new' status
         cursor.execute("""
-            INSERT INTO pending_matches (team_a, team_b, group_name, url, submitted_by)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO pending_matches (team_a, team_b, group_name, url, submitted_by, status)
+            VALUES (%s, %s, %s, %s, %s, 'new')
         """, (team_a, team_b, group, url, str(interaction.user)))
         conn.commit()
-        await interaction.followup.send(f"Group: {group}\n{team_a} vs {team_b}\n\n`{url}`")
+        
+        await interaction.followup.send(f"✅ **Match Submitted!**\nGroup: {group}\n{team_a} vs {team_b}\n\n`{url}`\n\nAwaiting Admin Approval.")
     except Exception as e:
         await interaction.followup.send(f"❌ Database Error: {str(e)}")
     finally:
@@ -232,37 +246,23 @@ async def match(interaction: discord.Interaction, team_a: str, team_b: str, grou
 async def player(interaction: discord.Interaction, riot_id: str, rank: str):
     await interaction.response.defer()
     
-    clean_rank = rank.strip()
-    if clean_rank not in ALLOWED_RANKS:
-        ranks_list = "\n".join([f"- {r}" for r in ALLOWED_RANKS])
-        await interaction.followup.send(f"❌ Error: **'{rank}'** is invalid.\nOptions:\n{ranks_list}")
-        return
-
-    if supabase:
-        try:
-            supabase.table("pending_players").insert({
-                "riot_id": riot_id,
-                "rank": clean_rank,
-                "submitted_by": str(interaction.user)
-            }).execute()
-            await interaction.followup.send(f"✅ **Registration Submitted!**\nPlayer: `{riot_id}`\nPending Approval.")
-            return
-        except Exception as e:
-            print(f"Supabase SDK Error: {e}")
-
-    conn = get_db_conn()
+    conn = get_conn()
     if not conn:
         await interaction.followup.send("❌ Error: Database connection failed.")
         return
 
     try:
+        clean_rank = rank.strip()
         cursor = conn.cursor()
+        
+        # Insert into pending_players
         cursor.execute("""
-            INSERT INTO pending_players (riot_id, rank, submitted_by)
-            VALUES (%s, %s, %s)
-        """, (riot_id, clean_rank, str(interaction.user)))
+            INSERT INTO pending_players (riot_id, rank, submitted_by, status, discord_handle)
+            VALUES (%s, %s, %s, 'new', %s)
+        """, (riot_id, clean_rank, str(interaction.user), str(interaction.user.name)))
         conn.commit()
-        await interaction.followup.send(f"✅ **Registration Submitted!**")
+        
+        await interaction.followup.send(f"✅ **Player Registration Submitted!**\nPlayer: `{riot_id}`\nRank: `{clean_rank}`\n\nPending Approval.")
     except Exception as e:
         await interaction.followup.send(f"❌ Database Error: {str(e)}")
     finally:
@@ -273,255 +273,131 @@ async def player(interaction: discord.Interaction, riot_id: str, rank: str):
 async def standings(interaction: discord.Interaction, group: str):
     await interaction.response.defer()
     
-    if supabase:
-        try:
-            # 1) Get teams for this group
-            res_teams = supabase.table("teams").select("id, name, group_name").ilike("group_name", group).execute()
-            teams = res_teams.data or []
-            if not teams:
-                await interaction.followup.send(f"❌ No teams found in group `{group}`.")
-                return
-            team_df = pd.DataFrame(teams)
-            ids = team_df['id'].tolist()
-
-            # 2) Get matches and filter by both teams belonging to this group
-            #    (handles cases where match.group_name is missing or inconsistent)
-            res_matches = supabase.table("matches")\
-                .select("id, team1_id, team2_id, group_name, status, match_type, format, score_t1, score_t2")\
-                .execute()
-            matches = res_matches.data or []
-            if not matches:
-                # Show teams list if no matches yet
-                msg = f"🏆 **Group {group.upper()} Teams**\n```\n"
-                for row in teams:
-                    msg += f"- {row['name']}\n"
-                msg += "```\n_No completed matches yet_"
-                await interaction.followup.send(msg)
-                return
-            mdf = pd.DataFrame(matches)
-            mdf['status'] = mdf['status'].astype(str).str.lower()
-            mdf = mdf[(mdf['match_type'].fillna('').str.lower() != 'playoff')]
-            # Keep only matches where both teams are within the group's team ids
-            team_ids = set(ids)
-            mdf = mdf[mdf['team1_id'].isin(team_ids) & mdf['team2_id'].isin(team_ids)]
-
-            # 3) Join map rounds for these matches
-            res_maps = supabase.table("match_maps").select("match_id, map_index, team1_rounds, team2_rounds, winner_id").in_("match_id", mdf['id'].tolist()).execute()
-            maps = res_maps.data or []
-            maps_df = pd.DataFrame(maps)
-            if not maps_df.empty:
-                agg = maps_df.groupby('match_id').agg({'team1_rounds':'sum','team2_rounds':'sum'}).reset_index()
-                agg.columns = ['id','agg_t1_rounds','agg_t2_rounds']
-                mdf = mdf.merge(agg, on='id', how='left')
-
-                # Map win counts
-                cnt = maps_df.groupby(['match_id','winner_id']).size().reset_index(name='win_count')
-                m_t1 = mdf.merge(cnt, left_on=['id','team1_id'], right_on=['match_id','winner_id'], how='left')
-                mdf['wins_t1'] = m_t1['win_count'].fillna(0).astype(int)
-                m_t2 = mdf.merge(cnt, left_on=['id','team2_id'], right_on=['match_id','winner_id'], how='left')
-                mdf['wins_t2'] = m_t2['win_count'].fillna(0).astype(int)
-
-            # 4) Derive match scores
-            for col in ['agg_t1_rounds','agg_t2_rounds','wins_t1','wins_t2','score_t1','score_t2']:
-                if col in mdf.columns:
-                    mdf[col] = pd.to_numeric(mdf[col], errors='coerce').fillna(0)
-            if 'score_t1' not in mdf.columns:
-                mdf['score_t1'] = 0
-            if 'score_t2' not in mdf.columns:
-                mdf['score_t2'] = 0
-            # Override with aggregated rounds when available
-            if 'agg_t1_rounds' in mdf.columns:
-                mdf['score_t1'] = mdf.apply(lambda r: (r['agg_t1_rounds'] if r['agg_t1_rounds'] > 0 else r['score_t1']), axis=1)
-            if 'agg_t2_rounds' in mdf.columns:
-                mdf['score_t2'] = mdf.apply(lambda r: (r['agg_t2_rounds'] if r['agg_t2_rounds'] > 0 else r['score_t2']), axis=1)
-            # fallback to map wins if rounds missing
-            if 'wins_t1' in mdf.columns:
-                mdf['score_t1'] = mdf.apply(lambda r: (r['wins_t1'] if r['score_t1'] == 0 else r['score_t1']), axis=1)
-            if 'wins_t2' in mdf.columns:
-                mdf['score_t2'] = mdf.apply(lambda r: (r['wins_t2'] if r['score_t2'] == 0 else r['score_t2']), axis=1)
-
-            # Only count matches that are effectively played: completed OR have rounds/scores
-            played_mask = (
-                mdf['status'] == 'completed'
-            ) | (
-                ((mdf['agg_t1_rounds'] + mdf['agg_t2_rounds']) > 0) if ('agg_t1_rounds' in mdf.columns and 'agg_t2_rounds' in mdf.columns) else False
-            ) | (
-                ((mdf['score_t1'] + mdf['score_t2']) > 0)
-            )
-            mdf = mdf[played_mask]
-
-            # 5) Points model (same as portal): win => 15, else min(rounds,12)
-            mdf['p1'] = mdf.apply(lambda r: (15 if r['score_t1'] > r['score_t2'] else min(int(r['score_t1']), 12)), axis=1)
-            mdf['p2'] = mdf.apply(lambda r: (15 if r['score_t2'] > r['score_t1'] else min(int(r['score_t2']), 12)), axis=1)
-            mdf['t1_win'] = (mdf['score_t1'] > mdf['score_t2']).astype(int)
-            mdf['t2_win'] = (mdf['score_t2'] > mdf['score_t1']).astype(int)
-
-            # 6) Aggregate to team standings
-            t1_stats = mdf.groupby('team1_id').agg({'t1_win':'sum','t2_win':'sum','p1':'sum','p2':'sum','id':'count'}).rename(columns={'t1_win':'Wins','t2_win':'Losses','p1':'Points','p2':'Points Against','id':'Played'})
-            t2_stats = mdf.groupby('team2_id').agg({'t2_win':'sum','t1_win':'sum','p2':'sum','p1':'sum','id':'count'}).rename(columns={'t2_win':'Wins','t1_win':'Losses','p2':'Points','p1':'Points Against','id':'Played'})
-            combined = pd.concat([t1_stats, t2_stats]).groupby(level=0).sum()
-            combined['PD'] = combined['Points'] - combined['Points Against']
-            combined = combined.reset_index().rename(columns={'index':'team_id'})
-            final = team_df.merge(combined, left_on='id', right_on='team_id', how='left').fillna(0)
-            final[['Wins','Losses','Points','Points Against','Played','PD']] = final[['Wins','Losses','Points','Points Against','Played','PD']].astype(int)
-            final = final.sort_values(['Points','PD'], ascending=[False, False])
-
-            # 7) Format message
-            msg = f"🏆 **Group {group.upper()} Standings**\n"
-            msg += "```\nRank  Team                         P  W  L  Pts  PD\n"
-            for i, row in enumerate(final.itertuples(), start=1):
-                name = row.name
-                msg += f"{i:>2}    {name[:26]:<26}  {row.Played:>2} {row.Wins:>2} {row.Losses:>2} {row.Points:>3} {row.PD:>3}\n"
-            msg += "```"
-            await interaction.followup.send(msg)
-            return
-        except Exception as e:
-            await interaction.followup.send(f"❌ Error: {str(e)}")
-            return
-
-    conn = get_db_conn()
+    conn = get_conn()
     if not conn:
         await interaction.followup.send("❌ Error: Database connection failed.")
         return
-    
+
     try:
-        cursor = conn.cursor()
-        # Get team ids and names in group
-        cursor.execute("SELECT id, name FROM teams WHERE UPPER(group_name) = UPPER(%s)", (group,))
-        trows = cursor.fetchall()
-        if not trows:
-            await interaction.followup.send(f"❌ No teams in group `{group}`.")
+        # Optimized SQL Query (from staging/data_access.py)
+        # We need to filter by group here, unlike the app which might show all or filter in pandas
+        # Adding WHERE t.group_name ILIKE %s
+        query = """
+        WITH team_matches AS (
+            SELECT 
+                team1_id as team_id,
+                CASE WHEN COALESCE(mm.team1_rounds, m.score_t1) > COALESCE(mm.team2_rounds, m.score_t2) THEN 1 ELSE 0 END as win,
+                CASE WHEN COALESCE(mm.team1_rounds, m.score_t1) < COALESCE(mm.team2_rounds, m.score_t2) THEN 1 ELSE 0 END as loss,
+                CASE 
+                    WHEN COALESCE(mm.team1_rounds, m.score_t1) > COALESCE(mm.team2_rounds, m.score_t2) THEN 15 
+                    ELSE MIN(COALESCE(mm.team1_rounds, m.score_t1), 12) 
+                END as points,
+                CASE 
+                    WHEN COALESCE(mm.team2_rounds, m.score_t2) > COALESCE(mm.team1_rounds, m.score_t1) THEN 15 
+                    ELSE MIN(COALESCE(mm.team2_rounds, m.score_t2), 12) 
+                END as points_against
+            FROM matches m
+            LEFT JOIN match_maps mm ON m.id = mm.match_id AND mm.map_index = 0
+            WHERE m.status = 'completed' AND m.match_type = 'regular'
+
+            UNION ALL
+
+            SELECT 
+                team2_id as team_id,
+                CASE WHEN COALESCE(mm.team2_rounds, m.score_t2) > COALESCE(mm.team1_rounds, m.score_t1) THEN 1 ELSE 0 END as win,
+                CASE WHEN COALESCE(mm.team2_rounds, m.score_t2) < COALESCE(mm.team1_rounds, m.score_t1) THEN 1 ELSE 0 END as loss,
+                CASE 
+                    WHEN COALESCE(mm.team2_rounds, m.score_t2) > COALESCE(mm.team1_rounds, m.score_t1) THEN 15 
+                    ELSE MIN(COALESCE(mm.team2_rounds, m.score_t2), 12) 
+                END as points,
+                CASE 
+                    WHEN COALESCE(mm.team1_rounds, m.score_t1) > COALESCE(mm.team2_rounds, m.score_t2) THEN 15 
+                    ELSE MIN(COALESCE(mm.team1_rounds, m.score_t1), 12) 
+                END as points_against
+            FROM matches m
+            LEFT JOIN match_maps mm ON m.id = mm.match_id AND mm.map_index = 0
+            WHERE m.status = 'completed' AND m.match_type = 'regular'
+        )
+        SELECT 
+            t.name,
+            COALESCE(COUNT(tm.team_id), 0) as Played,
+            COALESCE(SUM(tm.win), 0) as Wins,
+            COALESCE(SUM(tm.loss), 0) as Losses,
+            COALESCE(SUM(tm.points), 0) as Points,
+            (COALESCE(SUM(tm.points), 0) - COALESCE(SUM(tm.points_against), 0)) as PD
+        FROM teams t
+        LEFT JOIN team_matches tm ON t.id = tm.team_id
+        WHERE t.group_name ILIKE %s
+        GROUP BY t.id
+        ORDER BY Points DESC, PD DESC
+        """
+        
+        df = pd.read_sql_query(query, conn.conn, params=(group,)) # pandas needs raw connection
+        
+        if df.empty:
+            await interaction.followup.send(f"❌ No standings found for group `{group}` or group does not exist.")
             return
-        ids = [r[0] for r in trows]
-        team_map = {r[0]: r[1] for r in trows}
 
-        # Completed matches in this group
-        cursor.execute("SELECT id, team1_id, team2_id FROM matches WHERE status='completed' AND UPPER(group_name) = UPPER(%s)", (group,))
-        mrows = cursor.fetchall()
-        if not mrows:
-            msg = f"🏆 **Group {group.upper()} Teams** (Fallback)\n" + "\n".join([f"- {team_map[i]}" for i in ids])
-            await interaction.followup.send(msg)
-            return
-
-        # Map rounds for these matches
-        mids = tuple([r[0] for r in mrows])
-        cursor.execute("SELECT match_id, map_index, team1_rounds, team2_rounds, winner_id FROM match_maps WHERE match_id IN (%s)" % ",".join(["%s"]*len(mids)), mids)
-        maps = cursor.fetchall()
-        mdf = pd.DataFrame(mrows, columns=['id','team1_id','team2_id'])
-        if maps:
-            mdf2 = pd.DataFrame(maps, columns=['match_id','map_index','team1_rounds','team2_rounds','winner_id'])
-            agg = mdf2.groupby('match_id')[['team1_rounds','team2_rounds']].sum().reset_index().rename(columns={'match_id':'id','team1_rounds':'agg_t1_rounds','team2_rounds':'agg_t2_rounds'})
-            mdf = mdf.merge(agg, on='id', how='left')
-        mdf = mdf.fillna(0)
-
-        # scores and points
-        mdf['score_t1'] = mdf['agg_t1_rounds']
-        mdf['score_t2'] = mdf['agg_t2_rounds']
-        mdf['p1'] = mdf.apply(lambda r: (15 if r['score_t1'] > r['score_t2'] else min(int(r['score_t1']), 12)), axis=1)
-        mdf['p2'] = mdf.apply(lambda r: (15 if r['score_t2'] > r['score_t1'] else min(int(r['score_t2']), 12)), axis=1)
-        mdf['t1_win'] = (mdf['score_t1'] > mdf['score_t2']).astype(int)
-        mdf['t2_win'] = (mdf['score_t2'] > mdf['score_t1']).astype(int)
-
-        import numpy as np
-        t1_stats = mdf.groupby('team1_id').agg({'t1_win':'sum','t2_win':'sum','p1':'sum','p2':'sum','id':'count'}).rename(columns={'t1_win':'Wins','t2_win':'Losses','p1':'Points','p2':'Points Against','id':'Played'})
-        t2_stats = mdf.groupby('team2_id').agg({'t2_win':'sum','t1_win':'sum','p2':'sum','p1':'sum','id':'count'}).rename(columns={'t2_win':'Wins','t1_win':'Losses','p2':'Points','p1':'Points Against','id':'Played'})
-        combined = pd.concat([t1_stats, t2_stats]).groupby(level=0).sum()
-        combined['PD'] = combined['Points'] - combined['Points Against']
-        combined = combined.reset_index().rename(columns={'index':'team_id'})
-        final_rows = []
-        for tid, name in team_map.items():
-            row = combined[combined['team_id'] == tid]
-            if row.empty:
-                final_rows.append({'name': name, 'Played': 0, 'Wins': 0, 'Losses': 0, 'Points': 0, 'PD': 0})
-            else:
-                r = row.iloc[0]
-                final_rows.append({'name': name, 'Played': int(r['Played']), 'Wins': int(r['Wins']), 'Losses': int(r['Losses']), 'Points': int(r['Points']), 'PD': int(r['PD'])})
-        final = pd.DataFrame(final_rows).sort_values(['Points','PD'], ascending=[False, False])
-
-        msg = f"🏆 **Group {group.upper()} Standings** (Fallback)\n"
+        msg = f"🏆 **Group {group.upper()} Standings**\n"
         msg += "```\nRank  Team                         P  W  L  Pts  PD\n"
-        for i, row in enumerate(final.itertuples(), start=1):
-            msg += f"{i:>2}    {row.name[:26]:<26}  {row.Played:>2} {row.Wins:>2} {row.Losses:>2} {row.Points:>3} {row.PD:>3}\n"
+        for i, row in enumerate(df.itertuples(), start=1):
+            name = row.name
+            msg += f"{i:>2}    {name[:26]:<26}  {row.Played:>2} {row.Wins:>2} {row.Losses:>2} {row.Points:>3} {row.PD:>3}\n"
         msg += "```"
         await interaction.followup.send(msg)
+        
     except Exception as e:
         await interaction.followup.send(f"❌ Error: {str(e)}")
     finally:
         conn.close()
 
 @bot.tree.command(name="leaderboard", description="Show top players by ACS")
-@discord.app_commands.describe(min_games="Minimum games to include")
+@discord.app_commands.describe(min_games="Minimum games to include (default 0)")
 async def leaderboard(interaction: discord.Interaction, min_games: int = 0):
     await interaction.response.defer()
-    conn = get_db_conn()
+    conn = get_conn()
     if not conn:
         await interaction.followup.send("❌ DB connection failed.")
         return
     try:
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT p.id, p.name, COALESCE(t.name,'Free Agent') AS team, COUNT(DISTINCT msm.match_id) AS games,
-                   AVG(msm.acs) AS avg_acs, SUM(msm.kills) AS k, SUM(msm.deaths) AS d
-            FROM players p
-            LEFT JOIN match_stats_map msm ON msm.player_id = p.id
-            LEFT JOIN matches m ON m.id = msm.match_id AND m.status='completed'
+        # Optimized Leaderboard Query
+        query = """
+            SELECT p.name,
+                   p.riot_id,
+                   t.tag as team,
+                   COUNT(DISTINCT msm.match_id) as games,
+                   AVG(msm.acs) as avg_acs,
+                   SUM(msm.kills) as total_kills,
+                   SUM(msm.deaths) as total_deaths
+            FROM match_stats_map msm
+            JOIN matches m ON msm.match_id = m.id
+            JOIN players p ON msm.player_id = p.id
             LEFT JOIN teams t ON p.default_team_id = t.id
-            GROUP BY p.id, p.name, t.name
+            WHERE m.status = 'completed'
+            GROUP BY p.id, p.name, p.riot_id, t.tag
             HAVING COUNT(DISTINCT msm.match_id) >= %s
-            ORDER BY avg_acs DESC NULLS LAST
+            ORDER BY avg_acs DESC
             LIMIT 10
-        """, (max(min_games,0),))
-        rows = cur.fetchall()
+        """
+        
+        cursor = conn.cursor()
+        cursor.execute(query, (min_games,))
+        rows = cursor.fetchall()
+        
         if not rows:
-            await interaction.followup.send("No data.")
+            await interaction.followup.send("No data found.")
             return
-        embed = discord.Embed(title="🏆 Leaderboard (ACS)", color=discord.Color.blue())
-        rank = 1
-        for pid, name, team, games, avg_acs, k, d in rows:
-            kd = (float(k or 0) / max(float(d or 0),1.0))
-            embed.add_field(name=f"#{rank} {name}", value=f"Team: `{team}` | Games: `{int(games or 0)}` | ACS: `{round(float(avg_acs or 0),1)}` | KD: `{round(kd,2)}`", inline=False)
-            rank += 1
-        await interaction.followup.send(embed=embed)
-    except Exception as e:
-        await interaction.followup.send(f"❌ Error: {str(e)}")
-    finally:
-        conn.close()
 
-@bot.tree.command(name="team_info", description="Show team performance by map")
-@discord.app_commands.describe(team="Team name")
-async def team_info(interaction: discord.Interaction, team: str):
-    await interaction.response.defer()
-    conn = get_db_conn()
-    if not conn:
-        await interaction.followup.send("❌ DB connection failed.")
-        return
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT id, name FROM teams WHERE LOWER(name)=LOWER(%s)", (team,))
-        trow = cur.fetchone()
-        if not trow:
-            await interaction.followup.send("Team not found.")
-            return
-        tid = trow[0]
-        cur.execute("""
-            SELECT mm.map_name,
-                   SUM(CASE WHEN m.winner_id=%s THEN 1 ELSE 0 END) AS wins,
-                   COUNT(*) AS total
-            FROM matches m
-            JOIN match_maps mm ON mm.match_id = m.id
-            WHERE (m.team1_id=%s OR m.team2_id=%s) AND m.status='completed' AND mm.map_name IS NOT NULL
-            GROUP BY mm.map_name
-            ORDER BY total DESC
-        """, (tid, tid, tid))
-        rows = cur.fetchall()
-        total_matches = sum(r[2] for r in rows) if rows else 0
-        total_wins = sum(r[1] for r in rows) if rows else 0
-        wr = (total_wins / max(total_matches,1)) * 100.0
-        embed = discord.Embed(title=f"📊 {trow[1]} Info", color=discord.Color.purple())
-        embed.add_field(name="Overall", value=f"Matches: `{total_matches}` | Wins: `{total_wins}` | Winrate: `{round(wr,1)}%`", inline=False)
-        for map_name, wins, total in rows[:10]:
-            mw = (wins / max(total,1)) * 100.0
-            embed.add_field(name=str(map_name), value=f"{wins}/{total} wins • {round(mw,1)}%", inline=True)
+        embed = discord.Embed(title="🏆 Leaderboard (ACS)", color=discord.Color.blue())
+        for i, (name, riot_id, team, games, avg_acs, k, d) in enumerate(rows, start=1):
+            d_val = d if d and d > 0 else 1
+            kd = k / d_val if k else 0
+            tag = f" ({riot_id})" if riot_id else ""
+            embed.add_field(
+                name=f"#{i} {name}{tag}", 
+                value=f"Team: `{team or 'FA'}` | Games: `{games}` | ACS: `{round(avg_acs, 1)}` | KD: `{round(kd, 2)}`", 
+                inline=False
+            )
         await interaction.followup.send(embed=embed)
     except Exception as e:
         await interaction.followup.send(f"❌ Error: {str(e)}")
@@ -532,38 +408,7 @@ async def team_info(interaction: discord.Interaction, team: str):
 async def matches(interaction: discord.Interaction):
     await interaction.response.defer()
     
-    if supabase:
-        try:
-            # Query matches with team names using SDK
-            # Note: Supabase SDK can do joins if foreign keys are defined, 
-            # but for simplicity we'll fetch matches and teams and join in Python 
-            # or use a smarter select if the schema supports it.
-            res = supabase.table("matches") \
-                .select("week, status, team1:teams!team1_id(name), team2:teams!team2_id(name)") \
-                .neq("status", "completed") \
-                .order("week") \
-                .limit(5) \
-                .execute()
-            
-            if not res.data:
-                await interaction.followup.send("📅 No upcoming matches.")
-                return
-
-            embed = discord.Embed(title="📅 Upcoming Matches", color=discord.Color.blue())
-            for m in res.data:
-                t1 = m['team1']['name']
-                t2 = m['team2']['name']
-                embed.add_field(
-                    name=f"Week {m['week']}", 
-                    value=f"**{t1}** vs **{t2}**\nStatus: `{m['status']}`", 
-                    inline=False
-                )
-            await interaction.followup.send(embed=embed)
-            return
-        except Exception as e:
-            print(f"Supabase SDK Error: {e}")
-
-    conn = get_db_conn()
+    conn = get_conn()
     if not conn:
         await interaction.followup.send("❌ Error: Database connection failed.")
         return
@@ -571,7 +416,7 @@ async def matches(interaction: discord.Interaction):
     try:
         cursor = conn.cursor()
         query = """
-            SELECT m.week, t1.name, t2.name, m.status
+            SELECT m.week, t1.name, t2.name, m.status, m.match_type
             FROM matches m
             JOIN teams t1 ON m.team1_id = t1.id
             JOIN teams t2 ON m.team2_id = t2.id
@@ -586,179 +431,175 @@ async def matches(interaction: discord.Interaction):
             await interaction.followup.send("📅 No upcoming matches.")
             return
             
-        embed = discord.Embed(title="📅 Upcoming Matches (Fallback)", color=discord.Color.blue())
-        for week, t1, t2, status in results:
-            embed.add_field(name=f"Week {week}", value=f"**{t1}** vs **{t2}**\nStatus: `{status}`", inline=False)
+        embed = discord.Embed(title="📅 Upcoming Matches", color=discord.Color.blue())
+        for week, t1, t2, status, mtype in results:
+            embed.add_field(name=f"Week {week} ({mtype})", value=f"**{t1}** vs **{t2}**\nStatus: `{status}`", inline=False)
         await interaction.followup.send(embed=embed)
     except Exception as e:
         await interaction.followup.send(f"❌ Error: {str(e)}")
     finally:
         conn.close()
 
-@bot.tree.command(name="player_info", description="Look up a player's profile with performance stats")
+@bot.tree.command(name="player_info", description="Look up a player's stats")
 @discord.app_commands.describe(name="Player name or Riot ID")
 async def player_info(interaction: discord.Interaction, name: str):
     await interaction.response.defer()
     
-    if supabase:
-        try:
-            res = supabase.table("players") \
-                .select("id,name,riot_id,rank, team:teams!default_team_id(name)") \
-                .or_(f"name.ilike.{name},riot_id.ilike.{name}") \
-                .limit(1) \
-                .execute()
-            if res.data:
-                p = res.data[0]
-                pid = p.get('id')
-                team_name = p.get('team', {}).get('name') if p.get('team') else 'Free Agent'
-                games = 0; avg_acs = 0.0; kd = 0.0; top_agent = 'N/A'
-                agents = []
-                if pid:
-                    rs = supabase.table("match_stats_map").select("acs,kills,deaths,assists,agent,match_id").eq("player_id", pid).execute()
-                    if rs.data:
-                        sdf = pd.DataFrame(rs.data)
-                        if not sdf.empty:
-                            games = sdf['match_id'].nunique()
-                            avg_acs = float(sdf['acs'].mean())
-                            total_k = int(sdf['kills'].sum()); total_d = int(sdf['deaths'].sum())
-                            kd = (total_k / (total_d if total_d != 0 else 1)) if total_k or total_d else 0.0
-                            if 'agent' in sdf.columns:
-                                ag = sdf.groupby('agent').agg(maps=('match_id','nunique'), avg_acs=('acs','mean')).reset_index()
-                                ag = ag.sort_values(['maps','avg_acs'], ascending=[False, False])
-                                agents = ag.head(3).values.tolist()
-                                if not ag.empty:
-                                    top_agent = str(ag.iloc[0]['agent'])
-                embed = discord.Embed(title=f"👤 Player: {p['name']}", color=discord.Color.green())
-                embed.add_field(name="Riot ID", value=f"`{p.get('riot_id') or 'N/A'}`", inline=True)
-                embed.add_field(name="Rank", value=f"`{p.get('rank') or 'Unranked'}`", inline=True)
-                embed.add_field(name="Team", value=f"`{team_name}`", inline=True)
-                embed.add_field(name="Games", value=f"`{games}`", inline=True)
-                embed.add_field(name="Avg ACS", value=f"`{round(avg_acs,1)}`", inline=True)
-                embed.add_field(name="KD Ratio", value=f"`{round(kd,2)}`", inline=True)
-                if top_agent and top_agent != 'N/A':
-                    try:
-                        ta_row = [r for r in agents if r[0] == top_agent]
-                        maps_played = int(ta_row[0][1]) if ta_row else 0
-                        ta_acs = float(ta_row[0][2]) if ta_row else 0.0
-                    except Exception:
-                        maps_played = 0; ta_acs = 0.0
-                    embed.add_field(name="Top Agent", value=f"`{top_agent}` — maps: `{maps_played}`, avg ACS: `{round(ta_acs,1)}`", inline=False)
-                if agents:
-                    lines = []
-                    for row in agents:
-                        # row: [agent, maps, avg_acs]
-                        lines.append(f"{row[0]} — maps: {int(row[1])}, ACS: {round(float(row[2]),1)}")
-                    embed.add_field(name="Agent Summary", value="\n".join(lines), inline=False)
-                await interaction.followup.send(embed=embed)
-                return
-        except Exception as e:
-            print(f"Supabase SDK Error: {e}")
-
-    conn = get_db_conn()
+    conn = get_conn()
     if not conn:
         await interaction.followup.send("❌ Error: Database connection failed.")
         return
     
     try:
         cursor = conn.cursor()
+        # Find player
         cursor.execute("""
-            SELECT p.name, p.riot_id, p.rank, t.name as team_name
+            SELECT p.id, p.name, p.riot_id, p.rank, t.name as team_name
             FROM players p
             LEFT JOIN teams t ON p.default_team_id = t.id
-            WHERE LOWER(p.name) = LOWER(%s) OR LOWER(p.riot_id) = LOWER(%s)
+            WHERE p.name ILIKE %s OR p.riot_id ILIKE %s
             LIMIT 1
         """, (name, name))
         row = cursor.fetchone()
+        
         if not row:
             await interaction.followup.send(f"❌ Player `{name}` not found.")
             return
+            
         pid, p_name, r_id, p_rank, t_name = row
-        # Gather stats
-        games = 0; avg_acs = 0.0; kd = 0.0; top_agent = 'N/A'; agents = []
-        try:
-            cursor.execute("""
-                SELECT acs, kills, deaths, assists, agent, match_id
-                FROM match_stats_map
-                WHERE player_id = %s
-            """, (pid,))
-            rows = cursor.fetchall()
-            if rows:
-                sdf = pd.DataFrame(rows, columns=['acs','kills','deaths','assists','agent','match_id'])
-                games = sdf['match_id'].nunique()
-                avg_acs = float(sdf['acs'].mean())
-                total_k = int(sdf['kills'].sum()); total_d = int(sdf['deaths'].sum())
-                kd = (total_k / (total_d if total_d != 0 else 1)) if total_k or total_d else 0.0
-                if 'agent' in sdf.columns:
-                    ag = sdf.groupby('agent').agg(maps=('match_id','nunique'), avg_acs=('acs','mean')).reset_index()
-                    ag = ag.sort_values(['maps','avg_acs'], ascending=[False, False])
-                    agents = ag.head(3).values.tolist()
-                    if not ag.empty:
-                        top_agent = str(ag.iloc[0]['agent'])
-        except Exception:
-            pass
+        
+        # Get Stats
+        cursor.execute("""
+            SELECT msm.acs, msm.kills, msm.deaths, msm.agent, msm.match_id
+            FROM match_stats_map msm
+            JOIN matches m ON msm.match_id = m.id
+            WHERE msm.player_id = %s AND m.status = 'completed'
+        """, (pid,))
+        stats_rows = cursor.fetchall()
+        
+        games = 0; avg_acs = 0.0; kd = 0.0; top_agent = "N/A"
+        
+        if stats_rows:
+            df = pd.DataFrame(stats_rows, columns=['acs', 'kills', 'deaths', 'agent', 'match_id'])
+            games = df['match_id'].nunique()
+            avg_acs = df['acs'].mean()
+            k_sum = df['kills'].sum()
+            d_sum = df['deaths'].sum()
+            kd = k_sum / (d_sum if d_sum > 0 else 1)
+            
+            # Top Agent
+            if 'agent' in df.columns:
+                agent_counts = df['agent'].value_counts()
+                if not agent_counts.empty:
+                    top_agent = agent_counts.index[0]
+
         embed = discord.Embed(title=f"👤 Player: {p_name}", color=discord.Color.green())
         embed.add_field(name="Riot ID", value=f"`{r_id or 'N/A'}`", inline=True)
         embed.add_field(name="Rank", value=f"`{p_rank or 'Unranked'}`", inline=True)
         embed.add_field(name="Team", value=f"`{t_name or 'Free Agent'}`", inline=True)
-        embed.add_field(name="Games", value=f"`{games}`", inline=True)
+        embed.add_field(name="Games Played", value=f"`{games}`", inline=True)
         embed.add_field(name="Avg ACS", value=f"`{round(avg_acs,1)}`", inline=True)
         embed.add_field(name="KD Ratio", value=f"`{round(kd,2)}`", inline=True)
-        if top_agent and top_agent != 'N/A':
-            try:
-                ta_row = [r for r in agents if r[0] == top_agent]
-                maps_played = int(ta_row[0][1]) if ta_row else 0
-                ta_acs = float(ta_row[0][2]) if ta_row else 0.0
-            except Exception:
-                maps_played = 0; ta_acs = 0.0
-            embed.add_field(name="Top Agent", value=f"`{top_agent}` — maps: `{maps_played}`, avg ACS: `{round(ta_acs,1)}`", inline=False)
-        if agents:
-            lines = []
-            for row in agents:
-                lines.append(f"{row[0]} — maps: {int(row[1])}, ACS: {round(float(row[2]),1)}")
-            embed.add_field(name="Agent Summary", value="\n".join(lines), inline=False)
+        embed.add_field(name="Main Agent", value=f"`{top_agent}`", inline=True)
+        
         await interaction.followup.send(embed=embed)
+        
     except Exception as e:
         await interaction.followup.send(f"❌ Error: {str(e)}")
     finally:
         conn.close()
 
-@bot.event
-async def on_ready():
-    print(f"Logged in as {bot.user}")
-    conn = get_db_conn()
+# --- CUSTOM REPLIES & REPORTING ---
+
+@bot.tree.command(name="setreply", description="Set a custom reply for a user (Admin Only)")
+@discord.app_commands.describe(user_id="Discord User ID", message="Reply Message")
+async def setreply(interaction: discord.Interaction, user_id: str, message: str):
+    if not is_admin_or_captain(interaction):
+        await interaction.response.send_message("❌ Permission denied.", ephemeral=True)
+        return
+        
+    conn = get_conn()
     if conn:
         try:
-            UnifiedDBWrapper(conn).execute("CREATE TABLE IF NOT EXISTS bot_replies (id SERIAL PRIMARY KEY, user_id TEXT UNIQUE, reply TEXT)")
+            # Create table if not exists
+            conn.execute("CREATE TABLE IF NOT EXISTS bot_replies (id SERIAL PRIMARY KEY, user_id TEXT UNIQUE, reply TEXT)")
             conn.commit()
-        except Exception:
-            pass
+            
+            # Upsert
+            curr = conn.cursor()
+            curr.execute("""
+                INSERT INTO bot_replies (user_id, reply) VALUES (%s, %s)
+                ON CONFLICT (user_id) DO UPDATE SET reply = EXCLUDED.reply
+            """, (user_id, message))
+            conn.commit()
+            await interaction.response.send_message(f"✅ Reply set for user `{user_id}`.")
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
         finally:
             conn.close()
+    else:
+        await interaction.response.send_message("❌ DB Connection failed.", ephemeral=True)
 
+@bot.tree.command(name="delreply", description="Delete a custom reply (Admin Only)")
+async def delreply(interaction: discord.Interaction, user_id: str):
+    if not is_admin_or_captain(interaction):
+        await interaction.response.send_message("❌ Permission denied.", ephemeral=True)
+        return
+
+    conn = get_conn()
+    if conn:
+        try:
+            conn.execute("DELETE FROM bot_replies WHERE user_id = %s", (user_id,))
+            conn.commit()
+            await interaction.response.send_message(f"✅ Reply removed for user `{user_id}`.")
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
+        finally:
+            conn.close()
+    else:
+        await interaction.response.send_message("❌ DB Connection failed.", ephemeral=True)
+
+# Define on_message to handle custom replies and reports
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
         return
-    if bot.user in message.mentions or isinstance(message.channel, discord.DMChannel):
-        conn = get_db_conn()
+
+    # Check if bot is mentioned
+    if bot.user in message.mentions or (message.reference and message.reference.resolved and message.reference.resolved.author == bot.user):
+        conn = get_conn()
+        reply_sent = False
         if conn:
             try:
                 cur = conn.cursor()
+                # Check for custom reply
                 cur.execute("SELECT reply FROM bot_replies WHERE user_id=%s", (str(message.author.id),))
                 row = cur.fetchone()
+                
                 if row and row[0]:
                     await message.channel.send(row[0])
-            except Exception:
-                pass
+                    reply_sent = True
+                    
+                    # Report to Owner
+                    if OWNER_ID:
+                        try:
+                            owner = await bot.fetch_user(OWNER_ID)
+                            if owner:
+                                await owner.send(f"🔔 **Custom Reply Triggered!**\nUser: {message.author.name} (`{message.author.id}`)\nChannel: {message.channel.name} (`{message.channel.id}`)\nMessage: {message.content}\nBot Reply: {row[0]}")
+                        except Exception as e:
+                            print(f"Failed to report to owner: {e}")
+
+            except Exception as e:
+                print(f"Error in custom reply logic: {e}")
             finally:
                 conn.close()
+
+    # Process commands (if any exist as prefix commands, though we use slash mostly)
     await bot.process_commands(message)
 
+# Run Bot
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
-        print("Error: DISCORD_TOKEN not set")
+        print("Error: DISCORD_TOKEN not set in .env")
     else:
-        try:
-            bot.run(DISCORD_TOKEN)
-        except Exception as e:
-            print(f"Error running bot: {e}")
+        bot.run(DISCORD_TOKEN)
