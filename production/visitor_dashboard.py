@@ -54,12 +54,11 @@ def init_pending_tables(conn=None):
         )
     """)
     
-    conn.execute(f"""
+        conn.execute(f"""
         CREATE TABLE IF NOT EXISTS pending_players (
             id {pk_def},
             riot_id TEXT,
             rank TEXT,
-            discord_handle TEXT,
             submitted_by TEXT,
             timestamp {timestamp_def}
         )
@@ -4069,7 +4068,6 @@ elif page == "Admin Panel":
         st.subheader("🤖 Bot Pending Requests")
         
         init_pending_tables() # Ensure tables exist
-        init_player_discord_column() # Ensure players have discord_handle
         pm_df = pd.DataFrame()
         pp_df = pd.DataFrame()
         try:
@@ -4688,7 +4686,7 @@ elif page == "Admin Panel":
                                     can_add = False
                                     
                             if can_add:
-                                conn_add.execute("INSERT INTO players (name, riot_id, rank, discord_handle, default_team_id) VALUES (%s, %s, %s, %s, %s)", (nm_clean, rid_clean, rk_new, dh_new, dtid_new))
+                                conn_add.execute("INSERT INTO players (name, riot_id, rank, default_team_id) VALUES (%s, %s, %s, %s)", (nm_clean, rid_clean, rk_new, dtid_new))
                                 
                                 if 'pending_player_db_id' in st.session_state:
                                     try:
@@ -4881,15 +4879,14 @@ elif page == "Admin Panel":
                 fdf['name'].str.lower().fillna("").str.contains(s) | 
                 fdf['riot_id'].str.lower().fillna("").str.contains(s)
             ]
-        edited = st.data_editor(
+            edited = st.data_editor(
             fdf,
             num_rows=("dynamic" if user_role in ['admin', 'dev'] else "fixed"),
             use_container_width=True,
             column_config={
                 "id": st.column_config.NumberColumn("ID", disabled=True),
                 "team": st.column_config.SelectboxColumn("Team", options=[""] + team_names, required=False),
-                "rank": st.column_config.SelectboxColumn("Rank", options=rvals, required=False),
-                "discord_handle": st.column_config.TextColumn("Discord Handle")
+                    "rank": st.column_config.SelectboxColumn("Rank", options=rvals, required=False)
             },
             key="player_editor_main"
         )
@@ -4961,9 +4958,7 @@ elif page == "Admin Panel":
                             rk = getattr(row, 'rank', "Unranked") or "Unranked"
                             tmn = getattr(row, 'team', None)
                             dtid = team_map.get(tmn) if pd.notna(tmn) else None
-                            dh = getattr(row, 'discord_handle', "")
-                            
-                            payload = {"name": nm, "riot_id": rid, "rank": rk, "discord_handle": dh, "default_team_id": dtid}
+                            payload = {"name": nm, "riot_id": rid, "rank": rk, "default_team_id": dtid}
                             if pd.isna(pid):
                                 if user_role in ['admin', 'dev']:
                                     supabase.table("players").insert(payload).execute()
@@ -4991,9 +4986,9 @@ elif page == "Admin Panel":
                             rk = getattr(row, 'rank', "Unranked") or "Unranked"; tmn = getattr(row, 'team', None); dtid = team_map.get(tmn) if pd.notna(tmn) else None
                             if pd.isna(pid):
                                 if user_role in ['admin', 'dev']:
-                                    conn_up.execute("INSERT INTO players (name, riot_id, rank, discord_handle, default_team_id) VALUES (%s, %s, %s, %s, %s)", (nm, rid, rk, getattr(row, 'discord_handle', ""), dtid))
+                                    conn_up.execute("INSERT INTO players (name, riot_id, rank, default_team_id) VALUES (%s, %s, %s, %s)", (nm, rid, rk, dtid))
                             else:
-                                conn_up.execute("UPDATE players SET name=%s, riot_id=%s, rank=%s, discord_handle=%s, default_team_id=%s WHERE id=%s", (nm, rid, rk, getattr(row, 'discord_handle', ""), dtid, int(pid)))
+                                conn_up.execute("UPDATE players SET name=%s, riot_id=%s, rank=%s, default_team_id=%s WHERE id=%s", (nm, rid, rk, dtid, int(pid)))
                         conn_up.commit()
                         saved_via_sdk = True
                     except Exception as e:

@@ -47,10 +47,11 @@ if SUPABASE_URL and SUPABASE_KEY:
 
 # Database path (relative or absolute) for SQLite fallback
 DB_PATH = os.getenv("DB_PATH", os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data", "valorant_s23.db"))
+DB_CONNECTION_STRING = os.getenv("DB_CONNECTION_STRING", "postgresql://postgres.tekwoxehaktajyizaacj:Pisllz5MXg34sZE9@aws-1-eu-north-1.pooler.supabase.com:6543/postgres")
 
 # Intents
 intents = discord.Intents.default()
-# intents.message_content = True # Not strictly needed for slash commands, but good to have
+intents.message_content = True
 
 class MyBot(commands.Bot):
     def __init__(self):
@@ -164,40 +165,16 @@ class UnifiedDBWrapper:
         self.conn.close()
 
 def get_db_conn():
-    # If using Supabase SDK, we don't strictly need a 'connection' object
-    # for SELECT/INSERT, but we'll keep the wrapper for SQLite fallback logic
-    # though eventually we want to move away from it.
-    
-    db_url = SUPABASE_DB_URL or os.getenv("SUPABASE_URL") # Try to get any DB string
-    
-    if db_url and "postgresql" in str(db_url):
+    db_url_env = os.getenv("DB_CONNECTION_STRING") or SUPABASE_DB_URL or os.getenv("SUPABASE_URL")
+    if db_url_env and "postgresql" in str(db_url_env):
         import psycopg2
-        conn = None
         try:
-            conn = psycopg2.connect(db_url)
-        except Exception as e:
-            # Fallback to manual parse if URL fails (special characters)
-            try:
-                import re
-                match = re.search(r'postgresql://([^:]+):([^@]+)@([^:/]+):(\d+)/(.+)', str(db_url))
-                if match:
-                    user, pwd, host, port, db = match.groups()
-                    from urllib.parse import unquote
-                    conn = psycopg2.connect(
-                        user=unquote(user),
-                        password=unquote(pwd),
-                        host=unquote(host),
-                        port=port,
-                        database=unquote(db),
-                        connect_timeout=10
-                    )
-            except:
-                pass
-        
-        if conn:
-            return UnifiedDBWrapper(conn)
-            
-    # Always fallback to SQLite if Supabase DB connection fails
+            params = str(db_url_env).strip()
+            if "sslmode" not in params:
+                params += ("?sslmode=require" if "?" not in params else "&sslmode=require")
+            return UnifiedDBWrapper(psycopg2.connect(params))
+        except Exception:
+            pass
     if os.path.exists(DB_PATH):
         return UnifiedDBWrapper(sqlite3.connect(DB_PATH))
     return None
@@ -219,35 +196,6 @@ ALLOWED_RANKS = ["Unranked", "Iron/Bronze", "Silver", "Gold", "Platinum", "Diamo
 async def match(interaction: discord.Interaction, team_a: str, team_b: str, group: str, url: str):
     await interaction.response.defer(thinking=True)
     
-    # Use Supabase SDK if available
-    if supabase:
-        try:
-            # 1. VALIDATION: Check if Teams exist
-            res_a = supabase.table("teams").select("name").ilike("name", team_a).execute()
-            if not res_a.data:
-                await interaction.followup.send(f"❌ Error: **Team A ('{team_a}')** not found. Please check spelling.")
-                return
-            
-            res_b = supabase.table("teams").select("name").ilike("name", team_b).execute()
-            if not res_b.data:
-                await interaction.followup.send(f"❌ Error: **Team B ('{team_b}')** not found. Please check spelling.")
-                return
-
-            # 2. INSERT into Pending Table
-            supabase.table("pending_matches").insert({
-                "team_a": team_a,
-                "team_b": team_b,
-                "group_name": group,
-                "url": url,
-                "submitted_by": str(interaction.user)
-            }).execute()
-            
-            await interaction.followup.send(f"✅ **Match Queued!**\nTeams: `{team_a} vs {team_b}`\nAdmin will verify in the dashboard.")
-            return
-        except Exception as e:
-            print(f"Supabase SDK Error: {e}")
-            # Fallback to legacy SQL below
-
     conn = get_db_conn()
     if not conn:
         await interaction.followup.send("❌ Error: Database connection failed.")
@@ -270,7 +218,7 @@ async def match(interaction: discord.Interaction, team_a: str, team_b: str, grou
             VALUES (%s, %s, %s, %s, %s)
         """, (team_a, team_b, group, url, str(interaction.user)))
         conn.commit()
-        await interaction.followup.send(f"✅ **Match Queued!** (SQLite Fallback)")
+        await interaction.followup.send(f"Group: {group}\n{team_a} vs {team_b}\n\n`{url}`")
     except Exception as e:
         await interaction.followup.send(f"❌ Database Error: {str(e)}")
     finally:
@@ -278,11 +226,10 @@ async def match(interaction: discord.Interaction, team_a: str, team_b: str, grou
 
 @bot.tree.command(name="player", description="Register a new player for approval")
 @discord.app_commands.describe(
-    discord_handle="Player's Discord @ (e.g. @User)", 
     riot_id="Riot ID (Name#TAG)", 
     rank="Current Rank"
 )
-async def player(interaction: discord.Interaction, discord_handle: str, riot_id: str, rank: str):
+async def player(interaction: discord.Interaction, riot_id: str, rank: str):
     await interaction.response.defer()
     
     clean_rank = rank.strip()
@@ -296,7 +243,6 @@ async def player(interaction: discord.Interaction, discord_handle: str, riot_id:
             supabase.table("pending_players").insert({
                 "riot_id": riot_id,
                 "rank": clean_rank,
-                "discord_handle": discord_handle,
                 "submitted_by": str(interaction.user)
             }).execute()
             await interaction.followup.send(f"✅ **Registration Submitted!**\nPlayer: `{riot_id}`\nPending Approval.")
@@ -312,11 +258,11 @@ async def player(interaction: discord.Interaction, discord_handle: str, riot_id:
     try:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO pending_players (riot_id, rank, discord_handle, submitted_by)
-            VALUES (%s, %s, %s, %s)
-        """, (riot_id, clean_rank, discord_handle, str(interaction.user)))
+            INSERT INTO pending_players (riot_id, rank, submitted_by)
+            VALUES (%s, %s, %s)
+        """, (riot_id, clean_rank, str(interaction.user)))
         conn.commit()
-        await interaction.followup.send(f"✅ **Registration Submitted!** (SQLite Fallback)")
+        await interaction.followup.send(f"✅ **Registration Submitted!**")
     except Exception as e:
         await interaction.followup.send(f"❌ Database Error: {str(e)}")
     finally:
@@ -503,6 +449,85 @@ async def standings(interaction: discord.Interaction, group: str):
     finally:
         conn.close()
 
+@bot.tree.command(name="leaderboard", description="Show top players by ACS")
+@discord.app_commands.describe(min_games="Minimum games to include")
+async def leaderboard(interaction: discord.Interaction, min_games: int = 0):
+    await interaction.response.defer()
+    conn = get_db_conn()
+    if not conn:
+        await interaction.followup.send("❌ DB connection failed.")
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT p.id, p.name, COALESCE(t.name,'Free Agent') AS team, COUNT(DISTINCT msm.match_id) AS games,
+                   AVG(msm.acs) AS avg_acs, SUM(msm.kills) AS k, SUM(msm.deaths) AS d
+            FROM players p
+            LEFT JOIN match_stats_map msm ON msm.player_id = p.id
+            LEFT JOIN matches m ON m.id = msm.match_id AND m.status='completed'
+            LEFT JOIN teams t ON p.default_team_id = t.id
+            GROUP BY p.id, p.name, t.name
+            HAVING COUNT(DISTINCT msm.match_id) >= %s
+            ORDER BY avg_acs DESC NULLS LAST
+            LIMIT 10
+        """, (max(min_games,0),))
+        rows = cur.fetchall()
+        if not rows:
+            await interaction.followup.send("No data.")
+            return
+        embed = discord.Embed(title="🏆 Leaderboard (ACS)", color=discord.Color.blue())
+        rank = 1
+        for pid, name, team, games, avg_acs, k, d in rows:
+            kd = (float(k or 0) / max(float(d or 0),1.0))
+            embed.add_field(name=f"#{rank} {name}", value=f"Team: `{team}` | Games: `{int(games or 0)}` | ACS: `{round(float(avg_acs or 0),1)}` | KD: `{round(kd,2)}`", inline=False)
+            rank += 1
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {str(e)}")
+    finally:
+        conn.close()
+
+@bot.tree.command(name="team_info", description="Show team performance by map")
+@discord.app_commands.describe(team="Team name")
+async def team_info(interaction: discord.Interaction, team: str):
+    await interaction.response.defer()
+    conn = get_db_conn()
+    if not conn:
+        await interaction.followup.send("❌ DB connection failed.")
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT id, name FROM teams WHERE LOWER(name)=LOWER(%s)", (team,))
+        trow = cur.fetchone()
+        if not trow:
+            await interaction.followup.send("Team not found.")
+            return
+        tid = trow[0]
+        cur.execute("""
+            SELECT mm.map_name,
+                   SUM(CASE WHEN m.winner_id=%s THEN 1 ELSE 0 END) AS wins,
+                   COUNT(*) AS total
+            FROM matches m
+            JOIN match_maps mm ON mm.match_id = m.id
+            WHERE (m.team1_id=%s OR m.team2_id=%s) AND m.status='completed' AND mm.map_name IS NOT NULL
+            GROUP BY mm.map_name
+            ORDER BY total DESC
+        """, (tid, tid, tid))
+        rows = cur.fetchall()
+        total_matches = sum(r[2] for r in rows) if rows else 0
+        total_wins = sum(r[1] for r in rows) if rows else 0
+        wr = (total_wins / max(total_matches,1)) * 100.0
+        embed = discord.Embed(title=f"📊 {trow[1]} Info", color=discord.Color.purple())
+        embed.add_field(name="Overall", value=f"Matches: `{total_matches}` | Wins: `{total_wins}` | Winrate: `{round(wr,1)}%`", inline=False)
+        for map_name, wins, total in rows[:10]:
+            mw = (wins / max(total,1)) * 100.0
+            embed.add_field(name=str(map_name), value=f"{wins}/{total} wins • {round(mw,1)}%", inline=True)
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {str(e)}")
+    finally:
+        conn.close()
+
 @bot.tree.command(name="matches", description="Show upcoming matches")
 async def matches(interaction: discord.Interaction):
     await interaction.response.defer()
@@ -637,7 +662,7 @@ async def player_info(interaction: discord.Interaction, name: str):
     try:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT p.id, p.name, p.riot_id, p.rank, t.name as team_name
+            SELECT p.name, p.riot_id, p.rank, t.name as team_name
             FROM players p
             LEFT JOIN teams t ON p.default_team_id = t.id
             WHERE LOWER(p.name) = LOWER(%s) OR LOWER(p.riot_id) = LOWER(%s)
@@ -700,6 +725,34 @@ async def player_info(interaction: discord.Interaction, name: str):
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
+    conn = get_db_conn()
+    if conn:
+        try:
+            UnifiedDBWrapper(conn).execute("CREATE TABLE IF NOT EXISTS bot_replies (id SERIAL PRIMARY KEY, user_id TEXT UNIQUE, reply TEXT)")
+            conn.commit()
+        except Exception:
+            pass
+        finally:
+            conn.close()
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot:
+        return
+    if bot.user in message.mentions or isinstance(message.channel, discord.DMChannel):
+        conn = get_db_conn()
+        if conn:
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT reply FROM bot_replies WHERE user_id=%s", (str(message.author.id),))
+                row = cur.fetchone()
+                if row and row[0]:
+                    await message.channel.send(row[0])
+            except Exception:
+                pass
+            finally:
+                conn.close()
+    await bot.process_commands(message)
 
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
