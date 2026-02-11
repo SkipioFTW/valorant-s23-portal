@@ -167,51 +167,54 @@ def fetch_standings_df(group):
     try:
         query = """
         WITH team_matches AS (
-            SELECT 
-                team1_id as team_id,
-                CASE WHEN COALESCE(mm.team1_rounds, m.score_t1) > COALESCE(mm.team2_rounds, m.score_t2) THEN 1 ELSE 0 END as win,
-                CASE WHEN COALESCE(mm.team1_rounds, m.score_t1) < COALESCE(mm.team2_rounds, m.score_t2) THEN 1 ELSE 0 END as loss,
-                CASE 
-                    WHEN COALESCE(mm.team1_rounds, m.score_t1) > COALESCE(mm.team2_rounds, m.score_t2) THEN 15 
-                    ELSE LEAST(COALESCE(mm.team1_rounds, m.score_t1), 12) 
+            -- Team 1 perspective
+            SELECT
+                m.team1_id as team_id,
+                CASE WHEN mm.team1_rounds > mm.team2_rounds THEN 1 ELSE 0 END as win,
+                CASE WHEN mm.team1_rounds < mm.team2_rounds THEN 1 ELSE 0 END as loss,
+                CASE
+                    WHEN mm.team1_rounds > mm.team2_rounds THEN 15
+                    ELSE LEAST(mm.team1_rounds, 12)
                 END as points,
-                CASE 
-                    WHEN COALESCE(mm.team2_rounds, m.score_t2) > COALESCE(mm.team1_rounds, m.score_t1) THEN 15 
-                    ELSE LEAST(COALESCE(mm.team2_rounds, m.score_t2), 12) 
+                CASE
+                    WHEN mm.team2_rounds > mm.team1_rounds THEN 15
+                    ELSE LEAST(mm.team2_rounds, 12)
                 END as points_against
-            FROM matches m
-            LEFT JOIN match_maps mm ON m.id = mm.match_id AND mm.map_index = 0
+            FROM public.matches m
+            INNER JOIN public.match_maps mm ON m.id = mm.match_id AND mm.map_index = 0
             WHERE m.status = 'completed' AND m.match_type = 'regular'
-
+            
             UNION ALL
-
-            SELECT 
-                team2_id as team_id,
-                CASE WHEN COALESCE(mm.team2_rounds, m.score_t2) > COALESCE(mm.team1_rounds, m.score_t1) THEN 1 ELSE 0 END as win,
-                CASE WHEN COALESCE(mm.team2_rounds, m.score_t2) < COALESCE(mm.team1_rounds, m.score_t1) THEN 1 ELSE 0 END as loss,
-                CASE 
-                    WHEN COALESCE(mm.team2_rounds, m.score_t2) > COALESCE(mm.team1_rounds, m.score_t1) THEN 15 
-                    ELSE LEAST(COALESCE(mm.team2_rounds, m.score_t2), 12) 
+            
+            -- Team 2 perspective
+            SELECT
+                m.team2_id as team_id,
+                CASE WHEN mm.team2_rounds > mm.team1_rounds THEN 1 ELSE 0 END as win,
+                CASE WHEN mm.team2_rounds < mm.team1_rounds THEN 1 ELSE 0 END as loss,
+                CASE
+                    WHEN mm.team2_rounds > mm.team1_rounds THEN 15
+                    ELSE LEAST(mm.team2_rounds, 12)
                 END as points,
-                CASE 
-                    WHEN COALESCE(mm.team1_rounds, m.score_t1) > COALESCE(mm.team2_rounds, m.score_t2) THEN 15 
-                    ELSE LEAST(COALESCE(mm.team1_rounds, m.score_t1), 12) 
+                CASE
+                    WHEN mm.team1_rounds > mm.team2_rounds THEN 15
+                    ELSE LEAST(mm.team1_rounds, 12)
                 END as points_against
-            FROM matches m
-            LEFT JOIN match_maps mm ON m.id = mm.match_id AND mm.map_index = 0
+            FROM public.matches m
+            INNER JOIN public.match_maps mm ON m.id = mm.match_id AND mm.map_index = 0
             WHERE m.status = 'completed' AND m.match_type = 'regular'
         )
-        SELECT 
+        SELECT
             t.name,
+            t.tag,
             COALESCE(COUNT(tm.team_id), 0) as Played,
             COALESCE(SUM(tm.win), 0) as Wins,
             COALESCE(SUM(tm.loss), 0) as Losses,
             COALESCE(SUM(tm.points), 0) as Points,
             (COALESCE(SUM(tm.points), 0) - COALESCE(SUM(tm.points_against), 0)) as PD
-        FROM teams t
+        FROM public.teams t
         LEFT JOIN team_matches tm ON t.id = tm.team_id
         WHERE t.group_name ILIKE %s
-        GROUP BY t.id
+        GROUP BY t.id, t.name, t.tag
         ORDER BY Points DESC, PD DESC
         """
         # Use pandas with direct psycopg2 connection object (conn.conn)
@@ -366,7 +369,7 @@ async def standings(interaction: discord.Interaction, group: str):
     msg += "```\nRank  Team                         P  W  L  Pts  PD\n"
     for i, row in enumerate(df.itertuples(), start=1):
         name = row.name
-        msg += f"{i:>2}    {name[:26]:<26}  {row.Played:>2} {row.Wins:>2} {row.Losses:>2} {row.Points:>3} {row.PD:>3}\n"
+        msg += f"{i:>2}    {name[:26]:<26}  {row.played:>2} {row.wins:>2} {row.losses:>2} {row.points:>3} {row.pd:>3}\n"
     msg += "```"
     await interaction.followup.send(msg)
 
