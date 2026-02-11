@@ -254,15 +254,27 @@ def run_connection_diagnostics():
     st.write("**Testing Supabase SDK (HTTP/REST)...**")
     if supabase:
         try:
-            # Try to fetch a single row from teams to test API
-            res = supabase.table("teams").select("count", count="exact").limit(1).execute()
-            st.success(f"Supabase SDK connection SUCCESS! API is reachable.")
+            supabase.table("teams").select("count", count="exact").limit(1).execute()
+            st.success("Supabase SDK connection SUCCESS! API is reachable.")
         except Exception as e:
             st.error(f"Supabase SDK failed: {e}")
     else:
         st.error("Supabase SDK is not initialized.")
         
     st.info("💡 If SDK works but PostgreSQL doesn't, Streamlit Cloud might be blocking port 5432. Try using port 6543 (transaction cooler) in your DB URL.")
+    st.write("**Data Status (Supabase public schema)**")
+    if supabase:
+        try:
+            c_matches = supabase.table("matches").select("count", count="exact").execute()
+            c_maps = supabase.table("match_maps").select("count", count="exact").execute()
+            c_statsmap = supabase.table("match_stats_map").select("count", count="exact").execute()
+            weeks = supabase.table("matches").select("week").execute()
+            st.info(f"Matches: {c_matches.count or 0} • Maps: {c_maps.count or 0} • StatsMap: {c_statsmap.count or 0}")
+            if weeks.data:
+                wkset = sorted(list(set([w.get('week') for w in weeks.data if w.get('week') is not None])))
+                st.caption(f"Weeks present: {wkset}")
+        except Exception as e:
+            st.warning(f"Data status fetch failed: {e}")
 
 def should_use_cache():
     # If no admin is active in the last 5 minutes, we can use cache
@@ -1917,7 +1929,7 @@ def get_week_matches(week):
     if supabase:
         try:
             res = supabase.table("matches")\
-                .select("*, t1:teams!team1_id(name), t2:teams!team2_id(name), match_maps(team1_rounds, team2_rounds)")\
+                .select("*, t1:teams!team1_id(name), t2:teams!team2_id(name)")\
                 .order("id")\
                 .execute()
             if res.data:
@@ -1927,9 +1939,6 @@ def get_week_matches(week):
                     item['t2_name'] = item.get('t2', {}).get('name')
                     item['t1_id'] = item.get('team1_id')
                     item['t2_id'] = item.get('team2_id')
-                    maps = item.get('match_maps', [])
-                    item['team1_rounds'] = maps[0].get('team1_rounds') if maps else None
-                    item['team2_rounds'] = maps[0].get('team2_rounds') if maps else None
                     m_list.append(item)
                 temp_df = pd.DataFrame(m_list)
                 if not temp_df.empty:
@@ -1941,6 +1950,15 @@ def get_week_matches(week):
                     def _not_playoff(x):
                         return str(x).lower() != 'playoff'
                     df = temp_df[temp_df['week'].apply(_eq_week) & temp_df['match_type'].apply(_not_playoff)]
+                    if not df.empty:
+                        ids = df['id'].tolist()
+                        res_maps = supabase.table("match_maps").select("match_id, map_index, team1_rounds, team2_rounds").in_("match_id", ids).execute()
+                        if res_maps.data:
+                            maps_df = pd.DataFrame(res_maps.data)
+                            if not maps_df.empty:
+                                first_maps = maps_df.sort_values('map_index').groupby('match_id').first().reset_index()
+                                first_maps = first_maps.rename(columns={'match_id':'id'})
+                                df = df.merge(first_maps[['id','team1_rounds','team2_rounds']], on='id', how='left')
         except Exception:
             pass
 
@@ -1962,7 +1980,7 @@ def get_playoff_matches():
     if supabase:
         try:
             res = supabase.table("matches")\
-                .select("*, t1:teams!team1_id(name), t2:teams!team2_id(name), match_maps(team1_rounds, team2_rounds)")\
+                .select("*, t1:teams!team1_id(name), t2:teams!team2_id(name)")\
                 .eq("match_type", "playoff")\
                 .order("playoff_round", desc=False)\
                 .order("bracket_pos", desc=False)\
@@ -1974,11 +1992,17 @@ def get_playoff_matches():
                     item['t2_name'] = item.get('t2', {}).get('name')
                     item['t1_id'] = item.get('team1_id')
                     item['t2_id'] = item.get('team2_id')
-                    maps = item.get('match_maps', [])
-                    item['team1_rounds'] = maps[0].get('team1_rounds') if maps else None
-                    item['team2_rounds'] = maps[0].get('team2_rounds') if maps else None
                     m_list.append(item)
                 df = pd.DataFrame(m_list)
+                if not df.empty:
+                    ids = df['id'].tolist()
+                    res_maps = supabase.table("match_maps").select("match_id, map_index, team1_rounds, team2_rounds, winner_id").in_("match_id", ids).execute()
+                    if res_maps.data:
+                        maps_df = pd.DataFrame(res_maps.data)
+                        if not maps_df.empty:
+                            first_maps = maps_df.sort_values('map_index').groupby('match_id').first().reset_index()
+                            first_maps = first_maps.rename(columns={'match_id':'id'})
+                            df = df.merge(first_maps[['id','team1_rounds','team2_rounds']], on='id', how='left')
         except Exception:
             pass
 
