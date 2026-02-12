@@ -69,8 +69,9 @@ class UnifiedCursorWrapper:
             self.cur.close()
 
 class UnifiedDBWrapper:
-    def __init__(self, conn):
+    def __init__(self, conn, close_callback=None):
         self.conn = conn
+        self.close_callback = close_callback
         
     def execute(self, sql, params=None):
         cur = self.cursor()
@@ -83,7 +84,10 @@ class UnifiedDBWrapper:
     def commit(self):
         self.conn.commit()
     def close(self):
-        self.conn.close()
+        if self.close_callback:
+            self.close_callback()
+        else:
+            self.conn.close()
     def rollback(self):
         self.conn.rollback()
     def __getattr__(self, name):
@@ -93,7 +97,7 @@ class UnifiedDBWrapper:
         return self
         
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.conn.close()
+        self.close()
 
 # Global Connection Pool
 pg_pool = None
@@ -125,10 +129,22 @@ def get_conn():
     if pool:
         try:
             conn = pool.getconn()
-            wrapper = UnifiedDBWrapper(conn)
             
-            # Monkey patch close to return to pool instead of closing
-            original_close = wrapper.close
+            # Verify connection
+            if conn.closed:
+                try: pool.putconn(conn, close=True)
+                except: pass
+                conn = pool.getconn()
+            
+            # Ping
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+            except:
+                try: pool.putconn(conn, close=True)
+                except: pass
+                conn = pool.getconn()
+
             def return_to_pool():
                 try:
                     pool.putconn(conn)
@@ -137,9 +153,8 @@ def get_conn():
                         conn.close()
                     except:
                         pass
-            wrapper.close = return_to_pool
-            wrapper.__exit__ = lambda exc_type, exc_val, exc_tb: return_to_pool()
-            return wrapper
+            
+            return UnifiedDBWrapper(conn, close_callback=return_to_pool)
         except Exception as e:
             print(f"Error getting connection from pool: {e}")
     
