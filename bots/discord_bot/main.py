@@ -520,7 +520,7 @@ async def matches(interaction: discord.Interaction):
     finally:
         conn.close()
 
-@bot.tree.command(name="player_info", description="Look up a player's stats")
+@bot.tree.command(name="player_info", description="Look up a player's detailed stats and history")
 @discord.app_commands.describe(name="Player name or Riot ID")
 async def player_info(interaction: discord.Interaction, name: str):
     await interaction.response.defer()
@@ -532,9 +532,9 @@ async def player_info(interaction: discord.Interaction, name: str):
     
     try:
         cursor = conn.cursor()
-        # Find player
+        # 1. Find player and team info
         cursor.execute("""
-            SELECT p.id, p.name, p.riot_id, p.rank, t.name as team_name
+            SELECT p.id, p.name, p.riot_id, p.rank, t.name as team_name, t.tag as team_tag, t.logo_path
             FROM players p
             LEFT JOIN teams t ON p.default_team_id = t.id
             WHERE p.name ILIKE %s OR p.riot_id ILIKE %s
@@ -546,39 +546,195 @@ async def player_info(interaction: discord.Interaction, name: str):
             await interaction.followup.send(f"❌ Player `{name}` not found.")
             return
             
-        pid, p_name, r_id, p_rank, t_name = row
+        pid, p_name, r_id, p_rank, t_name, t_tag, t_logo = row
         
-        # Get Stats
+        # 2. Get Aggregate Stats
         cursor.execute("""
-            SELECT msm.acs, msm.kills, msm.deaths, msm.agent, msm.match_id
+            SELECT 
+                COUNT(*) as total_maps,
+                AVG(msm.acs) as avg_acs,
+                SUM(msm.kills) as total_k,
+                SUM(msm.deaths) as total_d,
+                SUM(msm.assists) as total_a
             FROM match_stats_map msm
             JOIN matches m ON msm.match_id = m.id
             WHERE msm.player_id = %s AND m.status = 'completed'
         """, (pid,))
-        stats_rows = cursor.fetchall()
+        agg = cursor.fetchone()
         
-        games = 0; avg_acs = 0.0; kd = 0.0; top_agent = "N/A"
+        maps_played = agg[0] or 0
+        avg_acs = agg[1] or 0
+        total_k = agg[2] or 0
+        total_d = agg[3] or 0
+        total_a = agg[4] or 0
+        kd = total_k / (total_d if total_d > 0 else 1)
         
-        if stats_rows:
-            df = pd.DataFrame(stats_rows, columns=['acs', 'kills', 'deaths', 'agent', 'match_id'])
-            games = df['match_id'].nunique()
-            avg_acs = df['acs'].mean()
-            k_sum = df['kills'].sum()
-            d_sum = df['deaths'].sum()
-            kd = k_sum / (d_sum if d_sum > 0 else 1)
-            if 'agent' in df.columns:
-                agent_counts = df['agent'].value_counts()
-                top_agent = agent_counts.index[0] if not agent_counts.empty else "N/A"
+        # 3. Get Top 3 Agents
+        cursor.execute("""
+            SELECT agent, COUNT(*) as count, AVG(acs) as agent_acs
+            FROM match_stats_map msm
+            JOIN matches m ON msm.match_id = m.id
+            WHERE msm.player_id = %s AND m.status = 'completed' AND agent IS NOT NULL
+            GROUP BY agent
+            ORDER BY count DESC, agent_acs DESC
+            LIMIT 3
+        """, (pid,))
+        agents = cursor.fetchall()
+        
+        # 4. Get Recent 3 Matches
+        cursor.execute("""
+            SELECT m.id, m.week, t1.tag, t2.tag, msm.acs, msm.kills, msm.deaths, msm.assists, msm.agent
+            FROM match_stats_map msm
+            JOIN matches m ON msm.match_id = m.id
+            JOIN teams t1 ON m.team1_id = t1.id
+            JOIN teams t2 ON m.team2_id = t2.id
+            WHERE msm.player_id = %s AND m.status = 'completed'
+            ORDER BY m.id DESC
+            LIMIT 3
+        """, (pid,))
+        history = cursor.fetchall()
 
-        embed = discord.Embed(title=f"👤 Player: {p_name}", color=discord.Color.green())
+        # Build Embed
+        embed = discord.Embed(title=f"👤 {p_name}", color=discord.Color.green())
+        if t_name:
+            embed.description = f"**Team:** {t_name} [{t_tag}]"
+        else:
+            embed.description = "*Free Agent*"
+
+        # Header Info
         embed.add_field(name="Riot ID", value=f"`{r_id or 'N/A'}`", inline=True)
         embed.add_field(name="Rank", value=f"`{p_rank or 'Unranked'}`", inline=True)
-        embed.add_field(name="Team", value=f"`{t_name or 'Free Agent'}`", inline=True)
-        embed.add_field(name="Games", value=f"`{games}`", inline=True)
-        embed.add_field(name="ACS", value=f"`{round(avg_acs,1)}`", inline=True)
-        embed.add_field(name="KD", value=f"`{round(kd,2)}`", inline=True)
-        embed.add_field(name="Agent", value=f"`{top_agent}`", inline=True)
+        embed.add_field(name="Maps", value=f"`{maps_played}`", inline=True)
+
+        # Main Stats
+        stats_val = (
+            f"**AVG ACS:** `{round(avg_acs, 1)}`\n"
+            f"**K/D Ratio:** `{round(kd, 2)}`\n"
+            f"**Assists:** `{total_a}`"
+        )
+        embed.add_field(name="📊 Lifetime Stats", value=stats_val, inline=False)
+
+        # Agent Pool
+        if agents:
+            agent_list = []
+            for a_name, a_count, a_acs in agents:
+                agent_list.append(f"• **{a_name}**: {a_count} maps ({round(a_acs)} ACS)")
+            embed.add_field(name="🎭 Top Agents", value="\n".join(agent_list), inline=True)
         
+        # Recent History
+        if history:
+            hist_list = []
+            for mid, week, tag1, tag2, h_acs, h_k, h_d, h_a, h_agent in history:
+                hist_list.append(f"W{week}: `{tag1}` vs `{tag2}` | **{h_acs}** ACS as {h_agent} ({h_k}/{h_d}/{h_a})")
+            embed.add_field(name="🎮 Recent Matches", value="\n".join(hist_list), inline=False)
+
+        await interaction.followup.send(embed=embed)
+        
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        conn.close()
+
+@bot.tree.command(name="team_info", description="Look up a team's roster, map stats, and history")
+@discord.app_commands.describe(name="Team name or Tag")
+async def team_info(interaction: discord.Interaction, name: str):
+    await interaction.response.defer()
+    
+    conn = get_conn()
+    if not conn:
+        await interaction.followup.send("❌ DB Error.")
+        return
+    
+    try:
+        cursor = conn.cursor()
+        # 1. Find team
+        cursor.execute("""
+            SELECT id, name, tag, group_name, logo_path
+            FROM teams
+            WHERE name ILIKE %s OR tag ILIKE %s
+            LIMIT 1
+        """, (name, name))
+        row = cursor.fetchone()
+        
+        if not row:
+            await interaction.followup.send(f"❌ Team `{name}` not found.")
+            return
+            
+        tid, t_name, t_tag, t_group, t_logo = row
+        
+        # 2. Get Roster
+        cursor.execute("""
+            SELECT name, riot_id, rank
+            FROM players
+            WHERE default_team_id = %s
+            ORDER BY name ASC
+        """, (tid,))
+        roster = cursor.fetchall()
+        
+        # 3. Get Map Winrates
+        cursor.execute("""
+            SELECT map_name, 
+                   COUNT(*) as played,
+                   SUM(CASE WHEN winner_id = %s THEN 1 ELSE 0 END) as wins
+            FROM match_maps
+            WHERE (match_id IN (SELECT id FROM matches WHERE team1_id = %s OR team2_id = %s))
+              AND (winner_id IS NOT NULL)
+            GROUP BY map_name
+            ORDER BY played DESC
+        """, (tid, tid, tid))
+        maps = cursor.fetchall()
+        
+        # 4. Get Team Avg ACS
+        cursor.execute("""
+            SELECT AVG(acs)
+            FROM match_stats_map
+            WHERE team_id = %s
+        """, (tid,))
+        avg_acs = cursor.fetchone()[0] or 0
+        
+        # 5. Get Recent 3 Match Results
+        cursor.execute("""
+            SELECT m.id, m.week, t1.tag, t2.tag, m.score_t1, m.score_t2, m.winner_id
+            FROM matches m
+            JOIN teams t1 ON m.team1_id = t1.id
+            JOIN teams t2 ON m.team2_id = t2.id
+            WHERE (m.team1_id = %s OR m.team2_id = %s) AND m.status = 'completed'
+            ORDER BY m.id DESC
+            LIMIT 3
+        """, (tid, tid))
+        history = cursor.fetchall()
+
+        # Build Embed
+        embed = discord.Embed(title=f"🛡️ Team: {t_name}", color=discord.Color.blue())
+        embed.description = f"**Tag:** `{t_tag}` | **Group:** `{t_group}`"
+
+        # Roster
+        if roster:
+            roster_list = [f"• {pname} (`{rid or '?'}`)" for pname, rid, prank in roster]
+            embed.add_field(name="👥 Roster", value="\n".join(roster_list), inline=False)
+        else:
+            embed.add_field(name="👥 Roster", value="*No players found*", inline=False)
+
+        # Map Stats
+        if maps:
+            map_list = []
+            for mname, mplayed, mwins in maps:
+                wr = (mwins / mplayed) * 100
+                map_list.append(f"• **{mname}**: {round(wr)}% ({mwins}-{mplayed - mwins})")
+            embed.add_field(name="🗺️ Map Records", value="\n".join(map_list), inline=True)
+        
+        embed.add_field(name="📊 Team Avg ACS", value=f"`{round(avg_acs)}`", inline=True)
+
+        # Recent History
+        if history:
+            hist_list = []
+            for mid, week, tag1, tag2, s1, s2, wid in history:
+                result = "W" if wid == tid else ("L" if wid is not None else "D")
+                hist_list.append(f"W{week}: `{tag1}` {s1}-{s2} `{tag2}` (**{result}**)")
+            embed.add_field(name="🏁 Recent Results", value="\n".join(hist_list), inline=False)
+
         await interaction.followup.send(embed=embed)
         
     except Exception as e:
