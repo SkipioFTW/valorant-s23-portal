@@ -657,7 +657,8 @@ def ensure_base_schema(conn=None):
         map_name TEXT,
         team1_rounds INTEGER,
         team2_rounds INTEGER,
-        winner_id INTEGER
+        winner_id INTEGER,
+        UNIQUE(match_id, map_index)
     )''')
     c.execute(f'''CREATE TABLE IF NOT EXISTS match_stats (
         id {pk_def},
@@ -4643,79 +4644,47 @@ elif page == "Admin Panel":
                             # 1. Determine Winner ID
                             wid = t1_id_val if winner_input == m['t1_name'] else (t2_id_val if winner_input == m['t2_name'] else None)
                             
-                            saved_via_sdk = False
-                            # Try Supabase SDK First
-                            if supabase:
-                                try:
-                                    # A. Save Map Info
-                                    map_item = {
-                                        "match_id": int(m['id']),
-                                        "map_index": map_idx,
-                                        "map_name": map_name_input,
-                                        "team1_rounds": int(t1r_input),
-                                        "team2_rounds": int(t2r_input),
-                                        "winner_id": wid,
-                                        "is_forfeit": int(is_forfeit_input)
-                                    }
-                                    supabase.table("match_maps").upsert(map_item, on_conflict="match_id, map_index").execute()
+                            # Use UnifiedDBWrapper for maximum robustness and consistent DELETE+INSERT pattern
+                            conn_s = get_conn()
+                            try:
+                                # A. Save Map Info
+                                conn_s.execute("DELETE FROM match_maps WHERE match_id=%s AND map_index=%s", (int(m['id']), map_idx))
+                                conn_s.execute("""
+                                    INSERT INTO match_maps (match_id, map_index, map_name, team1_rounds, team2_rounds, winner_id, is_forfeit)
+                                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                                """, (int(m['id']), map_idx, map_name_input, int(t1r_input), int(t2r_input), wid, int(is_forfeit_input)))
 
-                                    # B. Save Stats for both teams
-                                    # First delete existing stats for this map
-                                    supabase.table("match_stats_map")\
-                                        .delete()\
-                                        .eq("match_id", m['id'])\
-                                        .eq("map_index", map_idx)\
-                                        .execute()
-                                    
-                                    # Batch insert new stats
-                                    all_stats = []
-                                    for t_id, t_entries in all_teams_entries:
-                                        for e in t_entries:
-                                            if e['player_id']:
-                                                all_stats.append({
-                                                    "match_id": int(m['id']),
-                                                    "map_index": map_idx,
-                                                    "team_id": t_id,
-                                                    "player_id": e['player_id'],
-                                                    "is_sub": e['is_sub'],
-                                                    "subbed_for_id": e['subbed_for_id'],
-                                                    "agent": e['agent'],
-                                                    "acs": e['acs'],
-                                                    "kills": e['kills'],
-                                                    "deaths": e['deaths'],
-                                                    "assists": e['assists']
-                                                })
-                                    if all_stats:
-                                        supabase.table("match_stats_map").insert(all_stats).execute()
-                                        
-                                    # C. Recalculate Match Totals
-                                    res_maps = supabase.table("match_maps").select("winner_id, team1_rounds, team2_rounds").eq("match_id", m['id']).execute()
-                                    if res_maps.data:
-                                        maps_df_final = pd.DataFrame(res_maps.data)
-                                        final_s1 = len(maps_df_final[maps_df_final['winner_id'] == t1_id_val])
-                                        final_s2 = len(maps_df_final[maps_df_final['winner_id'] == t2_id_val])
-                                        final_winner = t1_id_val if final_s1 > final_s2 else (t2_id_val if final_s2 > final_s1 else None)
-                                        played_cnt = len(maps_df_final[(maps_df_final['team1_rounds'] + maps_df_final['team2_rounds']) > 0])
-                                        
-                                        supabase.table("matches").update({
-                                            "score_t1": final_s1,
-                                            "score_t2": final_s2,
-                                            "winner_id": final_winner,
-                                            "status": "completed",
-                                            "maps_played": played_cnt
-                                        }).eq("id", m['id']).execute()
-                                        
-                                    # D. Cleanup pending
-                                    if 'pending_match_db_id' in st.session_state:
-                                        try:
-                                            supabase.table("pending_matches").delete().eq("id", st.session_state['pending_match_db_id']).execute()
-                                        except: pass
-                                        
-                                    saved_via_sdk = True
-                                except Exception as e:
-                                    st.warning(f"Supabase SDK save failed, attempting local fallback: {e}")
-
-                            pass
+                                # B. Save Stats for both teams
+                                conn_s.execute("DELETE FROM match_stats_map WHERE match_id=%s AND map_index=%s", (int(m['id']), map_idx))
+                                for t_id, t_entries in all_teams_entries:
+                                    for e in t_entries:
+                                        if e['player_id']:
+                                            conn_s.execute("""
+                                                INSERT INTO match_stats_map (match_id, map_index, team_id, player_id, is_sub, subbed_for_id, agent, acs, kills, deaths, assists)
+                                                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                                            """, (int(m['id']), map_idx, t_id, e['player_id'], e['is_sub'], e['subbed_for_id'], e['agent'], e['acs'], e['kills'], e['deaths'], e['assists']))
+                                
+                                # C. Recalculate Match Totals
+                                maps_df_final = pd.read_sql("SELECT winner_id, team1_rounds, team2_rounds FROM match_maps WHERE match_id=%s", conn_s, params=(int(m['id']),))
+                                final_s1 = len(maps_df_final[maps_df_final['winner_id'] == t1_id_val])
+                                final_s2 = len(maps_df_final[maps_df_final['winner_id'] == t2_id_val])
+                                final_winner = t1_id_val if final_s1 > final_s2 else (t2_id_val if final_s2 > final_s1 else None)
+                                played_cnt = len(maps_df_final[(maps_df_final['team1_rounds'] + maps_df_final['team2_rounds']) > 0])
+                                
+                                conn_s.execute("UPDATE matches SET score_t1=%s, score_t2=%s, winner_id=%s, status='completed', maps_played=%s WHERE id=%s", 
+                                             (final_s1, final_s2, final_winner, played_cnt, int(m['id'])))
+                                
+                                # D. Cleanup pending
+                                if 'pending_match_db_id' in st.session_state:
+                                    conn_s.execute("DELETE FROM pending_matches WHERE id=%s", (st.session_state['pending_match_db_id'],))
+                                
+                                conn_s.commit()
+                            except Exception as ex:
+                                conn_s.rollback()
+                                st.error(f"Save failed: {ex}")
+                                st.stop()
+                            finally:
+                                conn_s.close()
                                     
                             # Cleanup State
                             if 'pending_match_db_id' in st.session_state:

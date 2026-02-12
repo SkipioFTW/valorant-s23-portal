@@ -56,3 +56,5 @@ create_test_admin.py
 /snowflake_setup
 debug_standings.py
 migrate_status.py
+apply_constraint.py
+fix_sequences.py
