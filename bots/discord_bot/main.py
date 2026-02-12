@@ -283,8 +283,38 @@ async def match(interaction: discord.Interaction, team_a: str, team_b: str, grou
 
     try:
         cursor = conn.cursor()
-        # Insert into pending_matches
-        # Using tracker_link as 'url'
+        
+        # 1. VALIDATE TEAMS
+        def _get_team_id(name_or_tag):
+            cursor.execute("SELECT id FROM teams WHERE name ILIKE %s OR tag ILIKE %s LIMIT 1", (name_or_tag, name_or_tag))
+            row = cursor.fetchone()
+            return row[0] if row else None
+            
+        t1_id = _get_team_id(team_a)
+        t2_id = _get_team_id(team_b)
+        
+        if not t1_id:
+            await interaction.followup.send(f"❌ Team `{team_a}` not found in database.")
+            return
+        if not t2_id:
+            await interaction.followup.send(f"❌ Team `{team_b}` not found in database.")
+            return
+            
+        # 2. VALIDATE SCHEDULED MATCH
+        cursor.execute("""
+            SELECT id FROM matches 
+            WHERE status = 'scheduled' 
+            AND group_name ILIKE %s 
+            AND ((team1_id = %s AND team2_id = %s) OR (team1_id = %s AND team2_id = %s))
+            LIMIT 1
+        """, (group, t1_id, t2_id, t2_id, t1_id))
+        match_row = cursor.fetchone()
+        
+        if not match_row:
+            await interaction.followup.send(f"❌ No scheduled match found for `{team_a}` vs `{team_b}` in group `{group}`.")
+            return
+
+        # 3. INSERT INTO PENDING
         cursor.execute("""
             INSERT INTO pending_matches (team_a, team_b, group_name, url, submitted_by, status)
             VALUES (%s, %s, %s, %s, %s, 'new')

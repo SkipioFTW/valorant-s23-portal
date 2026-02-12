@@ -304,30 +304,30 @@ def run_connection_diagnostics():
     st.markdown("### 🔍 Connection Diagnostics")
     
     # 1. Check Secrets
-    db_url = get_secret("SUPABASE_DB_URL")
-    api_url = get_secret("SUPABASE_URL")
-    api_key = get_secret("SUPABASE_KEY")
+    db_url_diag = os.getenv("SUPABASE_DB_URL") or os.getenv("DB_CONNECTION_STRING")
+    api_url_diag = os.getenv("SUPABASE_URL")
+    api_key_diag = os.getenv("SUPABASE_KEY")
     
     cols = st.columns(3)
     with cols[0]:
-        st.write("**SUPABASE_DB_URL**")
-        if db_url:
+        st.write("**DB URL**")
+        if db_url_diag:
             st.success("Found ✅")
-            if not str(db_url).startswith("postgresql"):
+            if not str(db_url_diag).startswith("postgresql"):
                 st.warning("Invalid prefix (should be `postgresql://`)")
         else:
             st.error("MISSING ❌")
             
     with cols[1]:
         st.write("**SUPABASE_URL (API)**")
-        if api_url:
+        if api_url_diag:
             st.success("Found ✅")
         else:
             st.error("MISSING ❌")
             
     with cols[2]:
         st.write("**SUPABASE_KEY**")
-        if api_key:
+        if api_key_diag:
             st.success("Found ✅")
         else:
             st.error("MISSING ❌")
@@ -857,6 +857,8 @@ def bootstrap_schema_once():
     ensure_upgrade_schema()
     init_admin_table()
     init_match_stats_map_table()
+    init_pending_tables() # Moved here
+    init_player_discord_column() # Moved here
     st.session_state['schema_initialized'] = True
 
 bootstrap_schema_once()
@@ -4174,7 +4176,6 @@ elif page == "Admin Panel":
 
         st.subheader("🤖 Bot Pending Requests")
         
-        init_pending_tables() # Ensure tables exist
         pm_df = pd.DataFrame()
         pp_df = pd.DataFrame()
         try:
@@ -4232,6 +4233,7 @@ elif page == "Admin Panel":
                     else:
                         st.warning("Could not find a scheduled match for these teams. Please select manually.")
                     
+                    st.session_state['scroll_to_editor'] = True
                     st.rerun()
 
                 st.markdown("---")
@@ -4311,7 +4313,22 @@ elif page == "Admin Panel":
                         st.rerun()
                     except Exception:
                         st.error("Failed to create admin")
+        st.markdown('<div id="match-editor-anchor"></div>', unsafe_allow_html=True)
         st.subheader("Match Editor")
+        
+        # Auto-scroll helper
+        if st.session_state.get('scroll_to_editor'):
+            import streamlit.components.v1 as components
+            components.html("""
+                <script>
+                    setTimeout(function() {
+                        var el = window.parent.document.getElementById('match-editor-anchor');
+                        if (el) el.scrollIntoView({behavior: 'smooth'});
+                    }, 100);
+                </script>
+            """, height=0)
+            st.session_state['scroll_to_editor'] = False
+
         wk_list = get_match_weeks()
         
         # USE AUTO-SELECTED WEEK IF AVAILABLE
