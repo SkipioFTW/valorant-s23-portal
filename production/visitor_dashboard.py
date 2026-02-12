@@ -1256,7 +1256,7 @@ def fetch_match_from_github(match_id):
         
     # Use API for both public and private repos if token is available
     if token:
-        url = f"https://api.github.com/repos/{owner}/{repo}/contents/assets/matches/match_{match_id}.json%sref={branch}"
+        url = f"https://api.github.com/repos/{owner}/{repo}/contents/assets/matches/match_{match_id}.json?ref={branch}"
         headers = {
             "Authorization": f"Bearer {token}",
             "Accept": "application/vnd.github.raw"
@@ -3779,7 +3779,7 @@ elif page == "Playoffs":
                                 if mid_match: match_id_clean = mid_match.group(1)
                             match_id_clean = re.sub(r'[^a-zA-Z0-9\-]', '', match_id_clean)
                         
-                            json_path = os.path.join("matches", f"match_{match_id_clean}.json")
+                            json_path = os.path.join("assets", "matches", f"match_{match_id_clean}.json")
                             jsdata = None
                             source = ""
                         
@@ -3799,7 +3799,7 @@ elif page == "Playoffs":
                                         source = "GitHub Repository"
                                         # Save locally for next time
                                         try:
-                                            if not os.path.exists("matches"): os.makedirs("matches")
+                                            if not os.path.exists(os.path.join("assets", "matches")): os.makedirs(os.path.join("assets", "matches"))
                                             with open(json_path, 'w', encoding='utf-8') as f:
                                                 json.dump(jsdata, f, indent=4)
                                         except: pass
@@ -4453,7 +4453,7 @@ elif page == "Admin Panel":
                                     if mid_match: match_id_clean = mid_match.group(1)
                                 match_id_clean = re.sub(r'[^a-zA-Z0-9\-]', '', match_id_clean)
                             
-                                json_path = os.path.join("matches", f"match_{match_id_clean}.json")
+                                json_path = os.path.join("assets", "matches", f"match_{match_id_clean}.json")
                                 jsdata = None
                                 source = ""
                             
@@ -4473,7 +4473,7 @@ elif page == "Admin Panel":
                                             source = "GitHub Repository"
                                             # Save locally for next time
                                             try:
-                                                if not os.path.exists("matches"): os.makedirs("matches")
+                                                if not os.path.exists(os.path.join("assets", "matches")): os.makedirs(os.path.join("assets", "matches"))
                                                 with open(json_path, 'w', encoding='utf-8') as f:
                                                     json.dump(jsdata, f, indent=4)
                                             except: pass
