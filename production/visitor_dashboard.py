@@ -790,6 +790,18 @@ def ensure_upgrade_schema(conn=None):
     ensure_column("matches", "bracket_label", "bracket_label TEXT", conn=conn)
     ensure_column("match_maps", "is_forfeit", "is_forfeit INTEGER DEFAULT 0", conn=conn)
     
+    # Notification & Tracking Columns
+    ensure_column("matches", "reported", "reported BOOLEAN DEFAULT FALSE", conn=conn)
+    ensure_column("matches", "channel_id", "channel_id TEXT", conn=conn)
+    ensure_column("matches", "submitter_id", "submitter_id TEXT", conn=conn)
+
+    ensure_column("pending_players", "notified", "notified BOOLEAN DEFAULT FALSE", conn=conn)
+    ensure_column("pending_players", "channel_id", "channel_id TEXT", conn=conn)
+    ensure_column("pending_players", "submitter_id", "submitter_id TEXT", conn=conn)
+
+    ensure_column("pending_matches", "channel_id", "channel_id TEXT", conn=conn)
+    ensure_column("pending_matches", "submitter_id", "submitter_id TEXT", conn=conn)
+    
     is_postgres = not getattr(conn, 'is_sqlite', isinstance(conn, sqlite3.Connection))
     ignore_clause = "ON CONFLICT DO NOTHING" if is_postgres else "OR IGNORE"
     
@@ -3980,7 +3992,7 @@ elif page == "Playoffs":
                             final_winner = t1_id_val if final_s1 > final_s2 else (t2_id_val if final_s2 > final_s1 else None)
                             played_cnt = len(maps_df_final[(maps_df_final['team1_rounds'] + maps_df_final['team2_rounds']) > 0])
                             
-                            conn_s.execute("UPDATE matches SET score_t1=%s, score_t2=%s, winner_id=%s, status='completed', maps_played=%s WHERE id=%s", 
+                            conn_s.execute("UPDATE matches SET score_t1=%s, score_t2=%s, winner_id=%s, status='completed', maps_played=%s, reported=false WHERE id=%s", 
                                          (final_s1, final_s2, final_winner, played_cnt, int(m['id'])))
                             conn_s.commit()
                             clear_caches_safe()
@@ -4671,8 +4683,20 @@ elif page == "Admin Panel":
                                 final_winner = t1_id_val if final_s1 > final_s2 else (t2_id_val if final_s2 > final_s1 else None)
                                 played_cnt = len(maps_df_final[(maps_df_final['team1_rounds'] + maps_df_final['team2_rounds']) > 0])
                                 
-                                conn_s.execute("UPDATE matches SET score_t1=%s, score_t2=%s, winner_id=%s, status='completed', maps_played=%s WHERE id=%s", 
-                                             (final_s1, final_s2, final_winner, played_cnt, int(m['id'])))
+                                # Fetch metadata from pending if available for reporting
+                                channel_id, submitter_id = None, None
+                                if 'pending_match_db_id' in st.session_state:
+                                    meta_df = pd.read_sql("SELECT channel_id, submitter_id FROM pending_matches WHERE id=%s", conn_s, params=(int(st.session_state['pending_match_db_id']),))
+                                    if not meta_df.empty:
+                                        channel_id = meta_df.iloc[0]['channel_id']
+                                        submitter_id = meta_df.iloc[0]['submitter_id']
+
+                                conn_s.execute("""
+                                    UPDATE matches 
+                                    SET score_t1=%s, score_t2=%s, winner_id=%s, status='completed', maps_played=%s, 
+                                        reported=false, channel_id=%s, submitter_id=%s
+                                    WHERE id=%s
+                                """, (final_s1, final_s2, final_winner, played_cnt, channel_id, submitter_id, int(m['id'])))
                                 
                                 # D. Cleanup pending
                                 if 'pending_match_db_id' in st.session_state:
@@ -4761,18 +4785,21 @@ elif page == "Admin Panel":
                                     can_add = False
                                     
                             if can_add:
-                                # Insert via SDK
-                                res_in = supabase.table("players").insert({
                                     "name": nm_clean, 
                                     "riot_id": rid_clean, 
                                     "rank": rk_new, 
                                     "tracker_link": tl_new, 
-                                    "default_team_id": dtid_new
+                                    "default_team_id": dtid_new,
+                                    "discord_handle": nm_clean
                                 }).execute()
                                 if res_in.data:
                                     if 'pending_player_db_id' in st.session_state:
                                         try:
-                                            supabase.table("pending_players").delete().eq("id", st.session_state['pending_player_db_id']).execute()
+                                            # Mark as accepted and not yet notified
+                                            supabase.table("pending_players").update({
+                                                "status": "accepted", 
+                                                "notified": False
+                                            }).eq("id", st.session_state['pending_player_db_id']).execute()
                                         except: pass
                                     saved_via_sdk = True
                                     st.success("Player added (Cloud)")
@@ -4795,11 +4822,13 @@ elif page == "Admin Panel":
                                     can_add = False
                                     
                             if can_add:
-                                conn_add.execute("INSERT INTO players (name, riot_id, rank, tracker_link, default_team_id) VALUES (%s, %s, %s, %s, %s)", (nm_clean, rid_clean, rk_new, tl_new, dtid_new))
+                                conn_add.execute("INSERT INTO players (name, riot_id, rank, tracker_link, default_team_id, discord_handle) VALUES (%s, %s, %s, %s, %s, %s)", 
+                                                 (nm_clean, rid_clean, rk_new, tl_new, dtid_new, nm_clean))
                                 
                                 if 'pending_player_db_id' in st.session_state:
                                     try:
-                                        conn_add.execute("DELETE FROM pending_players WHERE id=%s", (int(st.session_state['pending_player_db_id']),))
+                                        # Mark as accepted and not yet notified
+                                        conn_add.execute("UPDATE pending_players SET status='accepted', notified=false WHERE id=%s", (int(st.session_state['pending_player_db_id']),))
                                     except: pass
                                 
                                 conn_add.commit()
@@ -4811,11 +4840,31 @@ elif page == "Admin Panel":
                         finally:
                             if 'conn_add' in locals(): conn_add.close()
 
-                    if saved_via_sdk:
-                        if 'pending_player_db_id' in st.session_state:
-                            del st.session_state['pending_player_db_id']
-                            del st.session_state['pending_player_request']
+                            clear_caches_safe()
+                            if 'pending_player_db_id' in st.session_state:
+                                del st.session_state['pending_player_db_id']
+                                if 'pending_player_request' in st.session_state: del st.session_state['pending_player_request']
+                            st.success("Successfully processed registration!")
+                            time.sleep(1)
+                            st.rerun()
+
+            # REJECT BUTTON
+            if 'pending_player_db_id' in st.session_state:
+                if st.button("❌ Reject Request", use_container_width=True):
+                    conn_rej = get_conn()
+                    try:
+                        conn_rej.execute("UPDATE pending_players SET status='rejected', notified=false WHERE id=%s", (int(st.session_state['pending_player_db_id']),))
+                        conn_rej.commit()
+                        del st.session_state['pending_player_db_id']
+                        if 'pending_player_request' in st.session_state: del st.session_state['pending_player_request']
+                        clear_caches_safe()
+                        st.warning("Request Rejected.")
+                        time.sleep(1)
                         st.rerun()
+                    except Exception as e:
+                        st.error(f"Error rejecting: {e}")
+                    finally:
+                        conn_rej.close()
             
             if st.button("🔍 Cleanup Duplicate Players", help="Merge players with exact same Riot ID or case-insensitive name"):
                 merged_count = 0

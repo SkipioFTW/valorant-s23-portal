@@ -1,5 +1,4 @@
-import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 import os
 import json
@@ -316,9 +315,9 @@ async def match(interaction: discord.Interaction, team_a: str, team_b: str, grou
 
         # 3. INSERT INTO PENDING
         cursor.execute("""
-            INSERT INTO pending_matches (team_a, team_b, group_name, url, submitted_by, status)
-            VALUES (%s, %s, %s, %s, %s, 'new')
-        """, (team_a, team_b, group, tracker_link, str(interaction.user)))
+            INSERT INTO pending_matches (team_a, team_b, group_name, url, submitted_by, status, channel_id, submitter_id)
+            VALUES (%s, %s, %s, %s, %s, 'new', %s, %s)
+        """, (team_a, team_b, group, tracker_link, str(interaction.user), str(interaction.channel_id), str(interaction.user.id)))
         conn.commit()
         
         # Formatted Reply
@@ -339,9 +338,10 @@ async def match(interaction: discord.Interaction, team_a: str, team_b: str, grou
 @discord.app_commands.describe(
     riot_id="Riot ID (Name#TAG)", 
     rank="Current Rank",
-    tracker_link="Tracker.gg Profile URL"
+    tracker_link="Tracker.gg Profile URL",
+    discord_handle="Discord handle of the player"
 )
-async def player(interaction: discord.Interaction, riot_id: str, rank: str, tracker_link: str):
+async def player(interaction: discord.Interaction, riot_id: str, rank: str, tracker_link: str, discord_handle: str):
     await interaction.response.defer()
     
     conn = get_conn()
@@ -354,14 +354,11 @@ async def player(interaction: discord.Interaction, riot_id: str, rank: str, trac
         cursor = conn.cursor()
         
         # Insert into pending_players
-        # We store submitted_by as usual, and also discord_handle (submitter's name)
-        # tracker_link is stored in the new column
-        discord_name = str(interaction.user.name) # Just the username
-        
+        # Use provided discord_handle and store metadata for notifications
         cursor.execute("""
-            INSERT INTO pending_players (riot_id, rank, tracker_link, submitted_by, status, discord_handle)
-            VALUES (%s, %s, %s, %s, 'new', %s)
-        """, (riot_id, clean_rank, tracker_link, str(interaction.user), discord_name))
+            INSERT INTO pending_players (riot_id, rank, tracker_link, submitted_by, status, discord_handle, channel_id, submitter_id)
+            VALUES (%s, %s, %s, %s, 'new', %s, %s, %s)
+        """, (riot_id, clean_rank, tracker_link, str(interaction.user), discord_handle, str(interaction.channel_id), str(interaction.user.id)))
         conn.commit()
         
         # Formatted Reply
@@ -633,6 +630,122 @@ async def on_message(message: discord.Message):
                 conn.close()
 
     await bot.process_commands(message)
+
+# --- NOTIFICATION ENGINE ---
+
+@tasks.loop(seconds=60)
+async def notification_loop():
+    """
+    Background task to poll for new match results and player registration updates.
+    """
+    conn = get_conn()
+    if not conn: return
+    
+    try:
+        cursor = conn.cursor()
+        
+        # 1. CHECK MATCH REPORTS
+        cursor.execute("""
+            SELECT m.id, m.team1_id, m.team2_id, m.score_t1, m.score_t2, m.winner_id, m.channel_id, 
+                   t1.name as t1_name, t2.name as t2_name
+            FROM matches m
+            JOIN teams t1 ON m.team1_id = t1.id
+            JOIN teams t2 ON m.team2_id = t2.id
+            WHERE m.status = 'completed' AND m.reported = false
+        """)
+        matches_to_report = cursor.fetchall()
+        
+        for m_id, t1_id, t2_id, s1, s2, wid, chan_id, t1_name, t2_name in matches_to_report:
+            channel = None
+            if chan_id:
+                try: channel = bot.get_channel(int(chan_id)) or await bot.fetch_channel(int(chan_id))
+                except: pass
+            
+            if not channel: continue # Skip if no channel
+            
+            # Match Summary Embed
+            winner_name = t1_name if wid == t1_id else (t2_name if wid == t2_id else "Draw")
+            embed = discord.Embed(title=f"🏆 Match Result: {t1_name} vs {t2_name}", color=discord.Color.gold())
+            embed.add_field(name="Score", value=f"**{t1_name} {s1} - {s2} {t2_name}**", inline=False)
+            embed.add_field(name="Winner", value=f"⭐ {winner_name}", inline=True)
+            
+            # Add Map details if available
+            cursor.execute("SELECT map_name, team1_rounds, team2_rounds FROM match_maps WHERE match_id = %s ORDER BY map_index", (m_id,))
+            maps = cursor.fetchall()
+            if maps:
+                map_str = "\n".join([f"• {mn}: {r1}-{r2}" for mn, r1, r2 in maps])
+                embed.add_field(name="Maps", value=map_str, inline=False)
+            
+            await channel.send(embed=embed)
+            
+            # Simplified scoreboard reporting (Top performers)
+            cursor.execute("""
+                SELECT p.name, s.acs, s.kills, s.deaths, s.assists, t.name as team_name
+                FROM match_stats_map s
+                JOIN players p ON s.player_id = p.id
+                JOIN teams t ON s.team_id = t.id
+                WHERE s.match_id = %s
+                ORDER BY s.acs DESC LIMIT 5
+            """, (m_id,))
+            top_players = cursor.fetchall()
+            if top_players:
+                sb_embed = discord.Embed(title="📊 Match Top Performers (ACS)", color=discord.Color.blue())
+                rows = []
+                for name, acs, k, d, a, tname in top_players:
+                    rows.append(f"**{name}** ({tname}): {acs} ACS | {k}/{d}/{a}")
+                sb_embed.description = "\n".join(rows)
+                await channel.send(embed=sb_embed)
+            
+            # Mark as reported
+            cursor.execute("UPDATE matches SET reported = true WHERE id = %s", (m_id,))
+            conn.commit()
+
+        # 2. CHECK PLAYER NOTIFICATIONS
+        cursor.execute("""
+            SELECT id, riot_id, discord_handle, status, channel_id, submitter_id
+            FROM pending_players
+            WHERE status IN ('accepted', 'rejected') AND notified = false
+        """)
+        players_to_notify = cursor.fetchall()
+        
+        for p_id, rid, handle, status, chan_id, sub_id in players_to_notify:
+            # Channel Notification
+            channel = None
+            if chan_id:
+                try: channel = bot.get_channel(int(chan_id)) or await bot.fetch_channel(int(chan_id))
+                except: pass
+            
+            msg = f"✅ Registration for `{rid}` (`{handle}`) has been **approved**!" if status == 'accepted' else f"❌ Registration for `{rid}` (`{handle}`) has been **rejected**."
+            if channel:
+                await channel.send(msg)
+            
+            # DM Submitter
+            if sub_id:
+                try:
+                    user = bot.get_user(int(sub_id)) or await bot.fetch_user(int(sub_id))
+                    if user:
+                        await user.send(f"Hello Captain! {msg}")
+                except: pass
+            
+            # Mark as notified
+            cursor.execute("UPDATE pending_players SET notified = true WHERE id = %s", (p_id,))
+            conn.commit()
+            
+    except Exception as e:
+        print(f"Notification loop error: {e}")
+    finally:
+        conn.close()
+
+@bot.event
+async def on_ready():
+    print(f'Bot is ready. Logged in as {bot.user}')
+    if not notification_loop.is_running():
+        notification_loop.start()
+    try:
+        synced = await bot.tree.sync()
+        print(f"Synced {len(synced)} command(s)")
+    except Exception as e:
+        print(f"Error syncing commands: {e}")
 
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
