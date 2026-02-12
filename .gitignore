@@ -59,3 +59,4 @@ migrate_status.py
 apply_constraint.py
 fix_sequences.py
 apply_notification_schema.py
+bots/discord_bot/info_bot.py
