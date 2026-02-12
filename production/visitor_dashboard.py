@@ -801,6 +801,8 @@ def ensure_upgrade_schema(conn=None):
 
     ensure_column("pending_matches", "channel_id", "channel_id TEXT", conn=conn)
     ensure_column("pending_matches", "submitter_id", "submitter_id TEXT", conn=conn)
+
+    ensure_column("players", "uuid", "uuid TEXT", conn=conn)
     
     is_postgres = not getattr(conn, 'is_sqlite', isinstance(conn, sqlite3.Connection))
     ignore_clause = "ON CONFLICT DO NOTHING" if is_postgres else "OR IGNORE"
@@ -4758,6 +4760,7 @@ elif page == "Admin Panel":
             with st.form("add_player_admin"):
                 nm_new = st.text_input("Name (Discord Handle)", value=def_name, help="Format: @ExampleUser")
                 rid_new = st.text_input("Riot ID", value=def_rid)
+                uuid_new = st.text_input("UUID (Optional)", help="Discord User ID")
                 rk_new = st.selectbox("Rank", rvals, index=rvals.index(def_rk))
                 tl_new = st.text_input("Tracker Link", value=def_tl)
                 tmn_new = st.selectbox("Team", [""] + team_names, index=0)
@@ -4765,6 +4768,7 @@ elif page == "Admin Panel":
                 if add_ok and nm_new:
                     rid_clean = rid_new.strip() if rid_new else ""
                     nm_clean = nm_new.strip()
+                    uuid_clean = uuid_new.strip() if uuid_new else None
                     dtid_new = team_map.get(tmn_new) if tmn_new else None
                     can_add = True
                     
@@ -4789,6 +4793,7 @@ elif page == "Admin Panel":
                                 res_in = supabase.table("players").insert({
                                     "name": nm_clean, 
                                     "riot_id": rid_clean, 
+                                    "uuid": uuid_clean,
                                     "rank": rk_new, 
                                     "tracker_link": tl_new, 
                                     "default_team_id": dtid_new,
@@ -4824,8 +4829,8 @@ elif page == "Admin Panel":
                                     can_add = False
                                     
                             if can_add:
-                                conn_add.execute("INSERT INTO players (name, riot_id, rank, tracker_link, default_team_id, discord_handle) VALUES (%s, %s, %s, %s, %s, %s)", 
-                                                 (nm_clean, rid_clean, rk_new, tl_new, dtid_new, nm_clean))
+                                conn_add.execute("INSERT INTO players (name, riot_id, uuid, rank, tracker_link, default_team_id, discord_handle) VALUES (%s, %s, %s, %s, %s, %s, %s)", 
+                                                 (nm_clean, rid_clean, uuid_clean, rk_new, tl_new, dtid_new, nm_clean))
                                 
                                 if 'pending_player_db_id' in st.session_state:
                                     try:

@@ -460,6 +460,7 @@ async def leaderboard(interaction: discord.Interaction, min_games: int = 0):
         query = """
             SELECT p.name,
                    p.riot_id,
+                   p.uuid,
                    t.tag as team,
                    COUNT(DISTINCT msm.match_id) as games,
                    AVG(msm.acs) as avg_acs,
@@ -470,7 +471,7 @@ async def leaderboard(interaction: discord.Interaction, min_games: int = 0):
             JOIN players p ON msm.player_id = p.id
             LEFT JOIN teams t ON p.default_team_id = t.id
             WHERE m.status = 'completed'
-            GROUP BY p.id, p.name, p.riot_id, t.tag
+            GROUP BY p.id, p.name, p.riot_id, p.uuid, t.tag
             HAVING COUNT(DISTINCT msm.match_id) >= %s
             ORDER BY avg_acs DESC
             LIMIT 10
@@ -484,13 +485,14 @@ async def leaderboard(interaction: discord.Interaction, min_games: int = 0):
             return
 
         embed = discord.Embed(title="🏆 Leaderboard (ACS)", color=discord.Color.blue())
-        for i, (name, riot_id, team, games, avg_acs, k, d) in enumerate(rows, start=1):
+        for i, (name, riot_id, uuid, team, games, avg_acs, k, d) in enumerate(rows, start=1):
             d_val = d if d and d > 0 else 1
             kd = k / d_val if k else 0
             tag = f" ({riot_id})" if riot_id else ""
+            display_name = f"<@{uuid}>" if uuid else f"{name}{tag}"
             embed.add_field(
-                name=f"#{i} {name}{tag}", 
-                value=f"Team: `{team or 'FA'}` | Games: `{games}` | ACS: `{round(avg_acs, 1)}` | KD: `{round(kd, 2)}`", 
+                name=f"#{i} {name}", 
+                value=f"User: {display_name}\nTeam: `{team or 'FA'}` | Games: `{games}` | ACS: `{round(avg_acs, 1)}` | KD: `{round(kd, 2)}`", 
                 inline=False
             )
         await interaction.followup.send(embed=embed)
@@ -536,7 +538,7 @@ async def matches(interaction: discord.Interaction):
         conn.close()
 
 @bot.tree.command(name="player_info", description="Look up a player's detailed stats and history")
-@discord.app_commands.describe(name="Player name or Riot ID")
+@discord.app_commands.describe(name="Player name, Riot ID or @mention")
 async def player_info(interaction: discord.Interaction, name: str):
     await interaction.response.defer()
     
@@ -546,23 +548,37 @@ async def player_info(interaction: discord.Interaction, name: str):
         return
     
     try:
+        # Check if input is a mention <@123...>
+        mention_match = re.match(r"^<@!?(\d+)>$", name.strip())
+
         cursor = conn.cursor()
         # 1. Find player and team info
-        cursor.execute("""
-            SELECT p.id, p.name, p.riot_id, p.rank, t.name as team_name, t.tag as team_tag, t.logo_path
-            FROM players p
-            LEFT JOIN teams t ON p.default_team_id = t.id
-            WHERE p.name ILIKE %s OR p.riot_id ILIKE %s
-            LIMIT 1
-        """, (name, name))
+        if mention_match:
+            uuid = mention_match.group(1)
+            cursor.execute("""
+                SELECT p.id, p.name, p.riot_id, p.rank, p.uuid, t.name as team_name, t.tag as team_tag, t.logo_path
+                FROM players p
+                LEFT JOIN teams t ON p.default_team_id = t.id
+                WHERE p.uuid = %s
+                LIMIT 1
+            """, (uuid,))
+        else:
+            cursor.execute("""
+                SELECT p.id, p.name, p.riot_id, p.rank, p.uuid, t.name as team_name, t.tag as team_tag, t.logo_path
+                FROM players p
+                LEFT JOIN teams t ON p.default_team_id = t.id
+                WHERE p.name ILIKE %s OR p.riot_id ILIKE %s
+                LIMIT 1
+            """, (name, name))
         row = cursor.fetchone()
         
         if not row:
             await interaction.followup.send(f"❌ Player `{name}` not found.")
             return
             
-        pid, p_name, r_id, p_rank, t_name, t_tag, t_logo = row
+        pid, p_name, r_id, p_rank, p_uuid, t_name, t_tag, t_logo = row
         
+        # ... (Stats queries remain same) ...
         # 2. Get Aggregate Stats
         cursor.execute("""
             SELECT 
@@ -611,10 +627,16 @@ async def player_info(interaction: discord.Interaction, name: str):
 
         # Build Embed
         embed = discord.Embed(title=f"👤 {p_name}", color=discord.Color.green())
+        desc = ""
         if t_name:
-            embed.description = f"**Team:** {t_name} [{t_tag}]"
+            desc += f"**Team:** {t_name} [{t_tag}]"
         else:
-            embed.description = "*Free Agent*"
+            desc += "*Free Agent*"
+        
+        if p_uuid:
+            desc += f"\n**User:** <@{p_uuid}>"
+        
+        embed.description = desc
 
         # Header Info
         embed.add_field(name="Riot ID", value=f"`{r_id or 'N/A'}`", inline=True)
@@ -681,13 +703,14 @@ async def team_info(interaction: discord.Interaction, name: str):
         
         # 2. Get Roster
         cursor.execute("""
-            SELECT name, riot_id, rank
+            SELECT name, riot_id, rank, uuid
             FROM players
             WHERE default_team_id = %s
             ORDER BY name ASC
         """, (tid,))
         roster = cursor.fetchall()
         
+        # ... (Map stats and history queries remain same) ...
         # 3. Get Map Winrates
         cursor.execute("""
             SELECT map_name, 
@@ -727,7 +750,10 @@ async def team_info(interaction: discord.Interaction, name: str):
 
         # Roster
         if roster:
-            roster_list = [f"• {pname} (`{rid or '?'}`)" for pname, rid, prank in roster]
+            roster_list = []
+            for pname, rid, prank, puuid in roster:
+                p_disp = f"<@{puuid}>" if puuid else pname
+                roster_list.append(f"• {p_disp} (`{rid or '?'}`)")
             embed.add_field(name="👥 Roster", value="\n".join(roster_list), inline=False)
         else:
             embed.add_field(name="👥 Roster", value="*No players found*", inline=False)
