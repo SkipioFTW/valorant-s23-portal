@@ -170,18 +170,34 @@ def fetch_standings_df(group):
             -- Team 1 perspective
             SELECT
                 m.team1_id as team_id,
-                CASE WHEN mm.team1_rounds > mm.team2_rounds THEN 1 ELSE 0 END as win,
-                CASE WHEN mm.team1_rounds < mm.team2_rounds THEN 1 ELSE 0 END as loss,
+                CASE 
+                    WHEN m.winner_id = m.team1_id THEN 1
+                    WHEN m.winner_id = m.team2_id THEN 0
+                    WHEN COALESCE(mm.team1_rounds, 0) > COALESCE(mm.team2_rounds, 0) THEN 1
+                    ELSE 0
+                END as win,
+                CASE 
+                    WHEN m.winner_id = m.team2_id THEN 1
+                    WHEN m.winner_id = m.team1_id THEN 0
+                    WHEN COALESCE(mm.team2_rounds, 0) > COALESCE(mm.team1_rounds, 0) THEN 1
+                    ELSE 0
+                END as loss,
                 CASE
-                    WHEN mm.team1_rounds > mm.team2_rounds THEN 15
-                    ELSE LEAST(mm.team1_rounds, 12)
+                    WHEN m.winner_id = m.team1_id THEN 15
+                    WHEN m.winner_id = m.team2_id THEN 
+                        CASE WHEN m.is_forfeit = 1 THEN 0 ELSE LEAST(COALESCE(mm.team1_rounds, 0), 12) END
+                    WHEN COALESCE(mm.team1_rounds, 0) > COALESCE(mm.team2_rounds, 0) THEN 15
+                    ELSE LEAST(COALESCE(mm.team1_rounds, 0), 12)
                 END as points,
                 CASE
-                    WHEN mm.team2_rounds > mm.team1_rounds THEN 15
-                    ELSE LEAST(mm.team2_rounds, 12)
+                    WHEN m.winner_id = m.team2_id THEN 15
+                    WHEN m.winner_id = m.team1_id THEN 
+                        CASE WHEN m.is_forfeit = 1 THEN 0 ELSE LEAST(COALESCE(mm.team2_rounds, 0), 12) END
+                    WHEN COALESCE(mm.team2_rounds, 0) > COALESCE(mm.team1_rounds, 0) THEN 15
+                    ELSE LEAST(COALESCE(mm.team2_rounds, 0), 12)
                 END as points_against
             FROM public.matches m
-            INNER JOIN public.match_maps mm ON m.id = mm.match_id AND mm.map_index = 0
+            LEFT JOIN public.match_maps mm ON m.id = mm.match_id AND mm.map_index = 0
             WHERE m.status = 'completed' AND m.match_type = 'regular'
             
             UNION ALL
@@ -189,18 +205,34 @@ def fetch_standings_df(group):
             -- Team 2 perspective
             SELECT
                 m.team2_id as team_id,
-                CASE WHEN mm.team2_rounds > mm.team1_rounds THEN 1 ELSE 0 END as win,
-                CASE WHEN mm.team2_rounds < mm.team1_rounds THEN 1 ELSE 0 END as loss,
+                CASE 
+                    WHEN m.winner_id = m.team2_id THEN 1
+                    WHEN m.winner_id = m.team1_id THEN 0
+                    WHEN COALESCE(mm.team2_rounds, 0) > COALESCE(mm.team1_rounds, 0) THEN 1
+                    ELSE 0
+                END as win,
+                CASE 
+                    WHEN m.winner_id = m.team1_id THEN 1
+                    WHEN m.winner_id = m.team2_id THEN 0
+                    WHEN COALESCE(mm.team1_rounds, 0) > COALESCE(mm.team2_rounds, 0) THEN 1
+                    ELSE 0
+                END as loss,
                 CASE
-                    WHEN mm.team2_rounds > mm.team1_rounds THEN 15
-                    ELSE LEAST(mm.team2_rounds, 12)
+                    WHEN m.winner_id = m.team2_id THEN 15
+                    WHEN m.winner_id = m.team1_id THEN 
+                        CASE WHEN m.is_forfeit = 1 THEN 0 ELSE LEAST(COALESCE(mm.team2_rounds, 0), 12) END
+                    WHEN COALESCE(mm.team2_rounds, 0) > COALESCE(mm.team1_rounds, 0) THEN 15
+                    ELSE LEAST(COALESCE(mm.team2_rounds, 0), 12)
                 END as points,
                 CASE
-                    WHEN mm.team1_rounds > mm.team2_rounds THEN 15
-                    ELSE LEAST(mm.team1_rounds, 12)
+                    WHEN m.winner_id = m.team1_id THEN 15
+                    WHEN m.winner_id = m.team2_id THEN 
+                        CASE WHEN m.is_forfeit = 1 THEN 0 ELSE LEAST(COALESCE(mm.team1_rounds, 0), 12) END
+                    WHEN COALESCE(mm.team1_rounds, 0) > COALESCE(mm.team2_rounds, 0) THEN 15
+                    ELSE LEAST(COALESCE(mm.team1_rounds, 0), 12)
                 END as points_against
             FROM public.matches m
-            INNER JOIN public.match_maps mm ON m.id = mm.match_id AND mm.map_index = 0
+            LEFT JOIN public.match_maps mm ON m.id = mm.match_id AND mm.map_index = 0
             WHERE m.status = 'completed' AND m.match_type = 'regular'
         )
         SELECT

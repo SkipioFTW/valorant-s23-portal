@@ -2194,7 +2194,7 @@ def _get_standings_cached():
     for col in ['Wins', 'Losses', 'PD', 'Points', 'Points Against', 'Played']:
         df[col] = df[col].astype(int)
         
-    return df.sort_values(by=['Points', 'Points Against'], ascending=[False, True])
+    return df.sort_values(by=['Points', 'PD'], ascending=[False, False])
 
 def get_standings():
     # Performance fix: Always use cache. Bypassing cache via .run() causes global lag.
