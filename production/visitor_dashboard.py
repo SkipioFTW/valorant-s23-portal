@@ -4785,6 +4785,8 @@ elif page == "Admin Panel":
                                     can_add = False
                                     
                             if can_add:
+                                # Insert via SDK
+                                res_in = supabase.table("players").insert({
                                     "name": nm_clean, 
                                     "riot_id": rid_clean, 
                                     "rank": rk_new, 
