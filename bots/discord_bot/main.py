@@ -915,11 +915,11 @@ async def notification_loop():
                 JOIN players p ON s.player_id = p.id
                 JOIN teams t ON s.team_id = t.id
                 WHERE s.match_id = %s
-                ORDER BY s.acs DESC LIMIT 5
-            """, (m_id,))
+                ORDER BY t.id
+            """, (m_id,))#s.acs DESC LIMIT 5
             top_players = cursor.fetchall()
             if top_players:
-                sb_embed = discord.Embed(title="📊 Match Top Performers (ACS)", color=discord.Color.blue())
+                sb_embed = discord.Embed(title="📊 Match Performances", color=discord.Color.blue())
                 rows = []
                 for name, acs, k, d, a, tname in top_players:
                     rows.append(f"**{name}** ({tname}): {acs} ACS | {k}/{d}/{a}")
