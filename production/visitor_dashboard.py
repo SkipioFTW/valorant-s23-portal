@@ -2361,6 +2361,11 @@ def parse_schedule_text(text, week):
                         "t1_name": t1_name,
                         "t2_name": t2_name
                     })
+                else:
+                    try:
+                        st.warning(f"Unrecognized team name(s): '{t1_name}' (found: {bool(t1_id)}), '{t2_name}' (found: {bool(t2_id)})")
+                    except Exception:
+                        pass
     return matches_to_add
 @st.cache_data(ttl=300)
 def get_playoff_matches():
@@ -3327,8 +3332,9 @@ elif page == "Match Predictor":
         if t1_name == t2_name:
             st.error("Select two different teams.")
         else:
-            t1_id = teams_df[teams_df['name'] == t1_name].iloc[0]['id']
-            t2_id = teams_df[teams_df['name'] == t2_name].iloc[0]['id']
+            if t1_id is None or t2_id is None:
+                st.error("Unrecognized team name(s). Please select valid teams.")
+                return
             
             # Feature extraction helper
             def get_team_stats(tid):
