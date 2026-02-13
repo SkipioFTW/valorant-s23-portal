@@ -3315,11 +3315,11 @@ elif page == "Match Predictor":
         sel_maps = st.multiselect("Map(s) (Optional)", map_opts)
         try:
             t1_id = int(teams_df.loc[teams_df['name'] == t1_name, 'id'].iloc[0])
-        except Exception:
+        except (IndexError, KeyError):
             t1_id = None
         try:
             t2_id = int(teams_df.loc[teams_df['name'] == t2_name, 'id'].iloc[0])
-        except Exception:
+        except (IndexError, KeyError):
             t2_id = None
         all_players = get_all_players()
         player_map = {f"{r['name']} ({r['riot_id'] or ''})": r['id'] for _, r in all_players.iterrows()} if not all_players.empty else {}
