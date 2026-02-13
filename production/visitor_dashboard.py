@@ -2331,6 +2331,37 @@ def get_week_matches(week):
         df['score_t2'] = pd.to_numeric(df['score_t2'], errors='coerce').fillna(0).astype(int)
     return df
 
+def parse_schedule_text(text, week):
+    lines = text.split('\n')
+    current_group = None
+    teams_list = get_teams_list()
+    name_to_id = {r['name'].lower(): r['id'] for _, r in teams_list.iterrows()}
+    matches_to_add = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        group_match = re.match(r'^[—\-]+\s*(.+?)\s*[—\-]+$', line)
+        if group_match:
+            current_group = group_match.group(1).strip()
+            continue
+        if " vs " in line:
+            parts = line.split(" vs ")
+            if len(parts) == 2:
+                t1_name = parts[0].strip()
+                t2_name = parts[1].strip()
+                t1_id = name_to_id.get(t1_name.lower())
+                t2_id = name_to_id.get(t2_name.lower())
+                if t1_id and t2_id:
+                    matches_to_add.append({
+                        "week": week,
+                        "group": current_group if current_group else "Unknown",
+                        "t1_id": t1_id,
+                        "t2_id": t2_id,
+                        "t1_name": t1_name,
+                        "t2_name": t2_name
+                    })
+    return matches_to_add
 @st.cache_data(ttl=300)
 def get_playoff_matches():
     import pandas as pd
@@ -3274,6 +3305,24 @@ elif page == "Match Predictor":
     t1_name = c1.selectbox("Team 1", tnames, index=0, disabled=not is_privileged)
     t2_name = c2.selectbox("Team 2", tnames, index=(1 if len(tnames)>1 else 0), disabled=not is_privileged)
     
+    with st.expander("Advanced Options (Roster & Map)"):
+        map_opts = ["Ascent", "Bind", "Breeze", "Fracture", "Haven", "Icebox", "Lotus", "Pearl", "Split", "Sunset"]
+        sel_maps = st.multiselect("Map(s) (Optional)", map_opts)
+        t1_id = teams_df[teams_df['name'] == (t1_name if t1_name in tnames else tnames[0])].iloc[0]['id'] if not teams_df.empty else None
+        t2_id = teams_df[teams_df['name'] == (t2_name if t2_name in tnames else tnames[1] if len(tnames)>1 else tnames[0])].iloc[0]['id'] if not teams_df.empty else None
+        all_players = get_all_players()
+        player_map = {f"{r['name']} ({r['riot_id'] or ''})": r['id'] for _, r in all_players.iterrows()} if not all_players.empty else {}
+        player_map_inv = {v: k for k, v in player_map.items()}
+        t1_default = all_players[all_players['default_team_id'] == t1_id]['id'].tolist() if t1_id else []
+        t2_default = all_players[all_players['default_team_id'] == t2_id]['id'].tolist() if t2_id else []
+        t1_def_labels = [player_map_inv.get(pid) for pid in t1_default if pid in player_map_inv]
+        t2_def_labels = [player_map_inv.get(pid) for pid in t2_default if pid in player_map_inv]
+        ac1, ac2 = st.columns(2)
+        with ac1:
+            t1_sel = st.multiselect(f"{t1_name or 'Team 1'} Roster", list(player_map.keys()), default=t1_def_labels)
+        with ac2:
+            t2_sel = st.multiselect(f"{t2_name or 'Team 2'} Roster", list(player_map.keys()), default=t2_def_labels)
+    
     if st.button("Predict Result", disabled=not is_privileged):
         if t1_name == t2_name:
             st.error("Select two different teams.")
@@ -3307,10 +3356,6 @@ elif page == "Match Predictor":
             h2h_wins_t1 = h2h[h2h['winner_id'] == t1_id].shape[0]
             h2h_wins_t2 = h2h[h2h['winner_id'] == t2_id].shape[0]
             
-            # Heuristic Score
-            # Win Rate (40%), Avg Score (30%), H2H (30%)
-            # Normalize scores%s No, just compare raw weighted sums or probabilities
-            
             # Heuristic Score (Fallback if ML fails or data too small)
             score1 = (s1['win_rate'] * 40) + (s1['avg_score'] * 2) + (h2h_wins_t1 * 5)
             score2 = (s2['win_rate'] * 40) + (s2['avg_score'] * 2) + (h2h_wins_t2 * 5)
@@ -3318,7 +3363,12 @@ elif page == "Match Predictor":
             ml_prob = None
             try:
                 import predictor_model
-                ml_prob = predictor_model.predict_match(t1_id, t2_id)
+                overrides = {
+                    't1_players': [player_map[l] for l in (t1_sel if 't1_sel' in locals() else [])] if player_map else None,
+                    't2_players': [player_map[l] for l in (t2_sel if 't2_sel' in locals() else [])] if player_map else None,
+                    'map': sel_maps if 'sel_maps' in locals() and sel_maps else None
+                }
+                ml_prob = predictor_model.predict_match(t1_id, t2_id, overrides=overrides)
             except Exception as e:
                 pass
                 
@@ -5229,6 +5279,52 @@ elif page == "Admin Panel":
                 finally:
                     conn_ins.close()
             st.rerun()
+        
+        st.markdown("### Bulk Add From Text")
+        sched_text = st.text_area("Paste schedule text", height=160, placeholder="——— GROUP ————————— Team A vs Team B ...")
+        if st.button("Parse & Add Matches"):
+            to_add = parse_schedule_text(sched_text or "", w)
+            if not to_add:
+                st.warning("No matches parsed.")
+            else:
+                added = 0
+                for m in to_add:
+                    id1 = int(m['t1_id'])
+                    id2 = int(m['t2_id'])
+                    group_name = m['group'] if m['group'] and m['group'] != "Unknown" else gsel or None
+                    saved_via_sdk = False
+                    if supabase:
+                        try:
+                            payload = {
+                                "week": int(m['week']), 
+                                "group_name": group_name, 
+                                "status": "scheduled", 
+                                "format": fmt, 
+                                "team1_id": id1, 
+                                "team2_id": id2, 
+                                "score_t1": 0, 
+                                "score_t2": 0, 
+                                "maps_played": 0, 
+                                "match_type": "regular"
+                            }
+                            supabase.table("matches").insert(payload).execute()
+                            saved_via_sdk = True
+                            added += 1
+                        except Exception:
+                            pass
+                    if not saved_via_sdk:
+                        conn_ins = get_conn()
+                        try:
+                            conn_ins.execute("INSERT INTO matches (week, group_name, status, format, team1_id, team2_id, score_t1, score_t2, maps_played, match_type) VALUES (%s, %s, 'scheduled', %s, %s, %s, 0, 0, 0, 'regular')", (int(m['week']), group_name, fmt, id1, id2))
+                            conn_ins.commit()
+                            added += 1
+                        except Exception:
+                            pass
+                        finally:
+                            conn_ins.close()
+                st.success(f"Added {added} matches")
+                st.cache_data.clear()
+                st.rerun()
 
 elif page == "Substitutions Log":
     import pandas as pd
