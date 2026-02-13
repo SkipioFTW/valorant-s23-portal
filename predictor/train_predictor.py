@@ -2,6 +2,8 @@ import sqlite3
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
 import joblib
 import os
 
@@ -86,15 +88,17 @@ def train_model():
     if len(X) < 5:
         print("Not enough data to train ML model. Need at least 5 matches.")
         return None
-        
-    model = RandomForestClassifier(n_estimators=100, random_state=42)
-    model.fit(X, y)
+    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+    model = RandomForestClassifier(n_estimators=200, random_state=42, class_weight="balanced", max_depth=None)
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_val)
+    acc = accuracy_score(y_val, y_pred)
     
     # Save model
     import joblib
     model_path = os.path.join(os.path.dirname(__file__), 'match_predictor_model.pkl')
     joblib.dump(model, model_path)
-    print(f"Model trained and saved as {model_path}")
+    print(f"Model trained and saved as {model_path} (val acc: {acc:.3f})")
     return model
 
 if __name__ == "__main__":

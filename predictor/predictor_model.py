@@ -4,6 +4,9 @@ import numpy as np
 import os
 import joblib
 from sklearn.ensemble import RandomForestClassifier
+import requests
+from io import BytesIO
+from functools import lru_cache
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), 'match_predictor_model.pkl')
 
@@ -130,12 +133,37 @@ def extract_features(t1_id, t2_id, current_week=None, overrides=None):
     ]
     return np.array(features).reshape(1, -1)
 
+def _github_model_url():
+    owner = os.getenv("GH_OWNER")
+    repo = os.getenv("GH_REPO")
+    branch = os.getenv("GH_BRANCH", "main")
+    if not owner or not repo:
+        return None
+    return f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/predictor/match_predictor_model.pkl"
+
+@lru_cache(maxsize=1)
+def _load_model():
+    if os.path.exists(MODEL_PATH):
+        try:
+            return joblib.load(MODEL_PATH)
+        except Exception:
+            pass
+    url = _github_model_url()
+    if url:
+        for _ in range(2):
+            try:
+                r = requests.get(url, timeout=10)
+                if r.status_code == 200:
+                    return joblib.load(BytesIO(r.content))
+            except Exception:
+                pass
+    return None
+
 def predict_match(t1_id, t2_id, week=None, overrides=None):
-    if not os.path.exists(MODEL_PATH):
-        return None # Fallback to heuristic
-    
     try:
-        model = joblib.load(MODEL_PATH)
+        model = _load_model()
+        if model is None:
+            return None
         X = extract_features(t1_id, t2_id, week, overrides)
         probs = model.predict_proba(X)[0] # [Prob_Loss, Prob_Win] for T1
         return probs[1] # Probability of T1 winning

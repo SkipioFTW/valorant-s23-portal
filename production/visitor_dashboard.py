@@ -23,8 +23,7 @@ CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(CURRENT_DIR)
 if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
-
-from tracker_scraper import TrackerScraper
+ 
 
 def get_secret(key, default=None):
     try:
@@ -122,6 +121,15 @@ def warm_caches():
     except Exception:
         pass
     st.session_state['cache_warmed'] = True
+
+def measure_latency(fn, *args, **kwargs):
+    start = time.perf_counter()
+    try:
+        res = fn(*args, **kwargs)
+    except Exception:
+        res = None
+    dur = (time.perf_counter() - start) * 1000.0
+    return res, dur
 
 # Use data folder for database
 DEFAULT_DB_PATH = os.path.join(ROOT_DIR, "data", "valorant_s23.db")
@@ -357,6 +365,17 @@ def run_connection_diagnostics():
                 st.caption(f"Weeks present: {wkset}")
         except Exception as e:
             st.warning(f"Data status fetch failed: {e}")
+    
+    st.write("**Latency Measurements**")
+    _, dur_players = measure_latency(get_all_players_directory, False)
+    st.caption(f"Players directory load: {dur_players:.1f} ms")
+    _, dur_standings = measure_latency(get_standings)
+    st.caption(f"Standings compute/load: {dur_standings:.1f} ms")
+    try:
+        _, dur_week = measure_latency(get_week_matches, 1)
+        st.caption(f"Week 1 matches load: {dur_week:.1f} ms")
+    except Exception:
+        pass
 
 def should_use_cache():
     # If no admin is active in the last 5 minutes, we can use cache
@@ -1197,16 +1216,12 @@ def ocr_extract(image_bytes, crop_box=None):
 
 def scrape_tracker_match(url):
     """
-    Scrapes match data from tracker.gg using the TrackerScraper class.
-    Returns (match_data_json, error_message)
+    Scraping is disabled in the cloud environment.
+    Returns (None, error_message)
     """
-    try:
-        scraper = TrackerScraper()
-        data, error = scraper.get_match_data(url)
-        return data, error
-    except Exception as e:
-        return None, f"Scraping error: {str(e)}"
+    return None, "Scraping is disabled on Streamlit Cloud. Use JSON upload or GitHub."
 
+@st.cache_data(ttl=600)
 def list_files_from_github(path):
     """Lists files in a GitHub directory."""
     owner = get_secret("GH_OWNER")
@@ -1216,11 +1231,13 @@ def list_files_from_github(path):
     if not owner or not repo or not token: return []
     url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}%sref={branch}"
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
-    try:
-        r = requests.get(url, headers=headers, timeout=10)
-        if r.status_code == 200:
-            return [f for f in r.json() if f['type'] == 'file' and f['name'].endswith('.json')]
-    except: pass
+    for _ in range(2):
+        try:
+            r = requests.get(url, headers=headers, timeout=10)
+            if r.status_code == 200:
+                return [f for f in r.json() if f['type'] == 'file' and f['name'].endswith('.json')]
+        except:
+            pass
     return []
 
 def delete_file_from_github(path, message="Delete file"):
@@ -1257,6 +1274,7 @@ def get_file_content_from_github(path):
     except: pass
     return None
 
+@st.cache_data(ttl=600)
 def fetch_match_from_github(match_id):
     """
     Attempts to fetch a match JSON from the GitHub repository.
@@ -1272,29 +1290,26 @@ def fetch_match_from_github(match_id):
     # Use API for both public and private repos if token is available
     if token:
         url = f"https://api.github.com/repos/{owner}/{repo}/contents/assets/matches/match_{match_id}.json?ref={branch}"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github.raw"
-        }
-        try:
-            r = requests.get(url, headers=headers, timeout=10)
-            if r.status_code == 200:
-                return r.json(), None
-            else:
-                return None, f"GitHub API error: {r.status_code}"
-        except Exception as e:
-            return None, f"GitHub API fetch error: {str(e)}"
+        headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github.raw"}
+        for _ in range(2):
+            try:
+                r = requests.get(url, headers=headers, timeout=10)
+                if r.status_code == 200:
+                    return r.json(), None
+            except Exception:
+                pass
+        return None, "GitHub API error"
     else:
         # Fallback to public raw URL
         raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/assets/matches/match_{match_id}.json"
-        try:
-            r = requests.get(raw_url, timeout=10)
-            if r.status_code == 200:
-                return r.json(), None
-            else:
-                return None, f"GitHub file not found (Status: {r.status_code})"
-        except Exception as e:
-            return None, f"GitHub fetch error: {str(e)}"
+        for _ in range(2):
+            try:
+                r = requests.get(raw_url, timeout=10)
+                if r.status_code == 200:
+                    return r.json(), None
+            except Exception:
+                pass
+        return None, "GitHub file not found"
 
 
 def parse_tracker_json(jsdata, team1_id, team2_id):
@@ -2041,7 +2056,7 @@ def _get_standings_cached():
                 teams_df = pd.DataFrame(res_teams.data)
                 
             # Fetch all matches from Supabase and join maps separately
-            res_matches = supabase.table("matches").select("*").execute()
+            res_matches = supabase.table("matches").select("id, team1_id, team2_id, match_type, status, winner_id, format, week, score_t1, score_t2, maps_played, is_forfeit").execute()
             if res_matches.data:
                 matches_df = pd.DataFrame(res_matches.data)
                 if not matches_df.empty:
