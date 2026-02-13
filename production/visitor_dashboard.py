@@ -2363,7 +2363,7 @@ def parse_schedule_text(text, week):
                     })
                 else:
                     try:
-                        st.warning(f"Unrecognized team name(s): '{t1_name}' (found: {bool(t1_id)}), '{t2_name}' (found: {bool(t2_id)})")
+                        st.warning(f"Unrecognized team name(s): '{t1_name}' (found: {t1_id is not None}), '{t2_name}' (found: {t2_id is not None})")
                     except Exception:
                         pass
     return matches_to_add
@@ -3313,8 +3313,14 @@ elif page == "Match Predictor":
     with st.expander("Advanced Options (Roster & Map)"):
         map_opts = ["Ascent", "Bind", "Breeze", "Fracture", "Haven", "Icebox", "Lotus", "Pearl", "Split", "Sunset"]
         sel_maps = st.multiselect("Map(s) (Optional)", map_opts)
-        t1_id = teams_df[teams_df['name'] == (t1_name if t1_name in tnames else tnames[0])].iloc[0]['id'] if not teams_df.empty else None
-        t2_id = teams_df[teams_df['name'] == (t2_name if t2_name in tnames else tnames[1] if len(tnames)>1 else tnames[0])].iloc[0]['id'] if not teams_df.empty else None
+        try:
+            t1_id = int(teams_df.loc[teams_df['name'] == t1_name, 'id'].iloc[0])
+        except Exception:
+            t1_id = None
+        try:
+            t2_id = int(teams_df.loc[teams_df['name'] == t2_name, 'id'].iloc[0])
+        except Exception:
+            t2_id = None
         all_players = get_all_players()
         player_map = {f"{r['name']} ({r['riot_id'] or ''})": r['id'] for _, r in all_players.iterrows()} if not all_players.empty else {}
         player_map_inv = {v: k for k, v in player_map.items()}
@@ -3334,7 +3340,7 @@ elif page == "Match Predictor":
         else:
             if t1_id is None or t2_id is None:
                 st.error("Unrecognized team name(s). Please select valid teams.")
-                return
+                st.stop()
             
             # Feature extraction helper
             def get_team_stats(tid):
@@ -5287,9 +5293,10 @@ elif page == "Admin Panel":
             st.rerun()
         
         st.markdown("### Bulk Add From Text")
+        week_bulk = st.selectbox("Week for pasted matches", weeks, index=weeks.index(w) if w in weeks else 0)
         sched_text = st.text_area("Paste schedule text", height=160, placeholder="——— GROUP ————————— Team A vs Team B ...")
         if st.button("Parse & Add Matches"):
-            to_add = parse_schedule_text(sched_text or "", w)
+            to_add = parse_schedule_text(sched_text or "", week_bulk)
             if not to_add:
                 st.warning("No matches parsed.")
             else:
