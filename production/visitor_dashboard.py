@@ -2268,7 +2268,6 @@ def get_ai_scenario(team_id, group_name):
     finally:
         conn.close()
 def generate_playoff_scenario_gemini(group_name, team_id):
-    import requests, json, time
     api_key = get_secret("GEMINI_API_KEY")
     model_name = str(get_secret("GEMINI_MODEL", "gemini-1.5-flash-latest"))
     if not api_key:
@@ -2342,17 +2341,42 @@ def generate_playoff_scenario_heuristic(group_name, team_id):
     if grp_df.empty or tm.empty:
         return f"No data available for Group {group_name} or team {team_id}."
     points = int(tm.iloc[0]["Points"]); pdiff = int(tm.iloc[0]["PD"]); remaining = int(tm.iloc[0]["remaining"])
-    sixth_pts = int(grp_df.iloc[5]["Points"]) if len(grp_df)>=6 else 0
+    rank = int(grp_df.reset_index(drop=True)[grp_df.reset_index(drop=True)["id"]==int(team_id)].index[0]) + 1
+    sixth_row = grp_df.iloc[5] if len(grp_df)>=6 else None
+    sixth_pts = int(sixth_row["Points"]) if sixth_row is not None else 0
+    sixth_pd = int(sixth_row["PD"]) if sixth_row is not None else 0
+    sixth_name = str(sixth_row["name"]) if sixth_row is not None else "TBD"
+    seventh_row = grp_df.iloc[6] if len(grp_df)>=7 else None
+    seventh_name = str(seventh_row["name"]) if seventh_row is not None else "TBD"
     sm = _get_scheduled_matches_df()
-    opp = sm[(sm["status"]=="scheduled") & ((sm["team1_id"]==int(team_id)) | (sm["team2_id"]==int(team_id))) & (sm["group_name"]==group_name)]
-    opp_id = None
-    if not opp.empty:
-        row = opp.iloc[0]; opp_id = int(row["team2_id"]) if int(row["team1_id"])==int(team_id) else int(row["team1_id"])
+    # Opponents
+    def _opp_for(tid):
+        m = sm[(sm["status"]=="scheduled") & ((sm["team1_id"]==int(tid)) | (sm["team2_id"]==int(tid))) & (sm["group_name"]==group_name)]
+        if m.empty: return None
+        r = m.iloc[0]
+        return int(r["team2_id"]) if int(r["team1_id"])==int(tid) else int(r["team1_id"])
+    opp_id = _opp_for(team_id)
     opp_name = team_name_by_id(opp_id) if opp_id else "TBD"
+    sixth_opp_id = _opp_for(int(sixth_row["id"])) if sixth_row is not None else None
+    sixth_opp_name = team_name_by_id(sixth_opp_id) if sixth_opp_id else "TBD"
+    seventh_opp_id = _opp_for(int(seventh_row["id"])) if seventh_row is not None else None
+    seventh_opp_name = team_name_by_id(seventh_opp_id) if seventh_opp_id else "TBD"
+    # Scenarios
+    win_pts = points + (15 if remaining>0 else 0)
     gap = max(0, sixth_pts - points)
     max_gain = remaining * 15
-    needs = "Win required" if gap <= 15 and remaining >= 1 else ("Win + favorable results" if gap <= max_gain else "Mathematically unlikely")
-    return f"Opponent: {opp_name}. Points: {points}, PD: {pdiff}, Remaining: {remaining}, 6th: {sixth_pts}. {needs}. Improve point diff vs close competitors; watch ties."
+    clinch_on_win = win_pts > sixth_pts or (win_pts == sixth_pts and pdiff >= sixth_pd)
+    need_favor_on_win = (win_pts < sixth_pts) or (win_pts == sixth_pts and pdiff < sixth_pd)
+    eliminated_on_loss = (points < sixth_pts and remaining==0)
+    parts = [
+        f"Opponent: {opp_name}. Rank: {rank}. Points: {points}, PD: {pdiff}. Remaining: {remaining}. 6th: {sixth_name} ({sixth_pts} pts)."
+    ]
+    parts.append(f"If win: reach {win_pts} pts — " + ("likely qualifies." if clinch_on_win else "needs favorable results."))
+    parts.append(f"Key matches: {sixth_name} vs {sixth_opp_name}, {seventh_name} vs {seventh_opp_name}.")
+    if need_favor_on_win:
+        parts.append(f"Prefer {sixth_name} loss/draw, or tie-break PD ≥ {sixth_pd}.")
+    parts.append("If loss: qualification depends on other results; risk high." if not eliminated_on_loss else "If loss: eliminated.")
+    return " ".join(parts)
 
 def _write_ai_asset(group_name, team_id, team_name, text):
     import json, time
