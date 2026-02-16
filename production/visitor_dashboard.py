@@ -900,7 +900,7 @@ track_user_activity()
 warm_caches()
 
 # Hide standard sidebar navigation and other streamlit elements
-st.markdown("""<link href='https://fonts.googleapis.com/css2%sfamily=Orbitron:wght@400;700&family=Rajdhani:wght@400;600&family=Inter:wght@400;700&display=swap' rel='stylesheet'>""", unsafe_allow_html=True)
+st.markdown("""<link href='https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Rajdhani:wght@400;600&family=Inter:wght@400;700&display=swap' rel='stylesheet'>""", unsafe_allow_html=True)
 
 st.markdown("""
 <style>
@@ -2280,6 +2280,21 @@ def annotate_elimination_and_races(df):
     adf = pd.DataFrame(out)
     df = df.merge(adf, on="id", how="left")
     return df, races
+def build_standings_table_html(group_df):
+    rows = []
+    sorted_grp = group_df[['name','Played','Wins','Losses','Points','PD','remaining','eliminated']].sort_values(['Points','PD'], ascending=False).reset_index(drop=True)
+    for idx, r in sorted_grp.itertuples():
+        rank = idx + 1
+        color = "rgba(255,255,255,0.03)"
+        border = "transparent"
+        if rank <= 2:
+            border = "#2ECC71"
+        elif 3 <= rank <= 6:
+            border = "var(--primary-blue)"
+        elif bool(r.eliminated):
+            border = "var(--primary-red)"
+        rows.append(f"<tr style='border-left:4px solid {border};'><td>{rank}</td><td>{html.escape(str(r.name))}</td><td>{int(r.Played)}</td><td>{int(r.Wins)}</td><td>{int(r.Losses)}</td><td>{int(r.PD)}</td><td>{int(r.Points)}</td><td>{int(r.remaining)}</td></tr>")
+    return "<table class='valorant-table'><thead><tr><th>Rank</th><th>Team</th><th>Played</th><th>W</th><th>L</th><th>PD</th><th>PTS</th><th>Remaining</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
 @st.cache_data(ttl=900)
 def _get_player_leaderboard_cached():
     import pandas as pd
@@ -3065,97 +3080,33 @@ if page == "Overview & Standings":
         
         df, race_candidates = annotate_elimination_and_races(df)
         groups = sorted(df['group_name'].unique())
-        
-        for grp in groups:
-            st.markdown(f'<h2 style="color: var(--primary-blue); font-family: \'Orbitron\'; border-left: 4px solid var(--primary-blue); padding-left: 15px; margin: 2rem 0 1rem 0;">GROUP {html.escape(str(grp))}</h2>', unsafe_allow_html=True)
-            
-            grp_df = df[df['group_name'] == grp]
-            
-            # Team Cards Grid
-            t_cols = st.columns(min(len(grp_df), 3))
-            for idx, row in enumerate(grp_df.itertuples()):
-                with t_cols[idx % 3]:
-                    logo_html = ""
-                    # Prefer direct URL if provided
-                    ld = row.logo_display if hasattr(row, 'logo_display') else None
-                    if isinstance(ld, str) and ld.startswith('http'):
-                        logo_html = f"<img src='{html.escape(ld)}' width='40' style='border-radius: 4px;'/>"
-                    else:
-                        b64 = get_base64_image(ld)
-                        if b64:
-                            logo_html = f"<img src='data:image/png;base64,{b64}' width='40' style='border-radius: 4px;'/>"
-                        else:
-                            initials = (str(row.name)[0:2].upper() if hasattr(row, 'name') and str(row.name).strip() else '?')
-                            logo_html = f"<div style='width:40px;height:40px;background:rgba(255,255,255,0.05);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--text-main);font-family: Orbitron;'>{html.escape(initials)}</div>"
-                    
-                    st.markdown(f"""<div class="custom-card" style="height: 100%;">
-<div style="display: flex; align-items: center; gap: 15px; margin-bottom: 10px;">
-{logo_html}
-<div style="font-weight: bold; color: var(--primary-blue); font-size: 1rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{html.escape(str(row.name))}</div>
-</div>
-<div style="display: flex; justify-content: space-between; color: var(--text-dim); font-size: 0.8rem;">
-<span>WINS: <span style="color: var(--text-main); font-family: 'Orbitron';">{row.Wins}</span></span>
-<span>PTS: <span style="color: var(--primary-blue); font-family: 'Orbitron';">{row.Points}</span></span>
-</div>
-</div>""", unsafe_allow_html=True)
-                    
-                    with st.expander("Roster"):
-                        roster = rosters_by_team.get(int(row.id), pd.DataFrame())
-                        if roster.empty: st.caption("No players")
-                        else: 
-                            st.dataframe(
-                                roster[['display_name', 'rank']], 
-                                hide_index=True, 
-                                use_container_width=True,
-                                column_config={
-                                    "display_name": "Name",
-                                    "rank": "Rank"
-                                }
-                            )
-            
-            # Standings Table for Group
-            st.markdown("<br>", unsafe_allow_html=True)
-            
-            # Sort and add Rank column
-            sorted_grp = grp_df[['name', 'Played', 'Wins', 'Losses', 'Points', 'PD', 'remaining', 'eliminated']].sort_values(['Points', 'PD'], ascending=False).reset_index(drop=True)
-            sorted_grp.index += 1
-            sorted_grp.insert(0, 'Rank', sorted_grp.index)
-            
-            st.dataframe(
-                sorted_grp,
-                hide_index=True,
-                use_container_width=True,
-                column_config={
-                    "Rank": st.column_config.NumberColumn("Rank", width="small"),
-                    "name": "Team",
-                    "PD": st.column_config.NumberColumn("Point Diff", help="Points For - Points Against"),
-                    "Points": st.column_config.NumberColumn("Points", help="Match Win (15) or Rounds Won (max 12)"),
-                    "remaining": st.column_config.NumberColumn("Remaining", help="Scheduled matches left"),
-                    "eliminated": st.column_config.CheckboxColumn("Eliminated")
-                }
-            )
-            st.caption("🏆 Top 6 teams from each group qualify for Playoffs (Top 2 get R1 BYE).")
-            
-            rc = [c for c in race_candidates if c["group"]==grp]
-            if rc:
-                st.markdown("#### Playoff Races (Last Week)")
-                sm = _get_scheduled_matches_df()
-                for c in rc:
-                    tid = c["team_id"]
-                    row = grp_df[grp_df["id"]==tid].iloc[0] if not grp_df[grp_df["id"]==tid].empty else None
-                    if row is None: continue
-                    mrow = sm[(sm["status"]=="scheduled") & ((sm["team1_id"]==tid) | (sm["team2_id"]==tid))]
-                    opp_id = None
-                    if not mrow.empty:
-                        mr = mrow.iloc[0]
-                        opp_id = int(mr["team2_id"]) if int(mr["team1_id"])==tid else int(mr["team1_id"])
-                    opp_name = df[df["id"]==opp_id]["name"].iloc[0] if opp_id and not df[df["id"]==opp_id].empty else "TBD"
-                    st.markdown(f"""<div class="custom-card" style="margin-bottom:10px;">
+        tab_objs = st.tabs([f"Group {g}" for g in groups])
+        for tab, grp in zip(tab_objs, groups):
+            with tab:
+                grp_df = df[df['group_name'] == grp]
+                st.markdown("<br>", unsafe_allow_html=True)
+                table_html = build_standings_table_html(grp_df)
+                st.markdown(table_html, unsafe_allow_html=True)
+                st.caption("🏆 Top 6 teams from each group qualify for Playoffs (Top 2 get R1 BYE).")
+                rc = [c for c in race_candidates if c["group"]==grp]
+                if rc:
+                    st.markdown("#### Playoff Races (Last Week)")
+                    sm = _get_scheduled_matches_df()
+                    for c in rc:
+                        tid = c["team_id"]
+                        row = grp_df[grp_df["id"]==tid].iloc[0] if not grp_df[grp_df["id"]==tid].empty else None
+                        if row is None: continue
+                        mrow = sm[(sm["status"]=="scheduled") & ((sm["team1_id"]==tid) | (sm["team2_id"]==tid))]
+                        opp_id = None
+                        if not mrow.empty:
+                            mr = mrow.iloc[0]
+                            opp_id = int(mr["team2_id"]) if int(mr["team1_id"])==tid else int(mr["team1_id"])
+                        opp_name = df[df["id"]==opp_id]["name"].iloc[0] if opp_id and not df[df["id"]==opp_id].empty else "TBD"
+                        st.markdown(f"""<div class="custom-card" style="margin-bottom:10px;">
 <div style="font-size:0.8rem;color:var(--text-dim);">Group {html.escape(str(grp))}</div>
 <div style="font-weight:bold;">{html.escape(str(row['name']))} vs {html.escape(str(opp_name))}</div>
 <div style="font-size:0.8rem;">Can reach playoffs with a win if results favor.</div>
 </div>""", unsafe_allow_html=True)
-            st.markdown("---")
     else:
         st.info("No standings data available yet.")
 
