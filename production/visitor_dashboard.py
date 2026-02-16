@@ -2283,15 +2283,14 @@ def annotate_elimination_and_races(df):
 def build_standings_table_html(group_df):
     rows = []
     sorted_grp = group_df[['name','Played','Wins','Losses','Points','PD','remaining','eliminated']].sort_values(['Points','PD'], ascending=False).reset_index(drop=True)
-    for idx, r in sorted_grp.itertuples():
-        rank = idx + 1
+    for rank, r in enumerate(sorted_grp.itertuples(), start=1):
         color = "rgba(255,255,255,0.03)"
         border = "transparent"
         if rank <= 2:
             border = "#2ECC71"
         elif 3 <= rank <= 6:
             border = "var(--primary-blue)"
-        elif bool(r.eliminated):
+        elif bool(getattr(r, 'eliminated', False)):
             border = "var(--primary-red)"
         rows.append(f"<tr style='border-left:4px solid {border};'><td>{rank}</td><td>{html.escape(str(r.name))}</td><td>{int(r.Played)}</td><td>{int(r.Wins)}</td><td>{int(r.Losses)}</td><td>{int(r.PD)}</td><td>{int(r.Points)}</td><td>{int(r.remaining)}</td></tr>")
     return "<table class='valorant-table'><thead><tr><th>Rank</th><th>Team</th><th>Played</th><th>W</th><th>L</th><th>PD</th><th>PTS</th><th>Remaining</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
