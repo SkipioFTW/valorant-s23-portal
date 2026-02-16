@@ -2218,6 +2218,18 @@ def get_standings():
     # Cache invalidation should typically happen via actions (mutations), not read checks.
     return _get_standings_cached()
 @st.cache_data(ttl=600)
+def _team_name_map():
+    import pandas as pd
+    df = get_teams_list_full()
+    if df.empty:
+        return {}
+    return {int(r['id']): r['name'] for _, r in df.iterrows()}
+def team_name_by_id(tid):
+    try:
+        return _team_name_map().get(int(tid)) or f"Team {tid}"
+    except Exception:
+        return f"Team {tid}"
+@st.cache_data(ttl=600)
 def _get_scheduled_matches_df():
     import pandas as pd
     df = pd.DataFrame()
@@ -2811,13 +2823,15 @@ main_container = st.empty()
 
 if st.session_state['app_mode'] == 'portal':
     with main_container.container():
+        active_users = get_active_user_count()
+        admin_sess = get_active_admin_session()
         st.markdown("""<div class="portal-container">
 <h1 class="portal-header">VALORANT S23 PORTAL</h1>
-<p class="portal-subtitle">System Status & Access Terminal</p>
+<p class="portal-subtitle">OFFICIAL TOURNAMENT DASHBOARD</p>
 <div class="status-grid">
-<div class="status-indicator status-online">● VISITOR ACCESS: LIVE</div>
-<div class="status-indicator status-offline">● TEAM PANEL: STAGING</div>
-<div class="status-indicator status-online">● ADMIN CORE: SECURE</div>
+<div class="status-indicator status-online">● SYSTEM ONLINE</div>
+<div class="status-indicator status-online">● ACTIVE USERS: """ + str(active_users) + """</div>
+<div class="status-indicator """ + ("status-online" if admin_sess else "status-offline") + """">● ADMIN: """ + ("ONLINE" if admin_sess else "OFFLINE") + """</div>
 </div>
 <div class="portal-options">""", unsafe_allow_html=True)
         
@@ -3372,6 +3386,37 @@ elif page == "Match Predictor":
     st.markdown('<h1 class="main-header">MATCH PREDICTOR</h1>', unsafe_allow_html=True)
     st.write("Predict the outcome of a match based on team history and stats.")
     
+    sm_df = _get_scheduled_matches_df()
+    if not sm_df.empty:
+        st.markdown("### 📅 Upcoming Matches Predictions")
+        for wk in sorted(sm_df['week'].dropna().astype(int).unique()):
+            st.markdown(f"#### Week {wk}")
+            wk_df = sm_df[sm_df['week'] == wk]
+            cols = st.columns(3)
+            for i, r in enumerate(wk_df.itertuples()):
+                with cols[i % 3]:
+                    try:
+                        import predictor_model
+                        prob = predictor_model.predict_match(int(r.team1_id), int(r.team2_id), week=int(wk))
+                    except Exception:
+                        prob = 0.5
+                    if prob is None:
+                        prob = 0.5
+                    t1_win_prob = prob * 100
+                    winner = team_name_by_id(int(r.team1_id)) if t1_win_prob > 50 else team_name_by_id(int(r.team2_id))
+                    conf = max(t1_win_prob, 100 - t1_win_prob)
+                    color = "#2ECC71" if conf > 60 else "#F1C40F"
+                    t1n = team_name_by_id(int(r.team1_id))
+                    t2n = team_name_by_id(int(r.team2_id))
+                    st.markdown(f"""
+                    <div style="background: rgba(255,255,255,0.05); border-radius: 8px; padding: 10px; margin-bottom: 10px; border-left: 4px solid {color};">
+                        <div style="font-size: 0.8em; color: #aaa;">{html.escape(str(t1n))} vs {html.escape(str(t2n))}</div>
+                        <div style="font-weight: bold; font-size: 1.1em; color: {color};">{html.escape(str(winner))}</div>
+                        <div style="font-size: 0.9em;">{conf:.1f}% Confidence</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+        st.markdown("---")
+    
     teams_df = get_teams_list()
     matches_df = get_completed_matches()
     
@@ -3533,6 +3578,10 @@ elif page == "Match Predictor":
 elif page == "Player Leaderboard":
     import pandas as pd
     df = get_player_leaderboard()
+    max_games = int(df['games'].max()) if not df.empty and 'games' in df.columns else 0
+    min_games = st.slider("Minimum Games Played", 0, max_games or 0, min(1, max_games) if (max_games or 0) > 0 else 0, key="leaderboard_min_games")
+    if 'games' in df.columns:
+        df = df[df['games'] >= min_games]
     if df.empty:
         st.info("No player stats yet.")
     else:
