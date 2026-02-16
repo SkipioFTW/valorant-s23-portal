@@ -2270,8 +2270,12 @@ def get_ai_scenario(team_id, group_name):
 def generate_playoff_scenario_gemini(group_name, team_id):
     import requests, json, time
     api_key = get_secret("GEMINI_API_KEY")
+    model_name = str(get_secret("GEMINI_MODEL", "gemini-1.5-flash-latest"))
     if not api_key:
-        return False, "Missing GEMINI_API_KEY"
+        # Fallback to heuristic if key missing
+        text = generate_playoff_scenario_heuristic(group_name, team_id)
+        save_ai_scenario(team_id, group_name, text)
+        return True, "Scenario generated via heuristic (no API key)"
     df = get_standings()
     df, _ = annotate_elimination_and_races(df)
     grp_df = df[df["group_name"]==group_name]
@@ -2302,35 +2306,69 @@ Explain:
 3) Tie-break considerations based on point diff.
 Output a concise, clear explanation suitable for a portal card.
 """
-    body = {
-        "contents":[{"parts":[{"text": prompt}]}]
-    }
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    body = {"contents":[{"parts":[{"text": prompt}]}]}
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
     try:
         r = requests.post(url, json=body, timeout=20)
         if r.status_code == 200:
             data = r.json()
-            text = data["candidates"][0]["content"]["parts"][0]["text"]
-            save_ai_scenario(team_id, group_name, text)
-            # also write to assets for bot usage
+            # Defensive parsing
             try:
-                folder = os.path.join(ROOT_DIR, "assets", "ai_scenarios")
-                if not os.path.exists(folder): os.makedirs(folder)
-                path = os.path.join(folder, f"{group_name}.json")
-                existing = {}
-                if os.path.exists(path):
-                    with open(path, "r", encoding="utf-8") as f:
-                        existing = json.load(f)
-                existing[str(team_id)] = {"team": team_name, "scenario": text, "generated_at": int(time.time())}
-                with open(path, "w", encoding="utf-8") as f:
-                    json.dump(existing, f, indent=2)
+                text = data["candidates"][0]["content"]["parts"][0]["text"]
             except Exception:
-                pass
+                text = None
+            if not text:
+                text = generate_playoff_scenario_heuristic(group_name, team_id)
+            save_ai_scenario(team_id, group_name, text)
+            _write_ai_asset(group_name, team_id, team_name, text)
             return True, "Scenario generated and stored"
         else:
-            return False, f"Gemini error: {r.status_code}"
+            # Fallback to heuristic on errors
+            text = generate_playoff_scenario_heuristic(group_name, team_id)
+            save_ai_scenario(team_id, group_name, text)
+            _write_ai_asset(group_name, team_id, team_name, text)
+            return False, f"Gemini error {r.status_code}; stored heuristic scenario"
     except Exception as e:
-        return False, f"Request failed: {str(e)}"
+        text = generate_playoff_scenario_heuristic(group_name, team_id)
+        save_ai_scenario(team_id, group_name, text)
+        _write_ai_asset(group_name, team_id, team_name, text)
+        return False, f"Request failed; stored heuristic scenario: {str(e)}"
+
+def generate_playoff_scenario_heuristic(group_name, team_id):
+    df = get_standings()
+    df, _ = annotate_elimination_and_races(df)
+    grp_df = df[df["group_name"]==group_name].sort_values(["Points","PD"], ascending=[False,False])
+    tm = grp_df[grp_df["id"]==int(team_id)]
+    if grp_df.empty or tm.empty:
+        return f"No data available for Group {group_name} or team {team_id}."
+    points = int(tm.iloc[0]["Points"]); pdiff = int(tm.iloc[0]["PD"]); remaining = int(tm.iloc[0]["remaining"])
+    sixth_pts = int(grp_df.iloc[5]["Points"]) if len(grp_df)>=6 else 0
+    sm = _get_scheduled_matches_df()
+    opp = sm[(sm["status"]=="scheduled") & ((sm["team1_id"]==int(team_id)) | (sm["team2_id"]==int(team_id))) & (sm["group_name"]==group_name)]
+    opp_id = None
+    if not opp.empty:
+        row = opp.iloc[0]; opp_id = int(row["team2_id"]) if int(row["team1_id"])==int(team_id) else int(row["team1_id"])
+    opp_name = team_name_by_id(opp_id) if opp_id else "TBD"
+    gap = max(0, sixth_pts - points)
+    max_gain = remaining * 15
+    needs = "Win required" if gap <= 15 and remaining >= 1 else ("Win + favorable results" if gap <= max_gain else "Mathematically unlikely")
+    return f"Opponent: {opp_name}. Points: {points}, PD: {pdiff}, Remaining: {remaining}, 6th: {sixth_pts}. {needs}. Improve point diff vs close competitors; watch ties."
+
+def _write_ai_asset(group_name, team_id, team_name, text):
+    import json, time
+    try:
+        folder = os.path.join(ROOT_DIR, "assets", "ai_scenarios")
+        if not os.path.exists(folder): os.makedirs(folder)
+        path = os.path.join(folder, f"{group_name}.json")
+        existing = {}
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+        existing[str(team_id)] = {"team": team_name, "scenario": text, "generated_at": int(time.time())}
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(existing, f, indent=2)
+    except Exception:
+        pass
 @st.cache_data(ttl=600)
 def _get_scheduled_matches_df():
     import pandas as pd
@@ -4546,7 +4584,7 @@ elif page == "Admin Panel":
         df_all = get_standings()
         df_all, _rc = annotate_elimination_and_races(df_all)
         groups = sorted(df_all['group_name'].unique().tolist()) if not df_all.empty else []
-        c_ai1, c_ai2, c_ai3 = st.columns([1,1,1])
+        c_ai1, c_ai2, c_ai3, c_ai4 = st.columns([1,1,1,1])
         with c_ai1:
             grp_sel = st.selectbox("Group", groups, index=0 if groups else 0, key="ai_group_sel")
         with c_ai2:
@@ -4567,6 +4605,33 @@ elif page == "Admin Panel":
                         st.success(msg)
                     else:
                         st.error(msg)
+        with c_ai4:
+            if st.button("Generate All (Group)", key="ai_generate_all_btn"):
+                if not grp_sel:
+                    st.warning("Select a group first.")
+                else:
+                    now = time.time()
+                    last = st.session_state.get('ai_last_bulk', 0)
+                    if now - last < 60:
+                        st.warning("Rate limit: bulk generation allowed once per minute.")
+                    else:
+                        st.session_state['ai_last_bulk'] = now
+                        targets = df_all[(df_all['group_name']==grp_sel) & (~df_all['eliminated'])][['id','name']].to_dict('records')
+                        if not targets:
+                            st.info("No eligible teams in this group.")
+                        else:
+                            prog = st.progress(0.0)
+                            msgs = []
+                            for i, rec in enumerate(targets):
+                                ok, msg = generate_playoff_scenario_gemini(grp_sel, int(rec['id']))
+                                msgs.append((rec['name'], ok, msg))
+                                prog.progress((i+1)/len(targets))
+                                time.sleep(0.5)
+                            ok_count = sum(1 for _,ok,_ in msgs if ok)
+                            st.success(f"Generated {ok_count}/{len(targets)} teams.")
+                            for name, ok, msg in msgs:
+                                if ok: st.caption(f"{name}: {msg}")
+                                else: st.warning(f"{name}: {msg}")
         if tname and grp_sel and tmap.get(tname):
             prev = get_ai_scenario(tmap[tname], grp_sel)
             if prev:
