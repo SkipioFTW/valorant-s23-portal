@@ -2229,6 +2229,108 @@ def team_name_by_id(tid):
         return _team_name_map().get(int(tid)) or f"Team {tid}"
     except Exception:
         return f"Team {tid}"
+def ensure_ai_scenarios_table():
+    conn = get_conn()
+    try:
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS ai_scenarios (
+            team_id INTEGER,
+            group_name TEXT,
+            scenario TEXT,
+            generated_at INTEGER
+        )
+        """)
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        conn.close()
+def save_ai_scenario(team_id, group_name, scenario_text):
+    import time
+    ensure_ai_scenarios_table()
+    conn = get_conn()
+    try:
+        conn.execute("DELETE FROM ai_scenarios WHERE team_id=%s AND group_name=%s", (int(team_id), str(group_name)))
+        conn.execute("INSERT INTO ai_scenarios (team_id, group_name, scenario, generated_at) VALUES (%s, %s, %s, %s)", (int(team_id), str(group_name), scenario_text, int(time.time())))
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        conn.close()
+def get_ai_scenario(team_id, group_name):
+    ensure_ai_scenarios_table()
+    conn = get_conn()
+    try:
+        r = conn.execute("SELECT scenario FROM ai_scenarios WHERE team_id=%s AND group_name=%s", (int(team_id), str(group_name))).fetchone()
+        return r[0] if r else None
+    except Exception:
+        return None
+    finally:
+        conn.close()
+def generate_playoff_scenario_gemini(group_name, team_id):
+    import requests, json, time
+    api_key = get_secret("GEMINI_API_KEY")
+    if not api_key:
+        return False, "Missing GEMINI_API_KEY"
+    df = get_standings()
+    df, _ = annotate_elimination_and_races(df)
+    grp_df = df[df["group_name"]==group_name]
+    if grp_df.empty:
+        return False, "Group not found"
+    tm = grp_df[grp_df["id"]==int(team_id)]
+    if tm.empty:
+        return False, "Team not in group"
+    team_name = str(tm.iloc[0]["name"])
+    remaining = int(tm.iloc[0]["remaining"])
+    points = int(tm.iloc[0]["Points"])
+    pdiff = int(tm.iloc[0]["PD"])
+    sixth_pts = int(grp_df.sort_values(["Points","PD"], ascending=[False,False]).iloc[5]["Points"]) if len(grp_df) >= 6 else 0
+    sm = _get_scheduled_matches_df()
+    opp = sm[(sm["status"]=="scheduled") & ((sm["team1_id"]==int(team_id)) | (sm["team2_id"]==int(team_id))) & (sm["group_name"]==group_name)]
+    opp_id = None
+    if not opp.empty:
+        row = opp.iloc[0]
+        opp_id = int(row["team2_id"]) if int(row["team1_id"])==int(team_id) else int(row["team1_id"])
+    opp_name = team_name_by_id(opp_id) if opp_id else "TBD"
+    prompt = f"""
+You are an analyst for a league with groups. For Group {group_name}, evaluate team "{team_name}".
+Current points: {points}, point diff: {pdiff}, remaining matches: {remaining}, sixth-place points: {sixth_pts}.
+Scheduled opponent: {opp_name}.
+Explain:
+1) Chances to qualify for playoffs (top 6) this week.
+2) Required scenarios (win/loss outcomes for them and close competitors).
+3) Tie-break considerations based on point diff.
+Output a concise, clear explanation suitable for a portal card.
+"""
+    body = {
+        "contents":[{"parts":[{"text": prompt}]}]
+    }
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    try:
+        r = requests.post(url, json=body, timeout=20)
+        if r.status_code == 200:
+            data = r.json()
+            text = data["candidates"][0]["content"]["parts"][0]["text"]
+            save_ai_scenario(team_id, group_name, text)
+            # also write to assets for bot usage
+            try:
+                folder = os.path.join(ROOT_DIR, "assets", "ai_scenarios")
+                if not os.path.exists(folder): os.makedirs(folder)
+                path = os.path.join(folder, f"{group_name}.json")
+                existing = {}
+                if os.path.exists(path):
+                    with open(path, "r", encoding="utf-8") as f:
+                        existing = json.load(f)
+                existing[str(team_id)] = {"team": team_name, "scenario": text, "generated_at": int(time.time())}
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(existing, f, indent=2)
+            except Exception:
+                pass
+            return True, "Scenario generated and stored"
+        else:
+            return False, f"Gemini error: {r.status_code}"
+    except Exception as e:
+        return False, f"Request failed: {str(e)}"
 @st.cache_data(ttl=600)
 def _get_scheduled_matches_df():
     import pandas as pd
@@ -2303,8 +2405,12 @@ def _get_player_leaderboard_cached():
     if supabase:
         try:
             # 1. Get completed matches
-            res_m = supabase.table("matches").select("id").eq("status", "completed").execute()
-            comp_ids = [m['id'] for m in res_m.data] if res_m.data else []
+            res_m = supabase.table("matches").select("id,status").execute()
+            comp_ids = []
+            if res_m.data:
+                for m in res_m.data:
+                    if str(m.get('status','')).lower() == 'completed':
+                        comp_ids.append(m['id'])
             
             if comp_ids:
                 # 2. Get stats for those matches
@@ -2315,6 +2421,16 @@ def _get_player_leaderboard_cached():
                 
                 if res_s.data:
                     stats_df = pd.DataFrame(res_s.data)
+                    # Join status and apply same filter logic as profile view
+                    try:
+                        mdf = pd.DataFrame(res_m.data)
+                        mdf['status'] = mdf['status'].astype(str).str.lower()
+                        stats_df = stats_df.merge(mdf[['id','status']].rename(columns={'id':'match_id'}), on='match_id', how='left')
+                        cols_check = [c for c in ['acs','kills','deaths','assists'] if c in stats_df.columns]
+                        nz = stats_df[cols_check].sum(axis=1) > 0 if cols_check else False
+                        stats_df = stats_df[(stats_df['status'] == 'completed') | (nz)]
+                    except Exception:
+                        pass
                     # 3. Get players and teams
                     res_p = supabase.table("players").select("id, name, riot_id, default_team_id").execute()
                     res_t = supabase.table("teams").select("id, tag").execute()
@@ -4426,6 +4542,35 @@ elif page == "Admin Panel":
                     st.rerun()
         
         st.divider()
+        st.subheader("🧠 Playoff Scenario Generator (AI)")
+        df_all = get_standings()
+        df_all, _rc = annotate_elimination_and_races(df_all)
+        groups = sorted(df_all['group_name'].unique().tolist()) if not df_all.empty else []
+        c_ai1, c_ai2, c_ai3 = st.columns([1,1,1])
+        with c_ai1:
+            grp_sel = st.selectbox("Group", groups, index=0 if groups else 0, key="ai_group_sel")
+        with c_ai2:
+            cand = df_all[(df_all['group_name']==grp_sel) & (~df_all['eliminated'])]
+            tmap = {str(r['name']): int(r['id']) for _, r in cand.iterrows()} if not cand.empty else {}
+            tname = st.selectbox("Team", list(tmap.keys()) if tmap else ["No teams"], index=0, key="ai_team_sel")
+        with c_ai3:
+            if st.button("Generate & Store", key="ai_generate_btn"):
+                # Simple rate-limit: 1 request per 30 seconds
+                now = time.time()
+                last = st.session_state.get('ai_last_gen', 0)
+                if now - last < 30:
+                    st.warning("Rate limit: wait a few seconds before generating again.")
+                else:
+                    st.session_state['ai_last_gen'] = now
+                    ok, msg = generate_playoff_scenario_gemini(grp_sel, tmap.get(tname))
+                    if ok:
+                        st.success(msg)
+                    else:
+                        st.error(msg)
+        if tname and grp_sel and tmap.get(tname):
+            prev = get_ai_scenario(tmap[tname], grp_sel)
+            if prev:
+                st.markdown(f"""<div class="custom-card"><h4 style="margin-top:0;">Stored Scenario</h4><div style="white-space: pre-wrap;">{html.escape(str(prev))}</div></div>""", unsafe_allow_html=True)
 
         if st.session_state.get('role', 'admin') == 'dev':
             st.subheader("Database Reset")

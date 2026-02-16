@@ -783,6 +783,37 @@ async def team_info(interaction: discord.Interaction, name: str):
     finally:
         conn.close()
 
+# --- PLAYOFF SCENARIO (Stored, no API key required) ---
+def fetch_ai_scenario(group: str, team_name: str):
+    try:
+        owner = GH_OWNER
+        repo = GH_REPO
+        branch = os.getenv("GH_BRANCH", "main")
+        if not owner or not repo:
+            return None
+        url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/assets/ai_scenarios/{group}.json"
+        r = requests.get(url, timeout=10)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        for _, entry in data.items():
+            if str(entry.get("team","")).strip().lower() == team_name.strip().lower():
+                return entry.get("scenario")
+        return None
+    except Exception:
+        return None
+
+@bot.tree.command(name="scenario", description="Show stored playoff scenario for a team")
+@discord.app_commands.describe(
+    group="Group Name (e.g. ALPHA)",
+    team="Team name"
+)
+async def scenario(interaction: discord.Interaction, group: str, team: str):
+    sc = fetch_ai_scenario(group, team)
+    if sc:
+        await interaction.response.send_message(f"**{team} — Group {group}**\n{sc}", ephemeral=True)
+    else:
+        await interaction.response.send_message("No stored scenario found. Ask an admin to generate it in the portal.", ephemeral=True)
 # --- CUSTOM REPLIES & REPORTING ---
 
 @bot.tree.command(name="setreply", description="Set a custom reply (Admin Only)")
