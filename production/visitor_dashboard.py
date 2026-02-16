@@ -2269,7 +2269,7 @@ def get_ai_scenario(team_id, group_name):
         conn.close()
 def generate_playoff_scenario_gemini(group_name, team_id):
     api_key = get_secret("GEMINI_API_KEY")
-    model_name = str(get_secret("GEMINI_MODEL", "gemini-1.5-flash-latest"))
+    model_name = str(get_secret("GEMINI_MODEL", "gemini-1.5-flash"))
     if not api_key:
         # Fallback to heuristic if key missing
         text = generate_playoff_scenario_heuristic(group_name, team_id)
@@ -2305,7 +2305,7 @@ Explain:
 3) Tie-break considerations based on point diff.
 Output a concise, clear explanation suitable for a portal card.
 """
-    body = {"contents":[{"parts":[{"text": prompt}]}]}
+    body = {"contents":[{"role":"user","parts":[{"text": prompt}]}]}
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
     try:
         r = requests.post(url, json=body, timeout=20)
@@ -2326,12 +2326,12 @@ Output a concise, clear explanation suitable for a portal card.
             text = generate_playoff_scenario_heuristic(group_name, team_id)
             save_ai_scenario(team_id, group_name, text)
             _write_ai_asset(group_name, team_id, team_name, text)
-            return False, f"Gemini error {r.status_code}; stored heuristic scenario"
+            return True, f"Stored heuristic scenario (Gemini {r.status_code})"
     except Exception as e:
         text = generate_playoff_scenario_heuristic(group_name, team_id)
         save_ai_scenario(team_id, group_name, text)
         _write_ai_asset(group_name, team_id, team_name, text)
-        return False, f"Request failed; stored heuristic scenario: {str(e)}"
+        return True, "Stored heuristic scenario (request failed)"
 
 def generate_playoff_scenario_heuristic(group_name, team_id):
     df = get_standings()
