@@ -5292,52 +5292,71 @@ elif page == "Admin Panel":
                     conn_ins.close()
             st.rerun()
         
-        st.markdown("### Bulk Add From Text")
-        week_bulk = st.selectbox("Week for pasted matches", weeks, index=weeks.index(w) if w in weeks else 0)
-        sched_text = st.text_area("Paste schedule text", height=160, placeholder="——— GROUP ————————— Team A vs Team B ...")
-        if st.button("Parse & Add Matches"):
-            to_add = parse_schedule_text(sched_text or "", week_bulk)
-            if not to_add:
-                st.warning("No matches parsed.")
+        st.markdown("### Bulk Add From Text (Preview)")
+        week_bulk = st.selectbox("Week for pasted matches", weeks, index=weeks.index(w) if w in weeks else 0, key="bulk_week_select")
+        fmt_bulk = st.selectbox("Format for pasted matches", ["BO1","BO3","BO5"], index=1, key="bulk_fmt_select")
+        sched_text = st.text_area("Paste schedule text", height=160, placeholder="——— GROUP ————————— Team A vs Team B ...", key="bulk_text_area")
+        if st.button("Parse Matches", key="bulk_parse_btn"):
+            parsed = parse_schedule_text(sched_text or "", week_bulk)
+            st.session_state['bulk_schedule_preview'] = {"matches": parsed, "week": week_bulk, "format": fmt_bulk}
+        
+        if st.session_state.get('bulk_schedule_preview'):
+            prev = st.session_state['bulk_schedule_preview']
+            matches_prev = prev.get("matches", [])
+            if matches_prev:
+                import pandas as pd
+                df_prev = pd.DataFrame(matches_prev)
+                if not df_prev.empty:
+                    st.dataframe(df_prev[['week','group','t1_name','t2_name']], use_container_width=True, hide_index=True)
             else:
-                added = 0
-                for m in to_add:
-                    id1 = int(m['t1_id'])
-                    id2 = int(m['t2_id'])
-                    group_name = m['group'] if m['group'] and m['group'] != "Unknown" else gsel or None
-                    saved_via_sdk = False
-                    if supabase:
-                        try:
-                            payload = {
-                                "week": int(m['week']), 
-                                "group_name": group_name, 
-                                "status": "scheduled", 
-                                "format": fmt, 
-                                "team1_id": id1, 
-                                "team2_id": id2, 
-                                "score_t1": 0, 
-                                "score_t2": 0, 
-                                "maps_played": 0, 
-                                "match_type": "regular"
-                            }
-                            supabase.table("matches").insert(payload).execute()
-                            saved_via_sdk = True
-                            added += 1
-                        except Exception:
-                            pass
-                    if not saved_via_sdk:
-                        conn_ins = get_conn()
-                        try:
-                            conn_ins.execute("INSERT INTO matches (week, group_name, status, format, team1_id, team2_id, score_t1, score_t2, maps_played, match_type) VALUES (%s, %s, 'scheduled', %s, %s, %s, 0, 0, 0, 'regular')", (int(m['week']), group_name, fmt, id1, id2))
-                            conn_ins.commit()
-                            added += 1
-                        except Exception:
-                            pass
-                        finally:
-                            conn_ins.close()
-                st.success(f"Added {added} matches")
-                st.cache_data.clear()
-                st.rerun()
+                st.info("No valid matches parsed.")
+            
+            cprev1, cprev2 = st.columns(2)
+            with cprev1:
+                if st.button("Confirm Save Parsed Matches", key="bulk_confirm_btn"):
+                    added = 0
+                    for m in matches_prev:
+                        id1 = int(m['t1_id'])
+                        id2 = int(m['t2_id'])
+                        group_name = m['group'] if m['group'] and m['group'] != "Unknown" else gsel or None
+                        saved_via_sdk = False
+                        if supabase:
+                            try:
+                                payload = {
+                                    "week": int(m['week']), 
+                                    "group_name": group_name, 
+                                    "status": "scheduled", 
+                                    "format": prev.get("format", fmt), 
+                                    "team1_id": id1, 
+                                    "team2_id": id2, 
+                                    "score_t1": 0, 
+                                    "score_t2": 0, 
+                                    "maps_played": 0, 
+                                    "match_type": "regular"
+                                }
+                                supabase.table("matches").insert(payload).execute()
+                                saved_via_sdk = True
+                                added += 1
+                            except Exception:
+                                pass
+                        if not saved_via_sdk:
+                            conn_ins = get_conn()
+                            try:
+                                conn_ins.execute("INSERT INTO matches (week, group_name, status, format, team1_id, team2_id, score_t1, score_t2, maps_played, match_type) VALUES (%s, %s, 'scheduled', %s, %s, %s, 0, 0, 0, 'regular')", (int(m['week']), group_name, prev.get("format", fmt), id1, id2))
+                                conn_ins.commit()
+                                added += 1
+                            except Exception:
+                                pass
+                            finally:
+                                conn_ins.close()
+                    st.success(f"Added {added} matches")
+                    st.cache_data.clear()
+                    st.session_state.pop('bulk_schedule_preview', None)
+                    st.rerun()
+            with cprev2:
+                if st.button("Reset Preview", key="bulk_reset_btn"):
+                    st.session_state.pop('bulk_schedule_preview', None)
+                    st.rerun()
 
 elif page == "Substitutions Log":
     import pandas as pd
