@@ -2217,6 +2217,57 @@ def get_standings():
     # Performance fix: Always use cache. Bypassing cache via .run() causes global lag.
     # Cache invalidation should typically happen via actions (mutations), not read checks.
     return _get_standings_cached()
+@st.cache_data(ttl=600)
+def _get_scheduled_matches_df():
+    import pandas as pd
+    df = pd.DataFrame()
+    if supabase:
+        try:
+            res = supabase.table("matches").select("id, week, group_name, status, team1_id, team2_id, match_type").eq("status","scheduled").execute()
+            if res.data:
+                df = pd.DataFrame(res.data)
+        except Exception:
+            pass
+    if df.empty:
+        conn = get_conn()
+        try:
+            df = pd.read_sql("SELECT id, week, group_name, status, team1_id, team2_id, match_type FROM matches WHERE status='scheduled'", conn)
+        except Exception:
+            df = pd.DataFrame()
+        finally:
+            conn.close()
+    return df
+@st.cache_data(ttl=600)
+def get_remaining_matches_counts():
+    import pandas as pd
+    sm = _get_scheduled_matches_df()
+    if sm.empty:
+        return pd.DataFrame(columns=["team_id","remaining"])
+    rows = []
+    for _, r in sm.iterrows():
+        rows.append({"team_id": int(r["team1_id"]), "remaining": 1})
+        rows.append({"team_id": int(r["team2_id"]), "remaining": 1})
+    df = pd.DataFrame(rows)
+    return df.groupby("team_id").sum().reset_index()
+def annotate_elimination_and_races(df):
+    import pandas as pd
+    rem = get_remaining_matches_counts()
+    df = df.copy()
+    df["remaining"] = df["id"].apply(lambda t: int(rem[rem["team_id"]==int(t)]["remaining"].iloc[0]) if not rem.empty and int(t) in rem["team_id"].astype(int).tolist() else 0)
+    out = []
+    races = []
+    for grp in sorted(df["group_name"].unique()):
+        gd = df[df["group_name"]==grp].sort_values(["Points","PD"], ascending=[False,False]).reset_index(drop=True)
+        sixth_pts = int(gd.iloc[5]["Points"]) if len(gd) >= 6 else 0
+        for i, r in enumerate(gd.itertuples()):
+            max_pts = int(r.Points) + int(r.remaining) * 15
+            eliminated = max_pts < sixth_pts
+            out.append({"id": int(r.id), "eliminated": eliminated})
+            if int(r.remaining)==1 and i+1>6 and (int(r.Points)+15)>=sixth_pts:
+                races.append({"group": grp, "team_id": int(r.id)})
+    adf = pd.DataFrame(out)
+    df = df.merge(adf, on="id", how="left")
+    return df, races
 @st.cache_data(ttl=900)
 def _get_player_leaderboard_cached():
     import pandas as pd
@@ -2998,6 +3049,7 @@ if page == "Overview & Standings":
         df = df.merge(hist, left_on='id', right_on='team_id', how='left')
         df['season_count'] = df['season_count'].fillna(1).astype(int)
         
+        df, race_candidates = annotate_elimination_and_races(df)
         groups = sorted(df['group_name'].unique())
         
         for grp in groups:
@@ -3051,7 +3103,7 @@ if page == "Overview & Standings":
             st.markdown("<br>", unsafe_allow_html=True)
             
             # Sort and add Rank column
-            sorted_grp = grp_df[['name', 'Played', 'Wins', 'Losses', 'Points', 'PD']].sort_values(['Points', 'PD'], ascending=False).reset_index(drop=True)
+            sorted_grp = grp_df[['name', 'Played', 'Wins', 'Losses', 'Points', 'PD', 'remaining', 'eliminated']].sort_values(['Points', 'PD'], ascending=False).reset_index(drop=True)
             sorted_grp.index += 1
             sorted_grp.insert(0, 'Rank', sorted_grp.index)
             
@@ -3063,10 +3115,32 @@ if page == "Overview & Standings":
                     "Rank": st.column_config.NumberColumn("Rank", width="small"),
                     "name": "Team",
                     "PD": st.column_config.NumberColumn("Point Diff", help="Points For - Points Against"),
-                    "Points": st.column_config.NumberColumn("Points", help="Match Win (15) or Rounds Won (max 12)")
+                    "Points": st.column_config.NumberColumn("Points", help="Match Win (15) or Rounds Won (max 12)"),
+                    "remaining": st.column_config.NumberColumn("Remaining", help="Scheduled matches left"),
+                    "eliminated": st.column_config.CheckboxColumn("Eliminated")
                 }
             )
             st.caption("🏆 Top 6 teams from each group qualify for Playoffs (Top 2 get R1 BYE).")
+            
+            rc = [c for c in race_candidates if c["group"]==grp]
+            if rc:
+                st.markdown("#### Playoff Races (Last Week)")
+                sm = _get_scheduled_matches_df()
+                for c in rc:
+                    tid = c["team_id"]
+                    row = grp_df[grp_df["id"]==tid].iloc[0] if not grp_df[grp_df["id"]==tid].empty else None
+                    if row is None: continue
+                    mrow = sm[(sm["status"]=="scheduled") & ((sm["team1_id"]==tid) | (sm["team2_id"]==tid))]
+                    opp_id = None
+                    if not mrow.empty:
+                        mr = mrow.iloc[0]
+                        opp_id = int(mr["team2_id"]) if int(mr["team1_id"])==tid else int(mr["team1_id"])
+                    opp_name = df[df["id"]==opp_id]["name"].iloc[0] if opp_id and not df[df["id"]==opp_id].empty else "TBD"
+                    st.markdown(f"""<div class="custom-card" style="margin-bottom:10px;">
+<div style="font-size:0.8rem;color:var(--text-dim);">Group {html.escape(str(grp))}</div>
+<div style="font-weight:bold;">{html.escape(str(row['name']))} vs {html.escape(str(opp_name))}</div>
+<div style="font-size:0.8rem;">Can reach playoffs with a win if results favor.</div>
+</div>""", unsafe_allow_html=True)
             st.markdown("---")
     else:
         st.info("No standings data available yet.")
@@ -4430,7 +4504,7 @@ elif page == "Admin Panel":
                 def_wk_idx = wk_list.index(st.session_state['auto_selected_match_week'])
             except: pass
 
-        wk = st.selectbox("Week", wk_list, index=def_wk_idx) if wk_list else None
+        wk = st.selectbox("Week", wk_list, index=def_wk_idx, key="editor_week_select") if wk_list else None
         if wk is None:
             st.info("No matches yet")
         else:
@@ -5248,14 +5322,14 @@ elif page == "Admin Panel":
         st.subheader("Schedule Manager")
         teams_df = get_teams_list_full()
         weeks = list(range(1, 7)) # 6 weeks of regular season
-        w = st.selectbox("Week", weeks, index=0)
+        w = st.selectbox("Week", weeks, index=0, key="schedule_week_select_main")
         gnames = sorted([x for x in teams_df['group_name'].dropna().unique().tolist()])
-        gsel = st.selectbox("Group", gnames + [""] , index=(0 if gnames else 0))
+        gsel = st.selectbox("Group", gnames + [""] , index=(0 if gnames else 0), key="schedule_group_select")
         tnames = teams_df['name'].tolist()
-        t1 = st.selectbox("Team 1", tnames)
-        t2 = st.selectbox("Team 2", tnames, index=(1 if len(tnames)>1 else 0))
-        fmt = st.selectbox("Format", ["BO1","BO3","BO5"], index=1)
-        if st.button("Add Match"):
+        t1 = st.selectbox("Team 1", tnames, key="schedule_team1_select")
+        t2 = st.selectbox("Team 2", tnames, index=(1 if len(tnames)>1 else 0), key="schedule_team2_select")
+        fmt = st.selectbox("Format", ["BO1","BO3","BO5"], index=1, key="schedule_format_select")
+        if st.button("Add Match", key="schedule_add_match_btn"):
             id1 = int(teams_df[teams_df['name'] == t1].iloc[0]['id'])
             id2 = int(teams_df[teams_df['name'] == t2].iloc[0]['id'])
             
