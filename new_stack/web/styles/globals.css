@@ -1,0 +1,34 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url("https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700&family=Inter:wght@400;600;700&display=swap");
+
+:root {
+  --primary-blue: #3FD1FF;
+  --primary-red: #FF4655;
+  --bg-dark: #0B0E14;
+  --text-main: #EAEAEA;
+  --text-dim: #9AA0A6;
+  --card-bg: rgba(255,255,255,0.03);
+}
+
+html, body, #__next {
+  height: 100%;
+}
+
+body {
+  background: var(--bg-dark);
+  color: var(--text-main);
+  font-family: Inter, system-ui, sans-serif;
+}
+
+.brand-title {
+  font-family: Orbitron, system-ui, sans-serif;
+}
+
+.card {
+  background: var(--card-bg);
+  border: 1px solid rgba(63, 209, 255, 0.15);
+  border-radius: 12px;
+}

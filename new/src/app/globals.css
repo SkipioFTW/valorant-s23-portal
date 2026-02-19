@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+:root {
+  --background: #0F1923;
+  --foreground: #ECE8E1;
+
+  /* Valorant Brand Colors */
+  --val-red: #FF4655;
+  --val-blue: #3FD1FF;
+  --val-dark: #0F1923;
+  --val-deep: #080E14;
+  --val-surface: rgba(31, 41, 51, 0.6);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+
+  --color-val-red: var(--val-red);
+  --color-val-blue: var(--val-blue);
+  --color-val-dark: var(--val-dark);
+  --color-val-deep: var(--val-deep);
+  --color-val-surface: var(--val-surface);
+
+  --font-sans: "Montserrat", var(--font-geist-sans);
+  --font-display: "Orbitron", sans-serif;
+
+  --backdrop-blur-glass: blur(12px);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  overflow-x: hidden;
+}
+
+/* Glassmorphism Utility */
+.glass {
+  background: var(--val-surface);
+  backdrop-filter: var(--backdrop-blur-glass);
+  -webkit-backdrop-filter: var(--backdrop-blur-glass);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.val-gradient-text {
+  background: linear-gradient(90deg, var(--val-red), #FF808A);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}

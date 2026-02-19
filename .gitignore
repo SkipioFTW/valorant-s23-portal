@@ -61,3 +61,6 @@ fix_sequences.py
 apply_notification_schema.py
 bots/discord_bot/info_bot.py
 not_used/
+new_stack/web/node_modules/
+new_stack/web/.next/
+new_stack/web/.env
