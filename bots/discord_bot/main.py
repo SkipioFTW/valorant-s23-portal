@@ -309,14 +309,14 @@ def is_admin_or_captain(interaction: discord.Interaction):
 
 # --- SLASH COMMANDS ---
 
-@bot.tree.command(name="match", description="Submit a match result")
+@bot.tree.command(name="match", description="Submit a match result (support BO3/BO5 with multiple links)")
 @discord.app_commands.describe(
     team_a="Name of Team A", 
     team_b="Name of Team B", 
-    group="Group Name (e.g. ALPHA)", 
-    tracker_link="Tracker.gg Match URL"
+    group="Group Name (e.g. ALPHA or Playoffs)", 
+    tracker_links="One or more Tracker.gg Match URLs (separate by space for BO3/BO5)"
 )
-async def match(interaction: discord.Interaction, team_a: str, team_b: str, group: str, tracker_link: str):
+async def match(interaction: discord.Interaction, team_a: str, team_b: str, group: str, tracker_links: str):
     await interaction.response.defer()
     
     if not is_admin_or_captain(interaction):
@@ -347,32 +347,39 @@ async def match(interaction: discord.Interaction, team_a: str, team_b: str, grou
             await interaction.followup.send(f"❌ Team `{team_b}` not found in database.")
             return
             
-        # 2. VALIDATE SCHEDULED MATCH
+        # 2. VALIDATE SCHEDULED MATCH (Support Regular or Playoff)
         cursor.execute("""
             SELECT id FROM matches 
             WHERE status = 'scheduled' 
-            AND group_name ILIKE %s 
             AND ((team1_id = %s AND team2_id = %s) OR (team1_id = %s AND team2_id = %s))
+            ORDER BY CASE WHEN group_name ILIKE %s THEN 0 ELSE 1 END, id ASC
             LIMIT 1
-        """, (group, t1_id, t2_id, t2_id, t1_id))
+        """, (t1_id, t2_id, t2_id, t1_id, group))
         match_row = cursor.fetchone()
         
         if not match_row:
-            await interaction.followup.send(f"❌ No scheduled match found for `{team_a}` vs `{team_b}` in group `{group}`.")
+            await interaction.followup.send(f"❌ No scheduled match found for `{team_a}` vs `{team_b}` (Group `{group}`).")
             return
 
         # 3. INSERT INTO PENDING
         cursor.execute("""
             INSERT INTO pending_matches (team_a, team_b, group_name, url, submitted_by, status, channel_id, submitter_id)
             VALUES (%s, %s, %s, %s, %s, 'new', %s, %s)
-        """, (team_a, team_b, group, tracker_link, str(interaction.user), str(interaction.channel_id), str(interaction.user.id)))
+        """, (team_a, team_b, group, tracker_links, str(interaction.user), str(interaction.channel_id), str(interaction.user.id)))
         conn.commit()
         
         # Formatted Reply
         embed = discord.Embed(title="✅ Match Submitted", color=discord.Color.green())
-        embed.add_field(name="Matchup", value=f"{team_a} vs {team_b}", inline=False)
+        embed.add_field(name="Matchup", value=f"**{team_a}** vs **{team_b}**", inline=False)
         embed.add_field(name="Group", value=group, inline=True)
-        embed.add_field(name="Tracker Link", value=f"[Link]({tracker_link})", inline=True)
+        
+        links = tracker_links.split()
+        if len(links) > 1:
+            links_val = "\n".join([f"Map {i+1}: [Link]({l})" for i, l in enumerate(links)])
+            embed.add_field(name="Tracker Links", value=links_val, inline=False)
+        else:
+            embed.add_field(name="Tracker Link", value=f"[Link]({tracker_links})", inline=True)
+            
         embed.set_footer(text="Awaiting Admin Approval")
         
         await interaction.followup.send(embed=embed)
