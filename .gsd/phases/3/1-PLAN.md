@@ -17,17 +17,31 @@ Finalize the core analytics commands in Discord, including adding the `/stats` a
 ## Tasks
 
 <task type="auto">
-  <name>Add /stats command</name>
+  <name>Data Pruning & /player_info Cleanup</name>
   <files>
     - new_app_repo/Skipio-bot/cogs/analytics.py
   </files>
   <action>
-    Implement a `/stats` slash command that acts as a wrapper or alias for the existing `player_info` command logic. 
-    - Ensure it supports both `@mention` and name strings.
-    - Ensure it defaults to the latest active season (S24).
+    - Remove non-functional metrics from the `player_info` command and its SQL query: plants, defuses, survived, traded, clutches, ability_casts.
+    - Clean up the embed to remove the empty "Impact" and "Objectives" blocks if they only contained those metrics.
   </action>
-  <verify>Check analytics.py for the new @app_commands.command(name="stats") decorator or wrapper.</verify>
-  <done>Running the bot would show /stats in the slash command list.</done>
+  <verify>Check analytics.py to ensure the SQL query and embed field construction no longer reference the pruned metrics.</verify>
+  <done>/player_info only shows valid data (ACS, K/D, ADR, KAST, HS%, Agent Pool, Recent Form).</done>
+</task>
+
+<task type="auto">
+  <name>Implement Compact /stats snapshot</name>
+  <files>
+    - new_app_repo/Skipio-bot/cogs/analytics.py
+  </files>
+  <action>
+    Implement a `/stats` command that provides a compact snapshot of a player.
+    - Show key metrics: ACS, K/D, ADR, KAST.
+    - Use a simpler embed than `/player_info` for quick reference.
+    - Support @mention and name strings.
+  </action>
+  <verify>Check for @app_commands.command(name="stats") in analytics.py.</verify>
+  <done>/stats displays a high-level summary suitable for quick viewing.</done>
 </task>
 
 <task type="auto">
@@ -37,11 +51,11 @@ Finalize the core analytics commands in Discord, including adding the `/stats` a
     - new_app_repo/Skipio-bot/database.py
   </files>
   <action>
-    - Review all SQL queries in `analytics.py` to ensure they use the `season_id` filtering correctly.
-    - Verify `get_default_season` in `database.py` returns 'S24'.
+    - Review all SQL queries in `analytics.py` to ensure they use the `season_id` filtering correctly and default to S24.
+    - Update `get_default_season` in `database.py` if it still points to S23.
   </action>
-  <verify>Search for 'S24' in database.py and verify SQL season filters in analytics.py.</verify>
-  <done>All commands default to S24 and correctly filter data when a season is specified.</done>
+  <verify>Verify SQL filters and default season value.</verify>
+  <done>Bot defaults to S24 across all analytics commands.</done>
 </task>
 
 ## Success Criteria
