@@ -37,3 +37,19 @@
 
 ### Constraints
 - Must not break existing functionality in `analytics.py`, `ai.py`, or `matches.py`.
+
+## Phase 4: S24 Launch & Final Polish Decisions
+
+**Date:** 2026-04-26
+
+### Scope
+- **Rosters/Ranks**: User confirmed these are already updated. No programmatic changes required.
+- **Schedule**: User confirmed schedule is correct. No changes required.
+- **AI Intelligence**: Focus on absolute reliability for complex queries (standings calculations, rule-based questions, tie-breakers).
+
+### Approach
+- **Verification**: Hybrid approach using both manual checklists (`AUDIT.md`) and automated validation scripts (checking AI/API responses).
+- **Target**: "The best it could be"—optimizing prompt context and internal reasoning.
+
+### Constraints
+- Do not modify existing roster/rank data unless a bug is discovered.

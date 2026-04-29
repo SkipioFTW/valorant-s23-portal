@@ -176,7 +176,7 @@ async def run_in_executor(func, *args):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, functools.partial(func, *args))
 
-def fetch_standings_df(group):
+def fetch_standings_df(group, season="S24"):
     conn = get_conn()
     if not conn: return None
     try:
@@ -213,7 +213,7 @@ def fetch_standings_df(group):
                 END as points_against
             FROM public.matches m
             LEFT JOIN public.match_maps mm ON m.id = mm.match_id AND mm.map_index = 0
-            WHERE m.status = 'completed' AND m.match_type = 'regular'
+            WHERE m.status = 'completed' AND m.match_type = 'regular' AND m.season_id = %s
             
             UNION ALL
             
@@ -248,7 +248,7 @@ def fetch_standings_df(group):
                 END as points_against
             FROM public.matches m
             LEFT JOIN public.match_maps mm ON m.id = mm.match_id AND mm.map_index = 0
-            WHERE m.status = 'completed' AND m.match_type = 'regular'
+            WHERE m.status = 'completed' AND m.match_type = 'regular' AND m.season_id = %s
         )
         SELECT
             t.name,
@@ -265,7 +265,7 @@ def fetch_standings_df(group):
         ORDER BY Points DESC, PD DESC
         """
         # Use pandas with direct psycopg2 connection object (conn.conn)
-        return pd.read_sql_query(query, conn.conn, params=(group,))
+        return pd.read_sql_query(query, conn.conn, params=(season, season, group,))
     except Exception as e:
         print(f"Standings error details: {e}")
         import traceback
@@ -432,22 +432,22 @@ async def player(interaction: discord.Interaction, riot_id: str, rank: str, trac
         conn.close()
 
 @bot.tree.command(name="standings", description="View current group standings")
-@discord.app_commands.describe(group="Group Name (e.g. ALPHA or BETA)")
-async def standings(interaction: discord.Interaction, group: str):
+@discord.app_commands.describe(group="Group Name (e.g. ALPHA or BETA)", season="Season ID (default S24)")
+async def standings(interaction: discord.Interaction, group: str, season: str = "S24"):
     await interaction.response.defer()
     
     # Run blocking DB/Pandas call in executor
-    df = await run_in_executor(fetch_standings_df, group)
+    df = await run_in_executor(fetch_standings_df, group, season)
     
     if df is None:
         await interaction.followup.send("❌ Error fetching standings.")
         return
         
     if df.empty:
-        await interaction.followup.send(f"❌ No standings found for group `{group}`.")
+        await interaction.followup.send(f"❌ No standings found for group `{group}` in season `{season}`.")
         return
 
-    msg = f"🏆 **Group {group.upper()} Standings**\n"
+    msg = f"🏆 **Group {group.upper()} Standings** ({season})\n"
     msg += "```\nRank  Team                         P  W  L  Pts  PD\n"
     for i, row in enumerate(df.itertuples(), start=1):
         name = row.name
@@ -456,8 +456,8 @@ async def standings(interaction: discord.Interaction, group: str):
     await interaction.followup.send(msg)
 
 @bot.tree.command(name="leaderboard", description="Show top players by ACS")
-@discord.app_commands.describe(min_games="Minimum games to include (default 0)")
-async def leaderboard(interaction: discord.Interaction, min_games: int = 0):
+@discord.app_commands.describe(min_games="Minimum games to include (default 0)", season="Season ID (default S24)")
+async def leaderboard(interaction: discord.Interaction, min_games: int = 0, season: str = "S24"):
     await interaction.response.defer()
     conn = get_conn()
     if not conn:
@@ -477,21 +477,21 @@ async def leaderboard(interaction: discord.Interaction, min_games: int = 0):
             JOIN matches m ON msm.match_id = m.id
             JOIN players p ON msm.player_id = p.id
             LEFT JOIN teams t ON p.default_team_id = t.id
-            WHERE m.status = 'completed'
+            WHERE m.status = 'completed' AND m.season_id = %s
             GROUP BY p.id, p.name, p.riot_id, p.uuid, t.tag
             HAVING COUNT(DISTINCT msm.match_id) >= %s
             ORDER BY avg_acs DESC
             LIMIT 10
         """
         cursor = conn.cursor()
-        cursor.execute(query, (min_games,))
+        cursor.execute(query, (season, min_games,))
         rows = cursor.fetchall()
         
         if not rows:
             await interaction.followup.send("No data found.")
             return
 
-        embed = discord.Embed(title="🏆 Leaderboard (ACS)", color=discord.Color.blue())
+        embed = discord.Embed(title=f"🏆 Leaderboard (ACS) - {season}", color=discord.Color.blue())
         for i, (name, riot_id, uuid, team, games, avg_acs, k, d) in enumerate(rows, start=1):
             d_val = d if d and d > 0 else 1
             kd = k / d_val if k else 0
@@ -509,7 +509,8 @@ async def leaderboard(interaction: discord.Interaction, min_games: int = 0):
         conn.close()
 
 @bot.tree.command(name="matches", description="Show upcoming matches")
-async def matches(interaction: discord.Interaction):
+@discord.app_commands.describe(season="Season ID (default S24)")
+async def matches(interaction: discord.Interaction, season: str = "S24"):
     await interaction.response.defer()
     
     conn = get_conn()
@@ -524,18 +525,18 @@ async def matches(interaction: discord.Interaction):
             FROM matches m
             JOIN teams t1 ON m.team1_id = t1.id
             JOIN teams t2 ON m.team2_id = t2.id
-            WHERE m.status != 'completed'
+            WHERE m.status != 'completed' AND m.season_id = %s
             ORDER BY m.week ASC, m.id ASC
             LIMIT 5
         """
-        cursor.execute(query)
+        cursor.execute(query, (season,))
         results = cursor.fetchall()
         
         if not results:
             await interaction.followup.send("📅 No upcoming matches.")
             return
             
-        embed = discord.Embed(title="📅 Upcoming Matches", color=discord.Color.blue())
+        embed = discord.Embed(title=f"📅 Upcoming Matches - {season}", color=discord.Color.blue())
         for week, t1, t2, status, mtype in results:
             embed.add_field(name=f"Week {week} ({mtype})", value=f"**{t1}** vs **{t2}**\nStatus: `{status}`", inline=False)
         await interaction.followup.send(embed=embed)
@@ -545,8 +546,8 @@ async def matches(interaction: discord.Interaction):
         conn.close()
 
 @bot.tree.command(name="player_info", description="Look up a player's detailed stats and history")
-@discord.app_commands.describe(name="Player name, Riot ID or @mention")
-async def player_info(interaction: discord.Interaction, name: str):
+@discord.app_commands.describe(name="Player name, Riot ID or @mention", season="Season ID (default S24)")
+async def player_info(interaction: discord.Interaction, name: str, season: str = "S24"):
     await interaction.response.defer()
     
     conn = get_conn()
@@ -596,8 +597,8 @@ async def player_info(interaction: discord.Interaction, name: str):
                 SUM(msm.assists) as total_a
             FROM match_stats_map msm
             JOIN matches m ON msm.match_id = m.id
-            WHERE msm.player_id = %s AND m.status = 'completed'
-        """, (pid,))
+            WHERE msm.player_id = %s AND m.status = 'completed' AND m.season_id = %s
+        """, (pid, season))
         agg = cursor.fetchone()
         
         maps_played = agg[0] or 0
@@ -612,11 +613,11 @@ async def player_info(interaction: discord.Interaction, name: str):
             SELECT agent, COUNT(*) as count, AVG(acs) as agent_acs
             FROM match_stats_map msm
             JOIN matches m ON msm.match_id = m.id
-            WHERE msm.player_id = %s AND m.status = 'completed' AND agent IS NOT NULL
+            WHERE msm.player_id = %s AND m.status = 'completed' AND m.season_id = %s AND agent IS NOT NULL
             GROUP BY agent
             ORDER BY count DESC, agent_acs DESC
             LIMIT 3
-        """, (pid,))
+        """, (pid, season))
         agents = cursor.fetchall()
         
         # 4. Get Recent 3 Matches
@@ -626,10 +627,10 @@ async def player_info(interaction: discord.Interaction, name: str):
             JOIN matches m ON msm.match_id = m.id
             JOIN teams t1 ON m.team1_id = t1.id
             JOIN teams t2 ON m.team2_id = t2.id
-            WHERE msm.player_id = %s AND m.status = 'completed'
+            WHERE msm.player_id = %s AND m.status = 'completed' AND m.season_id = %s
             ORDER BY m.id DESC
             LIMIT 3
-        """, (pid,))
+        """, (pid, season))
         history = cursor.fetchall()
 
         # Build Embed
@@ -682,8 +683,8 @@ async def player_info(interaction: discord.Interaction, name: str):
         conn.close()
 
 @bot.tree.command(name="team_info", description="Look up a team's roster, map stats, and history")
-@discord.app_commands.describe(name="Team name or Tag")
-async def team_info(interaction: discord.Interaction, name: str):
+@discord.app_commands.describe(name="Team name or Tag", season="Season ID (default S24)")
+async def team_info(interaction: discord.Interaction, name: str, season: str = "S24"):
     await interaction.response.defer()
     
     conn = get_conn()
@@ -724,19 +725,20 @@ async def team_info(interaction: discord.Interaction, name: str):
                    COUNT(*) as played,
                    SUM(CASE WHEN winner_id = %s THEN 1 ELSE 0 END) as wins
             FROM match_maps
-            WHERE (match_id IN (SELECT id FROM matches WHERE team1_id = %s OR team2_id = %s))
+            WHERE (match_id IN (SELECT id FROM matches WHERE (team1_id = %s OR team2_id = %s) AND season_id = %s))
               AND (winner_id IS NOT NULL)
             GROUP BY map_name
             ORDER BY played DESC
-        """, (tid, tid, tid))
+        """, (tid, tid, tid, season))
         maps = cursor.fetchall()
         
         # 4. Get Team Avg ACS
         cursor.execute("""
-            SELECT AVG(acs)
-            FROM match_stats_map
-            WHERE team_id = %s
-        """, (tid,))
+            SELECT AVG(msm.acs)
+            FROM match_stats_map msm
+            JOIN matches m ON msm.match_id = m.id
+            WHERE msm.team_id = %s AND m.season_id = %s
+        """, (tid, season))
         avg_acs = cursor.fetchone()[0] or 0
         
         # 5. Get Recent 3 Match Results
@@ -745,10 +747,10 @@ async def team_info(interaction: discord.Interaction, name: str):
             FROM matches m
             JOIN teams t1 ON m.team1_id = t1.id
             JOIN teams t2 ON m.team2_id = t2.id
-            WHERE (m.team1_id = %s OR m.team2_id = %s) AND m.status = 'completed'
+            WHERE (m.team1_id = %s OR m.team2_id = %s) AND m.status = 'completed' AND m.season_id = %s
             ORDER BY m.id DESC
             LIMIT 3
-        """, (tid, tid))
+        """, (tid, tid, season))
         history = cursor.fetchall()
 
         # Build Embed
@@ -821,6 +823,31 @@ async def scenario(interaction: discord.Interaction, group: str, team: str):
         await interaction.response.send_message(f"**{team} — Group {group}**\n{sc}", ephemeral=True)
     else:
         await interaction.response.send_message("No stored scenario found. Ask an admin to generate it in the portal.", ephemeral=True)
+@bot.tree.command(name="ask_ai", description="Ask the FLV AI Analyst a question about the league")
+@discord.app_commands.describe(question="Your question", season="Season ID (default S24)")
+async def ask_ai(interaction: discord.Interaction, question: str, season: str = "S24"):
+    await interaction.response.defer()
+    
+    api_url = os.getenv("PORTAL_URL", "http://localhost:3000") + "/api/chat"
+    try:
+        payload = {"message": question, "history": [], "seasonId": season}
+        loop = asyncio.get_running_loop()
+        r = await loop.run_in_executor(None, lambda: requests.post(api_url, json=payload, timeout=30))
+        
+        if r.status_code == 200:
+            data = r.json()
+            reply = data.get("reply", "No response from AI.")
+            
+            if len(reply) > 4000:
+                reply = reply[:4000] + "..."
+                
+            embed = discord.Embed(title=f"🤖 AI Analyst ({season})", description=reply, color=discord.Color.purple())
+            await interaction.followup.send(embed=embed)
+        else:
+            await interaction.followup.send(f"❌ API Error: {r.status_code}")
+    except Exception as e:
+        await interaction.followup.send(f"❌ Connection Error to Portal API: {str(e)}")
+
 # --- CUSTOM REPLIES & REPORTING ---
 
 @bot.tree.command(name="setreply", description="Set a custom reply (Admin Only)")

@@ -1,0 +1,54 @@
+Team mapping failed for 'shoelaces' or 'baguette 5'
+Team mapping failed for 'misfits' or 'dry swing academy'
+Team mapping failed for 'the flawk' or 'shoelaces'
+Team mapping failed for 'proximity esports' or 'misfits'
+Team mapping failed for 'sneaky golems' or 'shoelaces'
+Team mapping failed for 'misfits' or 'brawl pandas'
+Team mapping failed for 'shoelaces' or 'ator black'
+Team mapping failed for 'the zenith' or 'misfits'
+Team mapping failed for 'gibby's gooners' or 'shoelaces'
+Team mapping failed for 'chumber mains' or 'misfits'
+Team mapping failed for 'shoelaces' or 'gooner academy'
+Team mapping failed for 'total bad asses' or 'misfits'
+Team mapping failed for 'frag frogs' or 'misfits'
+Team mapping failed for 'misfits' or 'frag frogs'
+Team mapping failed for 'misfits' or 'frag frogs'
+No PG match found for SQLite group: S23_week_2_teams_(1, 32) (Week 2, Teams {32, 1})
+No PG match found for SQLite group: S23_week_2_teams_(39, 47) (Week 2, Teams {39, 47})
+No PG match found for SQLite group: S23_week_2_teams_(25, 29) (Week 2, Teams {25, 29})
+No PG match found for SQLite group: S23_week_2_teams_(15, 42) (Week 2, Teams {42, 15})
+No PG match found for SQLite group: S23_week_2_teams_(2, 44) (Week 2, Teams {2, 44})
+No PG match found for SQLite group: S23_week_3_teams_(20, 47) (Week 3, Teams {20, 47})
+No PG match found for SQLite group: S23_week_3_teams_(23, 41) (Week 3, Teams {41, 23})
+No PG match found for SQLite group: S23_week_4_teams_(31, 45) (Week 4, Teams {45, 31})
+No PG match found for SQLite group: S23_week_4_teams_(25, 30) (Week 4, Teams {25, 30})
+No PG match found for SQLite group: S23_week_4_teams_(11, 28) (Week 4, Teams {11, 28})
+No PG match found for SQLite group: S23_week_5_teams_(30, 49) (Week 5, Teams {49, 30})
+No PG match found for SQLite group: S23_week_6_teams_(23, 32) (Week 6, Teams {32, 23})
+No PG match found for SQLite group: S23_week_6_teams_(19, 25) (Week 6, Teams {25, 19})
+No PG match found for SQLite group: S23_week_6_teams_(14, 38) (Week 6, Teams {38, 14})
+No PG match found for SQLite group: S23_week_7_teams_(16, 43) (Week 7, Teams {16, 43})
+No PG match found for SQLite group: S23_week_7_teams_(1, 14) (Week 7, Teams {1, 14})
+No PG match found for SQLite group: S23_series_1_teams_(10, 17) (Week 7, Teams {17, 10})
+No PG match found for SQLite group: S23_series_2_teams_(14, 46) (Week 7, Teams {46, 14})
+No PG match found for SQLite group: S23_series_3_teams_(4, 44) (Week 7, Teams {44, 4})
+No PG match found for SQLite group: S23_series_4_teams_(30, 38) (Week 7, Teams {38, 30})
+No PG match found for SQLite group: S23_series_7_teams_(13, 45) (Week 7, Teams {13, 45})
+No PG match found for SQLite group: S23_series_5_teams_(2, 8) (Week 7, Teams {8, 2})
+No PG match found for SQLite group: S23_series_8_teams_(28, 29) (Week 7, Teams {28, 29})
+No PG match found for SQLite group: S23_series_9_teams_(17, 21) (Week 8, Teams {17, 21})
+No PG match found for SQLite group: S23_series_10_teams_(38, 40) (Week 8, Teams {40, 38})
+No PG match found for SQLite group: S23_series_11_teams_(3, 12) (Week 8, Teams {3, 12})
+No PG match found for SQLite group: S23_series_12_teams_(16, 29) (Week 8, Teams {16, 29})
+No PG match found for SQLite group: S23_series_15_teams_(14, 20) (Week 8, Teams {20, 14})
+No PG match found for SQLite group: S23_series_13_teams_(2, 34) (Week 8, Teams {2, 34})
+No PG match found for SQLite group: S23_series_14_teams_(4, 5) (Week 8, Teams {4, 5})
+No PG match found for SQLite group: S23_series_16_teams_(13, 18) (Week 8, Teams {18, 13})
+No PG match found for SQLite group: S23_series_17_teams_(20, 38) (Week 9, Teams {20, 38})
+No PG match found for SQLite group: S23_series_18_teams_(12, 13) (Week 9, Teams {12, 13})
+No PG match found for SQLite group: S23_series_19_teams_(5, 17) (Week 9, Teams {17, 5})
+No PG match found for SQLite group: S23_series_20_teams_(2, 29) (Week 9, Teams {2, 29})
+No PG match found for SQLite group: S23_series_21_teams_(2, 12) (Week 10, Teams {2, 12})
+No PG match found for SQLite group: S23_series_22_teams_(17, 20) (Week 10, Teams {17, 20})
+No PG match found for SQLite group: S23_series_23_teams_(2, 20) (Week 11, Teams {2, 20})
+No PG match found for SQLite group: S24_week_2_teams_(16, 69) (Week 2, Teams {16, 69})
