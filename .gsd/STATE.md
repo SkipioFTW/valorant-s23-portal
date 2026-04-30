@@ -1,11 +1,9 @@
 ## Current Position
 - **Milestone**: v2.0-BROADCAST-AND-ELO
-- **Phase**: 4 (completed)
-- **Task**: All tasks complete
-- **Status**: Verified
-
-## Last Session Summary
-Phase 4 executed successfully. 3 plans, 3 tasks completed. The Skipio Indicator formula was implemented in both the Next.js data layer and the Discord bot. A new web leaderboard was added at `/skipio`.
+- **Phase**: 4
+- **Task**: Refinement Planning
+- **Status**: Ready for Refinement Execution
 
 ## Next Steps
-1. Proceed to Phase 5: Polish & Integration
+1. Await user approval of the refinement plan.
+2. Execute Plan 4.4 to add filtering, navigation, and thresholds.
