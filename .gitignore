@@ -65,3 +65,4 @@ new_stack/web/node_modules/
 new_stack/web/.next/
 new_stack/web/.env
 migrate_s24.py
+docs/skipio-indicator.pdf
